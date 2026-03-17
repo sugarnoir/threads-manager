@@ -1,0 +1,28 @@
+appId: com.threadsmanager.app.dev
+productName: Threads Manager Dev
+copyright: Copyright © 2024
+
+extraMetadata:
+  authMode: "dev"
+
+mac:
+  category: public.app-category.social-networking
+  icon: assets/icon.icns
+  target:
+    - dmg
+
+directories:
+  output: release-dev
+  buildResources: assets
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - node_modules/**/*
+  - package.json
+
+extraResources:
+  - from: node_modules/better-sqlite3/build/Release
+    to: better-sqlite3/build/Release
+    filter:
+      - "*.node"

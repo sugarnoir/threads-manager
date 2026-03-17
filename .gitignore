@@ -1,0 +1,8 @@
+node_modules
+dist
+dist-electron
+release
+*.db
+sessions/
+.DS_Store
+CLAUDE.md

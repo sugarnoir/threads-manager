@@ -1,0 +1,160 @@
+import Database from 'better-sqlite3'
+
+export function initializeSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      username        TEXT NOT NULL UNIQUE,
+      display_name    TEXT,
+      session_dir     TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'inactive',
+      avatar_url      TEXT,
+      proxy_url       TEXT,
+      proxy_username  TEXT,
+      proxy_password  TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS posts (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      content     TEXT NOT NULL,
+      media_paths TEXT NOT NULL DEFAULT '[]',
+      status      TEXT NOT NULL DEFAULT 'pending',
+      error_msg   TEXT,
+      posted_at   TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS schedules (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      content      TEXT NOT NULL,
+      media_paths  TEXT NOT NULL DEFAULT '[]',
+      scheduled_at TEXT NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'pending',
+      post_id      INTEGER REFERENCES posts(id),
+      created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS engagements (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      post_url    TEXT NOT NULL,
+      action      TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'pending',
+      error_msg   TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_posts_account_id ON posts(account_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_account_id ON schedules(account_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_scheduled_at ON schedules(scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_engagements_account_id ON engagements(account_id);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS groups (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL UNIQUE,
+      sort_order  INTEGER NOT NULL DEFAULT 0
+    );
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS post_templates (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+      title      TEXT NOT NULL,
+      content    TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_post_templates_account_id ON post_templates(account_id);
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS post_stocks (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      title       TEXT,
+      content     TEXT NOT NULL,
+      image_url   TEXT,
+      sort_order  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_post_stocks_account_id ON post_stocks(account_id);
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS license_keys (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      key          TEXT NOT NULL UNIQUE,
+      enabled      INTEGER NOT NULL DEFAULT 1,
+      note         TEXT,
+      created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT
+    );
+  `)
+
+  // 既存DBへのマイグレーション
+  const cols = db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]
+  const colNames = cols.map((c) => c.name)
+  if (!colNames.includes('proxy_url')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN proxy_url TEXT")
+  }
+  if (!colNames.includes('proxy_username')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN proxy_username TEXT")
+  }
+  if (!colNames.includes('proxy_password')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN proxy_password TEXT")
+  }
+  if (!colNames.includes('group_name')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN group_name TEXT")
+  }
+  if (!colNames.includes('memo')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN memo TEXT")
+  }
+  if (!colNames.includes('follower_count')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN follower_count INTEGER")
+  }
+  if (!colNames.includes('sort_order')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+    // Initialize existing rows with their current rowid order
+    db.exec("UPDATE accounts SET sort_order = id * 1000")
+  }
+  if (!colNames.includes('speed_preset')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN speed_preset TEXT NOT NULL DEFAULT 'normal'")
+  }
+
+  // post_templates テーブルへの account_id カラム追加
+  const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]
+  if (!templateCols.map(c => c.name).includes('account_id')) {
+    db.exec("ALTER TABLE post_templates ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE")
+    db.exec("CREATE INDEX IF NOT EXISTS idx_post_templates_account_id ON post_templates(account_id)")
+  }
+
+  // license_keys テーブルへの user_name カラム追加
+  const licenseKeyCols = db.prepare("PRAGMA table_info(license_keys)").all() as { name: string }[]
+  if (!licenseKeyCols.map(c => c.name).includes('user_name')) {
+    db.exec("ALTER TABLE license_keys ADD COLUMN user_name TEXT")
+  }
+
+  // groups テーブルへの既存 group_name のシード (一度だけ実行)
+  const groupCount = (db.prepare("SELECT COUNT(*) as c FROM groups").get() as { c: number }).c
+  if (groupCount === 0) {
+    const existingGroups = db
+      .prepare("SELECT DISTINCT group_name FROM accounts WHERE group_name IS NOT NULL AND group_name != ''")
+      .all() as { group_name: string }[]
+    const insertGroup = db.prepare("INSERT OR IGNORE INTO groups (name, sort_order) VALUES (?, ?)")
+    existingGroups.forEach((row, i) => insertGroup.run(row.group_name, (i + 1) * 1000))
+  }
+}
