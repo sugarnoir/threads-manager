@@ -18,10 +18,14 @@ import { registerResearchHandlers } from './ipc/research'
 import { registerStockHandlers } from './ipc/stocks'
 import { registerTemplateHandlers } from './ipc/templates'
 import { registerLicenseAdminHandlers } from './ipc/license-admin'
+import { registerAutopostHandlers } from './ipc/autopost'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 
 const isDev = process.env.NODE_ENV === 'development'
+
+// 配布ビルドで WebContentsView が黒くなる GPU 合成バグを防ぐ
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 let mainWindow: BrowserWindow | null = null
 
@@ -55,6 +59,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   registerAuthHandlers()
   registerLicenseAdminHandlers()
+  registerAutopostHandlers()
   registerGroupHandlers()
   registerResearchHandlers()
   registerStockHandlers()

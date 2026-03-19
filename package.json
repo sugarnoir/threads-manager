@@ -1,6 +1,6 @@
 {
   "name": "threads-manager",
-  "version": "1.1.9",
+  "version": "1.0.4",
   "description": "Threads multi-account manager for Mac",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -21,6 +21,7 @@
     "electron-log": "^5.4.3",
     "electron-store": "^7.0.3",
     "electron-updater": "^6.8.3",
+    "lucide-react": "^0.577.0",
     "playwright": "^1.43.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.0"

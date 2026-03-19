@@ -1,5 +1,5 @@
 import { WebContentsView, session, BrowserWindow } from 'electron'
-import { generateFingerprint, writeAccountPreload } from '../fingerprint'
+import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
 import { getContextCookiesIfOpen } from '../playwright/browser-manager'
 import { getSetting, setSetting } from '../db/repositories/settings'
 import { getAccountById } from '../db/repositories/accounts'
@@ -188,10 +188,23 @@ export class ViewManager {
       } catch { /* セッションが破棄済みなどは無視 */ }
     })()
 
-    const fp = generateFingerprint(accountId)
+    // DBからフィンガープリントを取得（なければ生成してDBに保存）
+    const fp = loadOrCreateFingerprint(accountId)
+    const overrideScript = buildOverrideScript(fp)
+
     sess.setUserAgent(fp.userAgent)
+
+    // Accept-Language ヘッダーをフィンガープリントに合わせて設定
+    sess.webRequest.onBeforeSendHeaders(
+      { urls: ['*://*.threads.com/*', '*://*.threads.net/*', '*://*.instagram.com/*'] },
+      (details, cb) => {
+        details.requestHeaders['Accept-Language'] = fp.languages.join(',')
+        cb({ requestHeaders: details.requestHeaders })
+      }
+    )
+
     try {
-      const preloadPath = writeAccountPreload(accountId)
+      const preloadPath = writeAccountPreload(accountId, fp)
       sess.setPreloads([preloadPath])
     } catch { /* skip if file write fails */ }
 
@@ -201,7 +214,17 @@ export class ViewManager {
         nodeIntegration: false,
         contextIsolation: true,
         devTools: false,
+        backgroundThrottling: false,
       },
+    })
+    // 配布ビルドで vibrancy ウィンドウ上の WebContentsView が黒くなるのを防ぐ
+    view.setBackgroundColor('#ffffff')
+
+    // dom-ready 時にも再注入（preload の async 注入を補完）
+    view.webContents.on('dom-ready', () => {
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.executeJavaScript(overrideScript).catch(() => {})
+      }
     })
 
     view.webContents.on('did-navigate', (_event, url) => {
