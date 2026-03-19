@@ -4,6 +4,14 @@ import { postThread } from '../playwright/threads-client'
 import { getAccountById } from '../db/repositories/accounts'
 import { sendDiscordNotification } from '../discord'
 
+export async function sendPost(
+  accountId:   number,
+  content:     string,
+  mediaPaths?: string[]
+): Promise<{ success: boolean; error?: string }> {
+  return postThread(accountId, content, mediaPaths)
+}
+
 export function registerPostHandlers(): void {
   ipcMain.handle('posts:list', (_event, accountId: number) => {
     return getPostsByAccount(accountId)
@@ -13,7 +21,7 @@ export function registerPostHandlers(): void {
     'posts:send',
     async (_event, data: { account_id: number; content: string; media_paths?: string[] }) => {
       const post = createPost(data)
-      const result = await postThread(data.account_id, data.content, data.media_paths)
+      const result = await sendPost(data.account_id, data.content, data.media_paths)
       updatePostStatus(post.id, result.success ? 'posted' : 'failed', result.error)
       if (!result.success && result.error) {
         const account = getAccountById(data.account_id)
@@ -36,7 +44,7 @@ export function registerPostHandlers(): void {
       const results = await Promise.allSettled(
         data.account_ids.map(async (accountId) => {
           const post = createPost({ account_id: accountId, content: data.content, media_paths: data.media_paths })
-          const result = await postThread(accountId, data.content, data.media_paths)
+          const result = await sendPost(accountId, data.content, data.media_paths)
           updatePostStatus(post.id, result.success ? 'posted' : 'failed', result.error)
           return { account_id: accountId, success: result.success, post_id: post.id }
         })

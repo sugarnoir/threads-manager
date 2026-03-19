@@ -28,6 +28,18 @@ export function useAccounts() {
     return result
   }
 
+  const registerAccount = async (options?: {
+    proxy_url?: string
+    proxy_username?: string
+    proxy_password?: string
+  }) => {
+    const result = await api.accounts.register(options)
+    if (result.success) {
+      await refresh()
+    }
+    return result
+  }
+
   const updateProxy = async (data: {
     id: number
     proxy_url: string | null
@@ -127,5 +139,5 @@ export function useAccounts() {
     api.accounts.reorder(updates)
   }
 
-  return { accounts, loading, refresh, addAccount, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, reorderAccounts, deleteAccount, checkStatus, checkAllAccounts }
+  return { accounts, loading, refresh, addAccount, registerAccount, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, reorderAccounts, deleteAccount, checkStatus, checkAllAccounts }
 }

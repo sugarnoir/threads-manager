@@ -1,6 +1,6 @@
 import { ipcMain, BrowserWindow, session } from 'electron'
 
-const THREADS_URL  = 'https://www.threads.com'
+const THREADS_URL   = 'https://www.threads.com'
 const LOAD_TIMEOUT  = 20_000
 const POLL_MS       = 400
 const TARGET_POSTS  = 30
@@ -92,7 +92,7 @@ async function scrollToLoad(win: BrowserWindow, targetCount = TARGET_POSTS, maxS
 
     if (after <= before) {
       staleRounds++
-      if (staleRounds >= 2) break  // two consecutive scrolls with no new content → give up
+      if (staleRounds >= 2) break
     } else {
       staleRounds = 0
     }
@@ -102,16 +102,66 @@ async function scrollToLoad(win: BrowserWindow, targetCount = TARGET_POSTS, maxS
 // ── Extraction scripts ────────────────────────────────────────────────────────
 
 /**
- * Use [data-pressable-container] as the post container (confirmed from DOM debug).
- * Each has exactly one a[href*="/post/"] and one time element.
- * Deduplicate by URL to avoid nested containers.
+ * Shared post-extraction logic.
+ * Returns all currently visible [data-pressable-container] posts with their data.
+ *
+ * Text extraction strategy:
+ *   TreeWalker で生テキストノードを走査し、エンゲージメントエリア
+ *   (button / [role="button"] / svg / time / ユーザーリンク) に含まれる
+ *   ノードを丸ごとスキップする。span 単位でのフィルタよりも精度が高い。
  */
 const EXTRACT_POSTS = /* js */ `
 (function () {
+  // True if a raw text value is engagement metadata (count, relative time, etc.)
+  function _isMeta(t) {
+    if (!t) return true
+    if (/^[\\d,.]+$/.test(t)) return true                  // 純整数: "123", "1,234"
+    if (/^\\d[\\d.]*[kKmMbB万千億]$/.test(t)) return true   // 省略形: "1.2K", "3万"
+    if (/^\\d+[hdwmsy]$/i.test(t)) return true              // 相対時刻: "3h", "5d"
+    return false
+  }
+
+  // True if a text value is an engagement count (number or abbreviated; excludes time).
+  function _isCount(t) {
+    if (!t) return false
+    if (/^[\\d,.]+$/.test(t)) return true
+    if (/^\\d[\\d.]*[kKmMbB万千億]$/.test(t)) return true
+    return false
+  }
+
+  // Extract post body text using TreeWalker over raw text nodes.
+  // Skips nodes whose ancestors are: button, [role="button"], svg, time, or user-profile links.
+  function _extractText(root, userLinks) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null)
+    const parts = []
+    const seen  = new Set()
+    let node
+    while ((node = walker.nextNode())) {
+      const t = node.textContent.trim()
+      if (!t) continue
+      // Walk up to root checking for skip-worthy ancestors
+      let el = node.parentElement
+      let skip = false
+      while (el && el !== root) {
+        const tag  = el.tagName.toLowerCase()
+        const role = el.getAttribute('role') || ''
+        if (tag === 'button' || tag === 'svg' || tag === 'time') { skip = true; break }
+        if (role === 'button') { skip = true; break }
+        if (userLinks.some(a => a === el || a.contains(el)))     { skip = true; break }
+        el = el.parentElement
+      }
+      if (skip) continue
+      if (_isMeta(t)) continue
+      if (seen.has(t)) continue   // 重複テキストノードを除去
+      seen.add(t)
+      parts.push(t)
+    }
+    return parts.join('\\n').trim()
+  }
+
   const results = []
   const seenUrls = new Set()
 
-  // Get all pressable containers that have a post link
   const containers = Array.from(document.querySelectorAll('[data-pressable-container]'))
     .filter(el => el.querySelector('a[href*="/post/"]'))
 
@@ -121,35 +171,32 @@ const EXTRACT_POSTS = /* js */ `
     if (!url || seenUrls.has(url)) continue
     seenUrls.add(url)
 
-    // Text: collect span[dir="auto"] that are NOT inside a[href*="/@"] (exclude usernames)
     const userLinks = Array.from(container.querySelectorAll('a[href*="/@"]'))
-    const textParts = Array.from(container.querySelectorAll('span[dir="auto"]'))
-      .filter(span => !userLinks.some(a => a.contains(span)))
-      .map(s => s.textContent.trim())
-      .filter(Boolean)
-    const text = textParts.join(' ')
+    const text = _extractText(container, userLinks)
     if (!text) continue
 
-    const userLink = container.querySelector('a[href*="/@"]')
-    const username = userLink ? (userLink.href.match(/@([^/?]+)/) || [])[1] || '' : ''
-    const timeEl = container.querySelector('time')
+    const userLink  = container.querySelector('a[href*="/@"]')
+    const username  = userLink ? (userLink.href.match(/@([^/?]+)/) || [])[1] || '' : ''
+    const timeEl    = container.querySelector('time')
     const timestamp = timeEl ? timeEl.getAttribute('datetime') : null
+    const imgEl     = Array.from(container.querySelectorAll('img'))
+      .find(img => img.src && !img.src.startsWith('data:') && (img.naturalWidth > 50 || img.width > 50))
+    const imageUrl  = imgEl ? imgEl.src : null
 
-    // Leaf spans (no child spans) containing only digits = engagement counts
+    // Engagement counts: leaf spans containing only count values.
     const nums = Array.from(container.querySelectorAll('span'))
-      .filter(s => !s.querySelector('span') && /^\\d[\\d,.]*$/.test(s.textContent.trim()))
+      .filter(s => !s.querySelector('span') && _isCount(s.textContent.trim()))
       .map(s => s.textContent.trim())
 
-    results.push({ username, text, url, timestamp,
+    results.push({ username, text, url, timestamp, imageUrl,
       likes: nums[0] || '0', replies: nums[1] || '0', reposts: nums[2] || '0' })
-
-    if (results.length >= 50) break
   }
   return results
 })()
 `
 
-const EXTRACT_PROFILE = /* js */ `
+/** Extract only profile header info (displayName / bio / followerCount). */
+const EXTRACT_PROFILE_INFO = /* js */ `
 (function () {
   const h1 = document.querySelector('h1')
   const displayName = h1 ? h1.textContent.trim() : null
@@ -169,34 +216,79 @@ const EXTRACT_PROFILE = /* js */ `
       if (cand && /[\\d万kKmM]/.test(cand)) { followerCount = cand; break }
     }
   }
-
-  // Recent posts via [data-pressable-container]
-  const results = []
-  const seenUrls = new Set()
-  const containers = Array.from(document.querySelectorAll('[data-pressable-container]'))
-    .filter(el => el.querySelector('a[href*="/post/"]'))
-
-  for (const container of containers) {
-    const postLink = container.querySelector('a[href*="/post/"]')
-    const url = postLink ? postLink.href : ''
-    if (!url || seenUrls.has(url)) continue
-    seenUrls.add(url)
-    const userLinks = Array.from(container.querySelectorAll('a[href*="/@"]'))
-    const textParts = Array.from(container.querySelectorAll('span[dir="auto"]'))
-      .filter(span => !userLinks.some(a => a.contains(span)))
-      .map(s => s.textContent.trim()).filter(Boolean)
-    const text = textParts.join(' ')
-    if (!text) continue
-    const nums = Array.from(container.querySelectorAll('span'))
-      .filter(s => !s.querySelector('span') && /^\\d[\\d,.]*$/.test(s.textContent.trim()))
-      .map(s => s.textContent.trim())
-    results.push({ text, url, likes: nums[0] || '0', replies: nums[1] || '0', reposts: nums[2] || '0' })
-    if (results.length >= 30) break
-  }
-
-  return { displayName, bio, followerCount, recentPosts: results }
+  return { displayName, bio, followerCount }
 })()
 `
+
+// ── Incremental scroll collector (for profile pages) ─────────────────────────
+
+interface ProfilePost {
+  url:       string
+  text:      string
+  likes:     string
+  replies:   string
+  reposts:   string
+  imageUrl:  string | null
+  timestamp: string | null
+}
+
+/**
+ * Threads uses a virtualized list: as you scroll down, older DOM nodes are
+ * removed.  A single extract-after-scroll misses everything above the fold.
+ *
+ * Strategy: extract visible posts, scroll, extract again, accumulate into a
+ * Map<url, post> so duplicates are ignored and removals don't cause data loss.
+ * Stop when we have >= target posts OR two consecutive scrolls yield nothing new.
+ */
+async function scrollAndCollectPosts(
+  win: BrowserWindow,
+  target  = 30,
+  maxScrolls = 40,
+): Promise<ProfilePost[]> {
+  const collected = new Map<string, ProfilePost>()
+
+  const harvest = async (): Promise<void> => {
+    try {
+      const posts: ProfilePost[] = await win.webContents.executeJavaScript(EXTRACT_POSTS)
+      for (const p of posts) {
+        if (p.url && !collected.has(p.url)) collected.set(p.url, p)
+      }
+    } catch { /* page may not be ready */ }
+  }
+
+  // Harvest before first scroll
+  await harvest()
+
+  let staleRounds = 0
+
+  for (let i = 0; i < maxScrolls; i++) {
+    if (collected.size >= target) break
+
+    const before = collected.size
+
+    // instant scroll avoids waiting for smooth-scroll animation
+    await win.webContents.executeJavaScript(
+      `window.scrollBy({ top: window.innerHeight * 2, behavior: 'instant' })`
+    ).catch(() => {})
+
+    // Poll for up to 3 s; stop early once new posts appear
+    const deadline = Date.now() + 3_000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500))
+      await harvest()
+      if (collected.size > before) break
+    }
+
+    if (collected.size <= before) {
+      staleRounds++
+      if (staleRounds >= 2) break   // two consecutive dry scrolls → end of feed
+    } else {
+      staleRounds = 0
+    }
+  }
+
+  return [...collected.values()]
+}
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
 
@@ -299,18 +391,20 @@ export function registerResearchHandlers(): void {
         const username = data.targetUsername.startsWith('@') ? data.targetUsername.slice(1) : data.targetUsername
         await loadURL(win, `${THREADS_URL}/@${username}`)
         await waitForContent(win, 'h1, [data-pressable-container]')
-        await scrollToLoad(win)
-        const profile: {
-          displayName: string | null; bio: string | null; followerCount: string | null
-          recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string }[]
-        } = await win.webContents.executeJavaScript(EXTRACT_PROFILE)
 
-        const likeCounts = profile.recentPosts.map((p) => parseInt(p.likes.replace(/\D/g, '')) || 0).filter(Boolean)
+        // Incremental scroll: collect posts one scroll at a time, accumulate by URL.
+        // This handles Threads' virtual list (DOM nodes removed while scrolling).
+        const recentPosts = await scrollAndCollectPosts(win, 30, 40)
+
+        const profileInfo: { displayName: string | null; bio: string | null; followerCount: string | null } =
+          await win.webContents.executeJavaScript(EXTRACT_PROFILE_INFO)
+
+        const likeCounts = recentPosts.map((p) => parseInt(p.likes.replace(/\D/g, '')) || 0).filter(Boolean)
         const avgLikes = likeCounts.length
           ? Math.round(likeCounts.reduce((a, b) => a + b, 0) / likeCounts.length)
           : null
 
-        return { success: true, data: { username, ...profile, avgLikes } }
+        return { success: true, data: { username, ...profileInfo, avgLikes, recentPosts } }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
       } finally {

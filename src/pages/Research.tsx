@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { Account, api } from '../lib/ipc'
 
 function parseCount(v: string | number): number {
@@ -108,29 +108,67 @@ function HashtagTab({ accountId }: { accountId: number | null }) {
 
 // ── Account analysis tab ──────────────────────────────────────────────────────
 
+type AccountSort = 'default' | 'likes' | 'reposts' | 'replies' | 'newest' | 'oldest'
+
 function AccountTab({ accountId }: { accountId: number | null }) {
-  const [query, setQuery]     = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError]     = useState<string | null>(null)
-  const [result, setResult]   = useState<{
+  const [query, setQuery]         = useState('')
+  const [loading, setLoading]     = useState(false)
+  const [error, setError]         = useState<string | null>(null)
+  const [result, setResult]       = useState<{
     username: string
     displayName: string | null
     bio: string | null
     followerCount: string | null
     avgLikes: number | null
-    recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string }[]
+    recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string; imageUrl: string | null; timestamp: string | null }[]
   } | null>(null)
+  const [sort, setSort]           = useState<AccountSort>('default')
+  const [stockingIdx, setStockingIdx] = useState<number | null>(null)
+  const [stockedUrls, setStockedUrls] = useState<Set<string>>(new Set())
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!accountId || !query.trim()) return
     setLoading(true)
     setError(null)
+    setStockedUrls(new Set())
+    setSort('default')
     const res = await api.research.account({ accountId, targetUsername: query.trim() })
     setLoading(false)
     if (res.success) setResult(res.data)
     else setError(res.error ?? '取得に失敗しました')
   }
+
+  const sorted = useMemo(() => {
+    if (!result) return []
+    const arr = [...result.recentPosts]
+    if (sort === 'likes')   arr.sort((a, b) => parseCount(b.likes)   - parseCount(a.likes))
+    if (sort === 'reposts') arr.sort((a, b) => parseCount(b.reposts) - parseCount(a.reposts))
+    if (sort === 'replies') arr.sort((a, b) => parseCount(b.replies) - parseCount(a.replies))
+    if (sort === 'newest')  arr.sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
+    if (sort === 'oldest')  arr.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''))
+    return arr
+  }, [result, sort])
+
+  const handleAddStock = useCallback(async (
+    post: { text: string; imageUrl: string | null; url: string },
+  ) => {
+    if (!accountId || stockingIdx !== null) return
+    setStockingIdx(0) // any truthy value to block concurrent calls
+    try {
+      const res = await api.stocks.create({
+        account_id: accountId,
+        title: null,
+        content: post.text,
+        image_url: post.imageUrl ?? null,
+      })
+      if (res.success) {
+        setStockedUrls((prev) => new Set([...prev, post.url]))
+      }
+    } finally {
+      setStockingIdx(null)
+    }
+  }, [accountId, stockingIdx])
 
   return (
     <div className="space-y-4">
@@ -179,12 +217,59 @@ function AccountTab({ accountId }: { accountId: number | null }) {
             )}
           </div>
 
-          {/* Recent posts */}
+          {/* Posts */}
           {result.recentPosts.length > 0 && (
             <div className="space-y-2">
-              <p className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">最近の投稿</p>
-              {result.recentPosts.map((p, i) => (
-                <PostCard key={i} text={p.text} likes={p.likes} replies={p.replies} reposts={p.reposts} url={p.url} />
+              <div className="flex items-center justify-between">
+                <p className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">
+                  投稿 ({result.recentPosts.length}件)
+                </p>
+                <SortSelect
+                  value={sort}
+                  onChange={setSort}
+                  options={[
+                    { value: 'default', label: 'デフォルト' },
+                    { value: 'likes',   label: 'いいね順' },
+                    { value: 'reposts', label: 'リポスト順' },
+                    { value: 'replies', label: '返信順' },
+                    { value: 'newest',  label: '新しい順' },
+                    { value: 'oldest',  label: '古い順' },
+                  ]}
+                />
+              </div>
+              {sorted.map((p, i) => (
+                <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 space-y-2">
+                  {p.imageUrl && (
+                    <img
+                      src={p.imageUrl}
+                      alt=""
+                      className="w-full max-h-48 object-cover rounded-lg"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                    />
+                  )}
+                  <p className="text-zinc-200 text-sm leading-relaxed whitespace-pre-wrap line-clamp-5">{p.text}</p>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <Stat label="いいね"   value={p.likes}   color="text-pink-400" />
+                    <Stat label="リポスト" value={p.reposts} color="text-green-400" />
+                    <Stat label="返信"     value={p.replies} color="text-zinc-400" />
+                    {p.timestamp && (
+                      <span className="text-zinc-700 text-[10px]">
+                        {new Date(p.timestamp).toLocaleDateString('ja-JP')}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => handleAddStock(p)}
+                      disabled={stockingIdx !== null || stockedUrls.has(p.url)}
+                      className={`ml-auto px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors ${
+                        stockedUrls.has(p.url)
+                          ? 'bg-green-600/20 text-green-400 cursor-default'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white disabled:opacity-40'
+                      }`}
+                    >
+                      {stockedUrls.has(p.url) ? '追加済み' : stockingIdx !== null ? '追加中...' : 'ストックに追加'}
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           )}

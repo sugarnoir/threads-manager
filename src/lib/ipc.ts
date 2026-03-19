@@ -90,7 +90,7 @@ export interface AccountAnalysis {
   bio: string | null
   followerCount: string | null
   avgLikes: number | null
-  recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string }[]
+  recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string; imageUrl: string | null; timestamp: string | null }[]
 }
 
 export interface SearchPost {
@@ -135,6 +135,21 @@ export interface PostTemplate {
 }
 
 
+export interface AutopostConfig {
+  id:            number
+  account_id:    number
+  enabled:       boolean
+  mode:          'stock' | 'rewrite'
+  min_interval:  number
+  max_interval:  number
+  next_at:       string | null
+  stock_last_id: number | null
+  rewrite_idx:   number
+  rewrite_texts: string[]
+  created_at:    string
+  updated_at:    string
+}
+
 export interface LicenseRow {
   key: string
   is_active: boolean
@@ -154,6 +169,11 @@ declare global {
       accounts: {
         list: () => Promise<Account[]>
         add: (options?: {
+          proxy_url?: string
+          proxy_username?: string
+          proxy_password?: string
+        }) => Promise<{ success: boolean; account?: Account; error?: string }>
+        register: (options?: {
           proxy_url?: string
           proxy_username?: string
           proxy_password?: string
@@ -258,6 +278,18 @@ declare global {
         account: (data: { accountId: number; targetUsername: string }) => Promise<{ success: boolean; data: AccountAnalysis; error?: string }>
         keyword: (data: { accountId: number; keyword: string }) => Promise<{ success: boolean; data: SearchPost[]; error?: string }>
         competitive: (data: { accountId: number; keyword: string }) => Promise<{ success: boolean; data: CompetitivePost[]; error?: string }>
+      }
+      autopost: {
+        get:       (accountId: number) => Promise<AutopostConfig | null>
+        save:      (data: {
+          account_id:    number
+          enabled:       boolean
+          mode:          'stock' | 'rewrite'
+          min_interval:  number
+          max_interval:  number
+          rewrite_texts: string[]
+        }) => Promise<AutopostConfig>
+        resetNext: (accountId: number) => Promise<{ success: boolean }>
       }
       on: (channel: string, callback: (...args: unknown[]) => void) => () => void
     }

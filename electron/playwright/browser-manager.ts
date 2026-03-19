@@ -1,7 +1,7 @@
 import { chromium, BrowserContext, Cookie } from 'playwright'
 import fs from 'fs'
 import { getAccountById } from '../db/repositories/accounts'
-import { generateFingerprint, buildOverrideScript } from '../fingerprint'
+import { loadOrCreateFingerprint, buildOverrideScript } from '../fingerprint'
 
 export interface ProxyConfig {
   server: string
@@ -39,7 +39,13 @@ export function getActiveContextIds(): number[] {
 }
 
 const BASE_LAUNCH_OPTIONS = {
-  args: ['--no-sandbox'],
+  args: [
+    '--no-sandbox',
+    // WebRTC IPリーク対策: パブリックIPのみ使用（デフォルト）
+    // プロキシ使用時は getContext 内でアカウント固有の引数を追加する
+    '--webrtc-ip-handling-policy=default_public_interface_only',
+    '--disable-features=WebRtcHideLocalIpsWithMdns',
+  ],
 }
 
 /**
@@ -56,7 +62,7 @@ export async function getContext(accountId: number, headless = false): Promise<B
 
   fs.mkdirSync(account.session_dir, { recursive: true })
 
-  const fp = generateFingerprint(accountId)
+  const fp = loadOrCreateFingerprint(accountId)
 
   const proxy: ProxyConfig | undefined = account.proxy_url
     ? {
@@ -66,8 +72,13 @@ export async function getContext(accountId: number, headless = false): Promise<B
       }
     : undefined
 
+  // プロキシ使用時は非プロキシUDPを全面無効にして WebRTC 経由の IP リークを防ぐ
+  const webrtcArgs = proxy
+    ? ['--webrtc-ip-handling-policy=disable_non_proxied_udp']
+    : []
+
   const ctx = await chromium.launchPersistentContext(account.session_dir, {
-    ...BASE_LAUNCH_OPTIONS,
+    args: [...BASE_LAUNCH_OPTIONS.args, ...webrtcArgs],
     headless,
     userAgent: fp.userAgent,
     locale: fp.language,

@@ -123,3 +123,16 @@ export function reorderAccounts(
 export function deleteAccount(id: number): void {
   getDb().prepare('DELETE FROM accounts WHERE id = ?').run(id)
 }
+
+export function getAccountFingerprint(id: number): string | null {
+  const row = getDb()
+    .prepare('SELECT fingerprint FROM accounts WHERE id = ?')
+    .get(id) as { fingerprint: string | null } | undefined
+  return row?.fingerprint ?? null
+}
+
+export function setAccountFingerprint(id: number, fingerprintJson: string): void {
+  getDb()
+    .prepare("UPDATE accounts SET fingerprint = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(fingerprintJson, id)
+}

@@ -1,0 +1,112 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # ── Step 1: package.json の version からドラフトリリースを事前作成 ──────────
+  # 後続の Mac / Windows ビルドが同時にリリースを作ろうとする競合を防ぐ
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
+      tag: ${{ steps.pkg.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pkg
+        name: Read version from package.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create draft release (idempotent)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.pkg.outputs.version }}
+          name: v${{ steps.pkg.outputs.version }}
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ── Step 2a: macOS arm64 DMG ───────────────────────────────────────────────
+  build-mac:
+    needs: prepare
+    runs-on: macos-14   # Apple Silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Build frontend + Electron
+        run: npm run build
+
+      - name: Package arm64 DMG
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # コード署名なし（証明書がない場合はスキップ）
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          npx electron-builder \
+            --config electron-builder.prod.yml \
+            --arm64 \
+            --publish always
+
+  # ── Step 2b: Windows x64 EXE ──────────────────────────────────────────────
+  build-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Build frontend + Electron
+        run: npm run build
+
+      - name: Package Windows x64 EXE
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          npx electron-builder `
+            --config electron-builder.win.yml `
+            --win `
+            --x64 `
+            --publish always
+
+  # ── Step 3: 両ビルド完了後にドラフトを公開 ────────────────────────────────
+  publish:
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release edit "v$VERSION" \
+            --draft=false \
+            --repo sugarnoir/threads-manager

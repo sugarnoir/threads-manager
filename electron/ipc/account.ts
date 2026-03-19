@@ -16,6 +16,7 @@ import {
 } from '../db/repositories/accounts'
 import { setSetting } from '../db/repositories/settings'
 import { checkLoginStatus, checkAccountStatus } from '../playwright/threads-client'
+import { createAndSaveFingerprint } from '../fingerprint'
 import { closeContext, reloadContext } from '../playwright/browser-manager'
 import { getViewManager } from '../browser-views/view-manager'
 import { sendDiscordNotification } from '../discord'
@@ -47,6 +48,8 @@ export function registerAccountHandlers(): void {
           proxy_username: options?.proxy_username,
           proxy_password: options?.proxy_password,
         })
+        // アカウント作成直後にフィンガープリントを固定
+        createAndSaveFingerprint(account.id)
         updateAccountStatus(account.id, 'active')
 
         // Copy login session cookies into the permanent account partition
@@ -61,6 +64,56 @@ export function registerAccountHandlers(): void {
             event: 'login_failed',
             username: 'unknown',
             message: 'ログインに失敗しました',
+            detail: msg,
+          }).catch(() => {})
+        }
+        return { success: false, error: msg }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'accounts:register',
+    async (
+      _event,
+      options?: { proxy_url?: string; proxy_username?: string; proxy_password?: string }
+    ) => {
+      const tempKey  = `temp-${Date.now()}`
+      const sessionDir = path.join(
+        app.getPath('userData'),
+        'sessions',
+        `account-${Date.now()}`
+      )
+
+      try {
+        const viewManager = getViewManager()
+        const { username } = await viewManager.startRegister(
+          tempKey,
+          options?.proxy_url,
+          options?.proxy_username,
+          options?.proxy_password,
+        )
+
+        const account = createAccount({
+          username,
+          session_dir: sessionDir,
+          proxy_url: options?.proxy_url,
+          proxy_username: options?.proxy_username,
+          proxy_password: options?.proxy_password,
+        })
+        // アカウント作成直後にフィンガープリントを固定
+        createAndSaveFingerprint(account.id)
+        updateAccountStatus(account.id, 'active')
+        await viewManager.migrateLoginSession(tempKey, account.id)
+
+        return { success: true, account: { ...account, status: 'active' } }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!msg.includes('キャンセル')) {
+          sendDiscordNotification({
+            event: 'login_failed',
+            username: 'unknown',
+            message: 'アカウント登録に失敗しました',
             detail: msg,
           }).catch(() => {})
         }
@@ -275,4 +328,5 @@ export function registerAccountHandlers(): void {
 
     menu.popup({ window: win })
   })
+
 }

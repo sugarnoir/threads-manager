@@ -105,6 +105,24 @@ export function initializeSchema(db: Database.Database): void {
     );
   `)
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS autopost_configs (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id    INTEGER NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+      enabled       INTEGER NOT NULL DEFAULT 0,
+      mode          TEXT NOT NULL DEFAULT 'stock',
+      min_interval  INTEGER NOT NULL DEFAULT 60,
+      max_interval  INTEGER NOT NULL DEFAULT 120,
+      next_at       TEXT,
+      stock_last_id INTEGER,
+      rewrite_idx   INTEGER NOT NULL DEFAULT 0,
+      rewrite_texts TEXT NOT NULL DEFAULT '[]',
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_autopost_configs_account_id ON autopost_configs(account_id);
+  `)
+
   // 既存DBへのマイグレーション
   const cols = db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]
   const colNames = cols.map((c) => c.name)
@@ -133,6 +151,9 @@ export function initializeSchema(db: Database.Database): void {
   }
   if (!colNames.includes('speed_preset')) {
     db.exec("ALTER TABLE accounts ADD COLUMN speed_preset TEXT NOT NULL DEFAULT 'normal'")
+  }
+  if (!colNames.includes('fingerprint')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN fingerprint TEXT")
   }
 
   // post_templates テーブルへの account_id カラム追加

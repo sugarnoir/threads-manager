@@ -83,7 +83,7 @@ function LicenseKeyScreen({ onLogin }: { onLogin: () => void }) {
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { accounts, loading, addAccount, deleteAccount, checkStatus, checkAllAccounts, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, reorderAccounts } =
+  const { accounts, loading, addAccount, registerAccount, deleteAccount, checkStatus, checkAllAccounts, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, reorderAccounts } =
     useAccounts()
 
   const [activeAccountId, setActiveAccountId] = useState<number | null>(null)
@@ -120,14 +120,17 @@ export default function App() {
   }
 
   const handleAddConfirm = async (
-    proxy: { proxy_url: string; proxy_username: string; proxy_password: string } | null
+    proxy: { proxy_url: string; proxy_username: string; proxy_password: string } | null,
+    mode: 'login' | 'register'
   ) => {
     setShowAddModal(false)
     setAdding(true)
-    const result = await addAccount(proxy ?? undefined)
+    const result = mode === 'register'
+      ? await registerAccount(proxy ?? undefined)
+      : await addAccount(proxy ?? undefined)
     setAdding(false)
     if (!result.success) {
-      alert(`追加失敗: ${result.error}`)
+      alert(`${mode === 'register' ? '登録' : '追加'}失敗: ${result.error}`)
     } else if (result.account) {
       setActiveAccountId(result.account.id)
     }

@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxy_username?: string
       proxy_password?: string
     }) => ipcRenderer.invoke('accounts:add', options),
+    register: (options?: {
+      proxy_url?: string
+      proxy_username?: string
+      proxy_password?: string
+    }) => ipcRenderer.invoke('accounts:register', options),
     updateProxy: (data: {
       id: number
       proxy_url: string | null
@@ -157,6 +162,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     check:  () => ipcRenderer.invoke('auth:check'),
     verify: (key: string) => ipcRenderer.invoke('auth:verify', key),
     logout: () => ipcRenderer.invoke('auth:logout'),
+  },
+
+  // Autopost
+  autopost: {
+    get:       (accountId: number) => ipcRenderer.invoke('autopost:get', accountId),
+    save:      (data: {
+      account_id:    number
+      enabled:       boolean
+      mode:          'stock' | 'rewrite'
+      min_interval:  number
+      max_interval:  number
+      rewrite_texts: string[]
+    }) => ipcRenderer.invoke('autopost:save', data),
+    resetNext: (accountId: number) => ipcRenderer.invoke('autopost:reset-next', accountId),
   },
 
   // Events

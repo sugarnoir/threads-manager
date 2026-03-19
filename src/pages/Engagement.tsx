@@ -24,7 +24,7 @@ const statusConfig = {
 function isValidThreadsUrl(url: string): boolean {
   try {
     const u = new URL(url)
-    return u.hostname.includes('threads.net') && u.pathname.includes('/post/')
+    return (u.hostname.includes('threads.net') || u.hostname.includes('threads.com')) && u.pathname.includes('/post/')
   } catch {
     return false
   }
@@ -134,7 +134,7 @@ export function Engagement({ accounts }: Props) {
           type="url"
           value={postUrl}
           onChange={(e) => setPostUrl(e.target.value)}
-          placeholder="https://www.threads.net/@username/post/xxxxxxxx"
+          placeholder="https://www.threads.net/@username/post/xxxxxxxx または threads.com/..."
           className={`w-full border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
             postUrl && !urlValid
               ? 'border-red-300 bg-red-50'
@@ -143,7 +143,7 @@ export function Engagement({ accounts }: Props) {
         />
         {postUrl && !urlValid && (
           <p className="text-xs text-red-500 mt-1">
-            Threads の投稿 URL を入力してください（例: https://www.threads.net/@user/post/xxxxx）
+            Threads の投稿 URL を入力してください（threads.net または threads.com）
           </p>
         )}
       </div>

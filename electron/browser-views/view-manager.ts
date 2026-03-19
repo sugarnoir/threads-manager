@@ -220,6 +220,16 @@ export class ViewManager {
     // 配布ビルドで vibrancy ウィンドウ上の WebContentsView が黒くなるのを防ぐ
     view.setBackgroundColor('#ffffff')
 
+    // WebRTC IPリーク対策
+    // プロキシ使用時: 非プロキシ UDP を全面無効（WebRTC 経由でリアル IP が漏れない）
+    // プロキシなし: パブリック IP のみ使用（ローカル LAN アドレスを隠蔽）
+    try {
+      const acct = getAccountById(accountId)
+      view.webContents.setWebRTCIPHandlingPolicy(
+        acct?.proxy_url ? 'disable_non_proxied_udp' : 'default_public_interface_only'
+      )
+    } catch { /* Electron バージョン差異に備えて無視 */ }
+
     // dom-ready 時にも再注入（preload の async 注入を補完）
     view.webContents.on('dom-ready', () => {
       if (!view.webContents.isDestroyed()) {
@@ -359,6 +369,146 @@ export class ViewManager {
             }
           }
         } catch { /* popup が 800ms 待機中に破棄された場合は username='unknown' で続行 */ }
+
+        if (!popup.isDestroyed()) popup.close()
+        resolve({ username })
+      }
+
+      pollInterval = setInterval(checkCookies, 1000)
+      popup.webContents.on('did-navigate',         () => checkCookies())
+      popup.webContents.on('did-navigate-in-page', () => checkCookies())
+    })
+  }
+
+  /** Instagram の登録ページをプロキシ付きで開き、sessionid を検出したら完了 */
+  async startRegister(
+    tempKey: string,
+    proxyUrl?: string | null,
+    proxyUsername?: string | null,
+    proxyPassword?: string | null,
+  ): Promise<{ username: string }> {
+    const INSTAGRAM_SIGNUP_URL = 'https://www.instagram.com/accounts/emailsignup/'
+    const partition = `persist:login-${tempKey}`
+    const sess = session.fromPartition(partition)
+
+    // プロキシを適用してから URL を読み込む
+    if (proxyUrl) {
+      await sess.setProxy({ proxyRules: proxyUrl }).catch(() => {})
+    }
+
+    const mainBounds = this.mainWindow.getBounds()
+    const popupW = 860
+    const popupH = 700
+    const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
+    const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
+
+    const popup = new BrowserWindow({
+      width: popupW, height: popupH, x, y,
+      parent: this.mainWindow,
+      modal: false,
+      title: 'Instagramアカウントを作成',
+      titleBarStyle: 'default',
+      webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
+    })
+
+    // プロキシ認証が必要な場合に自動応答
+    if (proxyUsername) {
+      popup.webContents.on('login', (event, _details, authInfo, callback) => {
+        if (authInfo.isProxy) {
+          event.preventDefault()
+          callback(proxyUsername, proxyPassword ?? '')
+        }
+      })
+    }
+
+    popup.loadURL(INSTAGRAM_SIGNUP_URL)
+    popup.focus()
+
+    return new Promise((resolve, reject) => {
+      let done = false
+      let pollInterval: ReturnType<typeof setInterval> | null = null
+
+      const cleanup = () => {
+        clearTimeout(timer)
+        if (pollInterval) clearInterval(pollInterval)
+        if (!popup.isDestroyed()) popup.close()
+      }
+
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        cleanup()
+        reject(new Error('登録タイムアウト (10分)'))
+      }, 10 * 60 * 1000)
+
+      popup.on('closed', () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        if (pollInterval) clearInterval(pollInterval)
+        reject(new Error('ログインがキャンセルされました'))
+      })
+
+      const checkCookies = async () => {
+        if (done) return
+
+        let hasSession = false
+        try {
+          if (popup.isDestroyed()) return
+          const cookies = await popup.webContents.session.cookies.get({})
+          if (done) return
+          hasSession = cookies.some(
+            (c) =>
+              c.name === 'sessionid' &&
+              c.value.length > 0 &&
+              (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
+          )
+        } catch { return }
+
+        if (!hasSession) return
+
+        done = true
+        clearTimeout(timer)
+        if (pollInterval) clearInterval(pollInterval)
+
+        await new Promise<void>((r) => setTimeout(r, 800))
+
+        let username = 'unknown'
+        const NON_USERNAME_PATHS = new Set(['accounts', 'explore', 'p', 'reel', 'reels', 'stories', 'direct', 'tv'])
+        try {
+          if (!popup.isDestroyed()) {
+            const currentUrl = popup.webContents.getURL()
+            // Threads URL
+            const threadsMatch = currentUrl.match(/threads\.(?:com|net)\/@([^/?#]+)/)
+            if (threadsMatch) {
+              username = threadsMatch[1]
+            } else {
+              // Instagram URL
+              const igMatch = currentUrl.match(/instagram\.com\/([^/?#@]+)(?:\/|$)/)
+              if (igMatch && !NON_USERNAME_PATHS.has(igMatch[1])) {
+                username = igMatch[1]
+              } else {
+                username = await popup.webContents.executeJavaScript(`
+                  (function() {
+                    // Threads プロフィールリンク
+                    const ta = document.querySelector('a[href*="threads.net/@"], a[href*="threads.com/@"]');
+                    if (ta) { const m = ta.getAttribute('href').match(/@([^/?#]+)/); if (m) return m[1]; }
+                    // Instagram プロフィールリンク
+                    const ia = document.querySelector('a[href*="instagram.com/"]');
+                    if (ia) {
+                      const m = ia.getAttribute('href').match(/instagram\\.com\\/([^/?#@]+)/);
+                      if (m && !['accounts','explore','p','reel','reels','stories','direct'].includes(m[1])) return m[1];
+                    }
+                    // タイトルから
+                    const m = document.title.match(/@([^\\s|]+)/);
+                    if (m) return m[1];
+                    return 'unknown';
+                  })()
+                `)
+              }
+            }
+          }
+        } catch { /* popup が閉じた場合は username='unknown' で続行 */ }
 
         if (!popup.isDestroyed()) popup.close()
         resolve({ username })

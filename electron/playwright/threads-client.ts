@@ -374,29 +374,58 @@ export async function likePost(
   return withContext(accountId, async (ctx) => {
     const page = await ctx.newPage()
     try {
-      await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      console.log(`[likePost] account=${accountId} url=${postUrl}`)
 
-      if (!isLoggedInUrl(page.url())) {
+      await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
+
+      const currentUrl = page.url()
+      console.log(`[likePost] navigated to: ${currentUrl}`)
+
+      if (!isLoggedInUrl(currentUrl)) {
+        console.log(`[likePost] not logged in, url=${currentUrl}`)
         return { status: 'failed', error: 'ログインが必要です' }
       }
 
-      // ── 操作前ランダムスクロール & 待機 ─────────────────────────────────────
       await randomScroll(page, cfg)
       await randomDelay(page, cfg)
 
-      const likeBtn = await page.waitForSelector(
-        ['[aria-label="いいね"]', '[aria-label="Like"]',
-         '[aria-label="Unlike"]', '[aria-label="いいね済み"]'].join(', '),
-        { timeout: 10_000 }
-      )
-      const label = await likeBtn.getAttribute('aria-label')
-      if (label === 'Unlike' || label === 'いいね済み') {
+      // いいねボタンは div[role="button"] で aria-label を持たない。
+      // 内部の svg[aria-label="Like"] / svg[aria-label*="いいね"] を手がかりに
+      // :has() で親の div[role="button"] を特定してクリックする。
+      const LIKE_BTN_SELECTOR = [
+        'div[role="button"]:has(svg[aria-label="Like"])',
+        'div[role="button"]:has(svg[aria-label="Unlike"])',
+        'div[role="button"]:has(svg[aria-label*="いいね"])',
+      ].join(', ')
+
+      const likeBtn = await page.waitForSelector(LIKE_BTN_SELECTOR, { timeout: 12_000 }).catch(() => null)
+      console.log(`[likePost] like button: ${likeBtn ? 'found' : 'not found'}`)
+
+      if (!likeBtn) {
+        console.log(`[likePost] FAILED: like button not found`)
+        return { status: 'failed', error: `いいねボタンが見つかりません (URL: ${currentUrl})` }
+      }
+
+      // 内部 SVG の aria-label でいいね済みか判定
+      const svgLabel = await likeBtn.evaluate((el) => {
+        const svg = el.querySelector('svg[aria-label]')
+        return svg ? svg.getAttribute('aria-label') ?? '' : ''
+      }).catch(() => '')
+      console.log(`[likePost] svg label="${svgLabel}"`)
+
+      if (svgLabel.includes('Unlike') || svgLabel.includes('いいね済み')) {
         return { status: 'already_done' }
       }
 
       await likeBtn.click()
       await shortDelay(page, cfg)
+      console.log(`[likePost] done`)
       return { status: 'done' }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[likePost] exception: ${msg}`)
+      return { status: 'failed', error: msg }
     } finally {
       await page.close().catch(() => {})
     }
@@ -414,6 +443,7 @@ export async function repostPost(
     const page = await ctx.newPage()
     try {
       await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
 
       if (!isLoggedInUrl(page.url())) {
         return { status: 'failed', error: 'ログインが必要です' }
@@ -423,22 +453,35 @@ export async function repostPost(
       await randomScroll(page, cfg)
       await randomDelay(page, cfg)
 
-      const repostBtn = await page.waitForSelector(
-        ['[aria-label="リポスト"]', '[aria-label="Repost"]',
-         '[aria-label="Undo repost"]', '[aria-label="リポスト済み"]'].join(', '),
-        { timeout: 10_000 }
-      )
-      const label = await repostBtn.getAttribute('aria-label')
-      if (label === 'Undo repost' || label === 'リポスト済み') {
+      // リポストボタンも同様に div[role="button"]:has(svg[...]) で取得
+      const REPOST_BTN_SELECTOR = [
+        'div[role="button"]:has(svg[aria-label="Repost"])',
+        'div[role="button"]:has(svg[aria-label="Undo repost"])',
+        'div[role="button"]:has(svg[aria-label*="リポスト"])',
+        'div[role="button"]:has(svg[aria-label*="再投稿"])',
+      ].join(', ')
+
+      const repostBtn = await page.waitForSelector(REPOST_BTN_SELECTOR, { timeout: 12_000 }).catch(() => null)
+
+      if (!repostBtn) {
+        return { status: 'failed', error: `リポストボタンが見つかりません (URL: ${page.url()})` }
+      }
+
+      const svgLabel = await repostBtn.evaluate((el) => {
+        const svg = el.querySelector('svg[aria-label]')
+        return svg ? svg.getAttribute('aria-label') ?? '' : ''
+      }).catch(() => '')
+
+      if (svgLabel.includes('Undo repost') || svgLabel.includes('リポスト済み')) {
         return { status: 'already_done' }
       }
 
       await repostBtn.click()
 
-      // 確認モーダルが出る場合
+      // 確認モーダルが出る場合（モーダル内ボタンも同様の構造）
       try {
         const confirmBtn = await page.waitForSelector(
-          '[aria-label="リポスト"], [aria-label="Repost"]',
+          'div[role="button"]:has(svg[aria-label="Repost"]), div[role="button"]:has(svg[aria-label*="リポスト"])',
           { timeout: 3_000 }
         )
         await confirmBtn.click()
@@ -446,6 +489,8 @@ export async function repostPost(
 
       await shortDelay(page, cfg)
       return { status: 'done' }
+    } catch (err) {
+      return { status: 'failed', error: err instanceof Error ? err.message : String(err) }
     } finally {
       await page.close().catch(() => {})
     }

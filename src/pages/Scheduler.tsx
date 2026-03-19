@@ -1,16 +1,310 @@
-import { useState, useEffect } from 'react'
-import { api, Schedule, Account } from '../lib/ipc'
+import { useState, useEffect, useCallback } from 'react'
+import { api, Schedule, Account, AutopostConfig } from '../lib/ipc'
 import { StatusBadge } from '../components/StatusBadge'
 
 interface Props {
   accounts: Account[]
 }
 
-export function Scheduler({ accounts }: Props) {
+// ── Autopost tab ──────────────────────────────────────────────────────────────
+
+function AutopostTab({ accounts }: { accounts: Account[] }) {
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
+  const [config, setConfig] = useState<AutopostConfig | null>(null)
+  const [form, setForm] = useState({
+    enabled:       false,
+    mode:          'stock' as 'stock' | 'rewrite',
+    min_interval:  60,
+    max_interval:  120,
+    rewrite_texts: [] as string[],
+  })
+  const [newText, setNewText]     = useState('')
+  const [saving, setSaving]       = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [hasApiKey, setHasApiKey] = useState(false)
+
+  useEffect(() => {
+    api.settings.getAll().then((s) => {
+      setHasApiKey(!!s.anthropic_api_key?.trim())
+    })
+  }, [])
+
+  const loadConfig = useCallback(async (accountId: number) => {
+    const cfg = await api.autopost.get(accountId)
+    setConfig(cfg)
+    if (cfg) {
+      setForm({
+        enabled:       cfg.enabled,
+        mode:          cfg.mode,
+        min_interval:  cfg.min_interval,
+        max_interval:  cfg.max_interval,
+        rewrite_texts: cfg.rewrite_texts,
+      })
+    } else {
+      setForm({
+        enabled:       false,
+        mode:          'stock',
+        min_interval:  60,
+        max_interval:  120,
+        rewrite_texts: [],
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (selectedAccountId) loadConfig(selectedAccountId)
+  }, [selectedAccountId, loadConfig])
+
+  // autopost:executed イベントで next_at を更新
+  useEffect(() => {
+    const unsub = api.on('autopost:executed', (data: unknown) => {
+      const d = data as { account_id: number; next_at: string }
+      if (d.account_id === selectedAccountId) {
+        setConfig((prev) => prev ? { ...prev, next_at: d.next_at } : prev)
+      }
+    })
+    return unsub
+  }, [selectedAccountId])
+
+  const handleSave = async () => {
+    if (!selectedAccountId) return
+    if (form.min_interval > form.max_interval) {
+      alert('最小間隔は最大間隔以下にしてください')
+      return
+    }
+    setSaving(true)
+    const saved = await api.autopost.save({
+      account_id:    selectedAccountId,
+      enabled:       form.enabled,
+      mode:          form.mode,
+      min_interval:  form.min_interval,
+      max_interval:  form.max_interval,
+      rewrite_texts: form.rewrite_texts,
+    })
+    setConfig(saved)
+    setSaving(false)
+  }
+
+  const handleResetNext = async () => {
+    if (!selectedAccountId) return
+    setResetting(true)
+    await api.autopost.resetNext(selectedAccountId)
+    setConfig((prev) => prev ? { ...prev, next_at: null } : prev)
+    setResetting(false)
+  }
+
+  const handleAddText = () => {
+    const t = newText.trim()
+    if (!t) return
+    setForm((f) => ({ ...f, rewrite_texts: [...f.rewrite_texts, t] }))
+    setNewText('')
+  }
+
+  const handleRemoveText = (idx: number) => {
+    setForm((f) => ({
+      ...f,
+      rewrite_texts: f.rewrite_texts.filter((_, i) => i !== idx),
+    }))
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* アカウント選択 */}
+      <select
+        value={selectedAccountId ?? ''}
+        onChange={(e) => {
+          const id = Number(e.target.value)
+          setSelectedAccountId(id || null)
+          setConfig(null)
+        }}
+        className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+      >
+        <option value="">アカウントを選択</option>
+        {accounts.map((a) => (
+          <option key={a.id} value={a.id}>
+            @{a.username}
+          </option>
+        ))}
+      </select>
+
+      {selectedAccountId && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-4">
+          {/* 有効/無効 */}
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-gray-700">自動投稿</span>
+            <button
+              onClick={() => setForm((f) => ({ ...f, enabled: !f.enabled }))}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                form.enabled ? 'bg-blue-600' : 'bg-gray-300'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  form.enabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* 投稿モード */}
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-gray-600">投稿モード</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setForm((f) => ({ ...f, mode: 'stock' }))}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                  form.mode === 'stock'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                ストック順
+              </button>
+              <button
+                onClick={() => hasApiKey && setForm((f) => ({ ...f, mode: 'rewrite' }))}
+                disabled={!hasApiKey}
+                title={!hasApiKey ? 'Anthropic APIキーが必要です' : undefined}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                  !hasApiKey
+                    ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                    : form.mode === 'rewrite'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                AIリライト
+              </button>
+            </div>
+            {!hasApiKey && (
+              <p className="text-xs text-amber-500 flex items-center gap-1">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                AIリライトには Anthropic APIキーが必要です（設定画面で入力）
+              </p>
+            )}
+          </div>
+
+          {/* 投稿間隔 */}
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-gray-600">投稿間隔（分）</p>
+            <div className="flex items-center gap-2">
+              <div className="flex-1">
+                <label className="text-xs text-gray-400">最小</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={form.min_interval}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, min_interval: Number(e.target.value) }))
+                  }
+                  className="w-full border border-gray-200 rounded-lg p-1.5 text-sm"
+                />
+              </div>
+              <span className="text-gray-400 mt-4">〜</span>
+              <div className="flex-1">
+                <label className="text-xs text-gray-400">最大</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={form.max_interval}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, max_interval: Number(e.target.value) }))
+                  }
+                  className="w-full border border-gray-200 rounded-lg p-1.5 text-sm"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* AIリライト: ソーステキスト */}
+          {form.mode === 'rewrite' && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-gray-600">
+                ソーステキスト（リライト元）
+              </p>
+              {form.rewrite_texts.length === 0 ? (
+                <p className="text-xs text-gray-400">テキストを追加してください</p>
+              ) : (
+                <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                  {form.rewrite_texts.map((t, i) => (
+                    <div
+                      key={i}
+                      className="flex items-start gap-2 bg-gray-50 rounded-lg p-2"
+                    >
+                      <span className="text-xs text-gray-400 shrink-0 mt-0.5">
+                        {i + 1}.
+                      </span>
+                      <p className="text-xs text-gray-700 flex-1 line-clamp-2">{t}</p>
+                      <button
+                        onClick={() => handleRemoveText(i)}
+                        className="text-xs text-red-400 hover:text-red-600 shrink-0"
+                      >
+                        削除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <textarea
+                value={newText}
+                onChange={(e) => setNewText(e.target.value)}
+                placeholder="リサーチした投稿テキストを貼り付け..."
+                rows={3}
+                className="w-full border border-gray-200 rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
+              />
+              <button
+                onClick={handleAddText}
+                disabled={!newText.trim()}
+                className="w-full py-1.5 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 disabled:opacity-40"
+              >
+                テキストを追加
+              </button>
+            </div>
+          )}
+
+          {/* 次回投稿 */}
+          {config && (
+            <div className="flex items-center justify-between bg-gray-50 rounded-lg p-2.5">
+              <div>
+                <p className="text-xs text-gray-500">次回投稿</p>
+                <p className="text-sm font-medium text-gray-700">
+                  {config.next_at
+                    ? new Date(config.next_at).toLocaleString('ja-JP')
+                    : '有効化後すぐ投稿'}
+                </p>
+              </div>
+              <button
+                onClick={handleResetNext}
+                disabled={resetting}
+                className="text-xs text-blue-500 hover:text-blue-700 disabled:opacity-40"
+              >
+                今すぐ投稿
+              </button>
+            </div>
+          )}
+
+          {/* 保存 */}
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40"
+          >
+            {saving ? '保存中...' : '設定を保存'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Schedule tab ──────────────────────────────────────────────────────────────
+
+function ScheduleTab({ accounts }: { accounts: Account[] }) {
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [form, setForm] = useState({
-    account_id: '',
-    content: '',
+    account_id:   '',
+    content:      '',
     scheduled_at: '',
   })
   const [saving, setSaving] = useState(false)
@@ -31,8 +325,8 @@ export function Scheduler({ accounts }: Props) {
     if (!form.account_id || !form.content || !form.scheduled_at) return
     setSaving(true)
     await api.schedules.create({
-      account_id: Number(form.account_id),
-      content: form.content,
+      account_id:   Number(form.account_id),
+      content:      form.content,
       scheduled_at: new Date(form.scheduled_at).toISOString(),
     })
     setForm({ account_id: '', content: '', scheduled_at: '' })
@@ -50,11 +344,12 @@ export function Scheduler({ accounts }: Props) {
     accounts.find((a) => a.id === id)?.username ?? `ID:${id}`
 
   return (
-    <div className="h-full flex flex-col gap-6">
-      <h2 className="text-lg font-bold text-gray-800">スケジュール投稿</h2>
-
+    <div className="space-y-4">
       {/* 新規スケジュール作成フォーム */}
-      <form onSubmit={handleCreate} className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+      <form
+        onSubmit={handleCreate}
+        className="bg-white border border-gray-200 rounded-xl p-4 space-y-3"
+      >
         <p className="text-sm font-medium text-gray-700">新しいスケジュール</p>
         <select
           value={form.account_id}
@@ -93,9 +388,11 @@ export function Scheduler({ accounts }: Props) {
       </form>
 
       {/* スケジュール一覧 */}
-      <div className="flex-1 overflow-y-auto space-y-2">
+      <div className="space-y-2">
         {schedules.length === 0 ? (
-          <p className="text-center text-gray-400 text-sm mt-8">スケジュールがありません</p>
+          <p className="text-center text-gray-400 text-sm mt-8">
+            スケジュールがありません
+          </p>
         ) : (
           schedules.map((schedule) => (
             <div
@@ -124,6 +421,43 @@ export function Scheduler({ accounts }: Props) {
               )}
             </div>
           ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Main Scheduler page ───────────────────────────────────────────────────────
+
+export function Scheduler({ accounts }: Props) {
+  const [tab, setTab] = useState<'schedule' | 'autopost'>('schedule')
+
+  return (
+    <div className="h-full flex flex-col gap-4">
+      <h2 className="text-lg font-bold text-gray-800">スケジュール投稿</h2>
+
+      {/* タブ */}
+      <div className="flex border-b border-gray-200">
+        {(['schedule', 'autopost'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              tab === t
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {t === 'schedule' ? 'スケジュール' : '自動投稿'}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {tab === 'schedule' ? (
+          <ScheduleTab accounts={accounts} />
+        ) : (
+          <AutopostTab accounts={accounts} />
         )}
       </div>
     </div>

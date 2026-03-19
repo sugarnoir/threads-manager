@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
+import { User, Shield, FileText, Bookmark, Settings } from 'lucide-react'
 import { Account, PostStock, api } from '../lib/ipc'
 
 interface Props {
@@ -414,21 +415,22 @@ export function AccountEditModal({
           {/* Tabs */}
           <div className="flex gap-1 mt-4 flex-wrap">
             {([
-              { id: 'profile', label: '👤 プロフィール' },
-              { id: 'proxy',   label: '🔒 プロキシ' },
-              { id: 'memo',    label: '📝 メモ' },
-              { id: 'stocks',  label: '📋 ストック' },
-              { id: 'danger',  label: '⚠️ 管理' },
-            ] as { id: Tab; label: string }[]).map((t) => (
+              { id: 'profile', icon: User,     label: 'プロフィール' },
+              { id: 'proxy',   icon: Shield,   label: 'プロキシ' },
+              { id: 'memo',    icon: FileText,  label: 'メモ' },
+              { id: 'stocks',  icon: Bookmark, label: 'ストック' },
+              { id: 'danger',  icon: Settings, label: '管理' },
+            ] as { id: Tab; icon: React.ElementType; label: string }[]).map((t) => (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                   tab === t.id
                     ? 'bg-zinc-700 text-white'
                     : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
                 }`}
               >
+                <t.icon size={13} />
                 {t.label}
               </button>
             ))}
