@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   # ── Step 1: package.json の version からドラフトリリースを事前作成 ──────────
   # 後続の Mac / Windows ビルドが同時にリリースを作ろうとする競合を防ぐ
