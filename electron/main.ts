@@ -19,6 +19,7 @@ import { registerStockHandlers } from './ipc/stocks'
 import { registerTemplateHandlers } from './ipc/templates'
 import { registerLicenseAdminHandlers } from './ipc/license-admin'
 import { registerAutopostHandlers } from './ipc/autopost'
+import { registerProxyPresetHandlers } from './ipc/proxy-presets'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 
@@ -41,6 +42,7 @@ function createWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: false, // ローカルファイル(file://)をimgタグで表示するために必要
     },
   })
 
@@ -60,6 +62,7 @@ app.whenReady().then(() => {
   registerAuthHandlers()
   registerLicenseAdminHandlers()
   registerAutopostHandlers()
+  registerProxyPresetHandlers()
   registerGroupHandlers()
   registerResearchHandlers()
   registerStockHandlers()

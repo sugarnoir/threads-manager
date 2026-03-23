@@ -4,10 +4,15 @@ import { api, Account, PostStock, PostTemplate } from '../lib/ipc'
 interface Props {
   accounts: Account[]
   selectedAccountId: number | null
+  initialContent?: string
 }
 
-export function Composer({ accounts, selectedAccountId }: Props) {
-  const [content, setContent] = useState('')
+export function Composer({ accounts, selectedAccountId, initialContent }: Props) {
+  const [content, setContent] = useState(initialContent ?? '')
+
+  useEffect(() => {
+    if (initialContent) setContent(initialContent)
+  }, [initialContent])
   const [selectedIds, setSelectedIds] = useState<number[]>(
     selectedAccountId ? [selectedAccountId] : []
   )

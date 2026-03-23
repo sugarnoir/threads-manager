@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { api } from '../lib/ipc'
+import { useState, useEffect, useRef } from 'react'
+import { api, ProxyPreset } from '../lib/ipc'
 import { LicenseAdmin } from './LicenseAdmin'
 
 // 管理者パスワード（ハードコード）
@@ -321,6 +321,18 @@ export function Settings() {
   const [saving, setSaving]         = useState(false)
   const [savedMsg, setSavedMsg]     = useState(false)
 
+  // 表示設定
+  const [showAccountNumbers, setShowAccountNumbers] = useState(
+    () => localStorage.getItem('showAccountNumbers') === 'true'
+  )
+
+  const handleToggleAccountNumbers = () => {
+    const next = !showAccountNumbers
+    setShowAccountNumbers(next)
+    localStorage.setItem('showAccountNumbers', String(next))
+    window.dispatchEvent(new Event('showAccountNumbersChanged'))
+  }
+
   // Load settings
   useEffect(() => {
     api.settings.getAll().then((s) => {
@@ -365,6 +377,32 @@ export function Settings() {
 
   return (
     <div className="space-y-6 max-w-lg">
+
+      {/* ── 表示設定 ── */}
+      <div>
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-zinc-700 flex items-center justify-center shrink-0 text-base">
+            🔢
+          </div>
+          <div>
+            <p className="text-white font-semibold text-sm">表示設定</p>
+            <p className="text-zinc-500 text-xs">サイドバーの表示をカスタマイズ</p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl">
+          <div>
+            <p className="text-white text-sm font-medium">アカウント番号表示</p>
+            <p className="text-zinc-500 text-xs mt-0.5">サイドバーの各アカウントに連番（1, 2, 3…）を表示</p>
+          </div>
+          <div className="flex items-center gap-2.5 shrink-0">
+            <span className={`text-xs font-semibold w-6 text-right transition-colors ${showAccountNumbers ? 'text-blue-400' : 'text-zinc-500'}`}>
+              {showAccountNumbers ? 'ON' : 'OFF'}
+            </span>
+            <Toggle checked={showAccountNumbers} onChange={handleToggleAccountNumbers} size="md" />
+          </div>
+        </div>
+      </div>
 
       {/* Discord section */}
       <div>
@@ -479,6 +517,16 @@ export function Settings() {
         )}
       </div>
 
+      {/* Image Groups section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <ImageGroupsSection />
+      </div>
+
+      {/* Proxy Presets section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <ProxyPresetsSection />
+      </div>
+
       {/* Discord Bot section */}
       <div className="pt-2 border-t border-zinc-800">
         <BotSection />
@@ -489,6 +537,484 @@ export function Settings() {
         <LicenseAdminSection />
       </div>
 
+    </div>
+  )
+}
+
+// ── Proxy Presets section ────────────────────────────────────────────────────
+
+type ProxyType = 'http' | 'https' | 'socks5'
+
+interface PresetFormState {
+  name: string
+  type: ProxyType
+  host: string
+  port: string
+  username: string
+  password: string
+}
+
+const emptyForm = (): PresetFormState => ({
+  name: '', type: 'http', host: '', port: '', username: '', password: '',
+})
+
+function PresetForm({
+  initial,
+  onSave,
+  onCancel,
+  saving,
+}: {
+  initial: PresetFormState
+  onSave: (v: PresetFormState) => void
+  onCancel: () => void
+  saving: boolean
+}) {
+  const [v, setV] = useState<PresetFormState>(initial)
+  const set = (k: keyof PresetFormState) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setV((p) => ({ ...p, [k]: e.target.value }))
+  const valid = v.name.trim() && v.host.trim() && v.port.trim()
+
+  return (
+    <div className="bg-zinc-800 rounded-xl p-4 space-y-3 border border-zinc-700">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">プリセット名 *</label>
+          <input
+            type="text" value={v.name} onChange={set('name')} placeholder="自宅プロキシ"
+            className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">種別</label>
+          <select
+            value={v.type} onChange={set('type')}
+            className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+          >
+            {(['http', 'https', 'socks5'] as ProxyType[]).map((t) => (
+              <option key={t} value={t}>{t.toUpperCase()}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <label className="text-zinc-400 text-xs font-medium block mb-1">ホスト *</label>
+          <input
+            type="text" value={v.host} onChange={set('host')} placeholder="proxy.example.com"
+            className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        <div className="w-24">
+          <label className="text-zinc-400 text-xs font-medium block mb-1">ポート *</label>
+          <input
+            type="number" value={v.port} onChange={set('port')} placeholder="8080"
+            className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">ユーザー名 <span className="text-zinc-600">(任意)</span></label>
+          <input
+            type="text" value={v.username} onChange={set('username')}
+            className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">パスワード <span className="text-zinc-600">(任意)</span></label>
+          <input
+            type="password" value={v.password} onChange={set('password')}
+            className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+      </div>
+      {v.host && v.port && (
+        <p className="text-xs text-blue-400 font-mono bg-blue-500/10 border border-blue-500/20 px-3 py-1.5 rounded-lg">
+          {v.type}://{v.host}:{v.port}
+        </p>
+      )}
+      <div className="flex gap-2 pt-1">
+        <button
+          onClick={onCancel}
+          className="flex-1 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg text-xs transition-colors"
+        >キャンセル</button>
+        <button
+          onClick={() => onSave(v)}
+          disabled={!valid || saving}
+          className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition-colors"
+        >{saving ? '保存中...' : '保存'}</button>
+      </div>
+    </div>
+  )
+}
+
+export function ProxyPresetsSection() {
+  const [presets, setPresets] = useState<ProxyPreset[]>([])
+  const [mode, setMode]       = useState<'idle' | 'add' | 'edit'>('idle')
+  const [editTarget, setEditTarget] = useState<ProxyPreset | null>(null)
+  const [saving, setSaving]   = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
+
+  const load = () => api.proxyPresets.list().then(setPresets)
+  useEffect(() => { load() }, [])
+
+  const handleAdd = async (v: PresetFormState) => {
+    setSaving(true)
+    await api.proxyPresets.create({
+      name: v.name.trim(), type: v.type, host: v.host.trim(),
+      port: Number(v.port), username: v.username.trim() || null, password: v.password || null,
+    })
+    setSaving(false)
+    setMode('idle')
+    load()
+  }
+
+  const handleEdit = async (v: PresetFormState) => {
+    if (!editTarget) return
+    setSaving(true)
+    await api.proxyPresets.update({
+      id: editTarget.id, name: v.name.trim(), type: v.type, host: v.host.trim(),
+      port: Number(v.port), username: v.username.trim() || null, password: v.password || null,
+    })
+    setSaving(false)
+    setMode('idle')
+    setEditTarget(null)
+    load()
+  }
+
+  const handleDelete = async (id: number) => {
+    await api.proxyPresets.delete(id)
+    setDeleteConfirm(null)
+    load()
+  }
+
+  const startEdit = (p: ProxyPreset) => {
+    setEditTarget(p)
+    setMode('edit')
+  }
+
+  const TYPE_BADGE: Record<string, string> = {
+    http:   'bg-blue-500/15 text-blue-400 border-blue-500/30',
+    https:  'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+    socks5: 'bg-violet-500/15 text-violet-400 border-violet-500/30',
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-teal-600 flex items-center justify-center shrink-0 text-base">
+          🔒
+        </div>
+        <div>
+          <p className="text-white font-semibold text-sm">プロキシ管理</p>
+          <p className="text-zinc-500 text-xs">よく使うプロキシをプリセットとして保存・管理</p>
+        </div>
+        {mode === 'idle' && (
+          <button
+            onClick={() => setMode('add')}
+            className="ml-auto px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold rounded-lg transition-colors"
+          >+ 追加</button>
+        )}
+      </div>
+
+      {/* Preset list */}
+      {presets.length > 0 && (
+        <div className="space-y-2 mb-3">
+          {presets.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 px-4 py-3 bg-zinc-800 rounded-xl border border-zinc-700">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-white text-sm font-medium truncate">{p.name}</span>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${TYPE_BADGE[p.type] ?? ''}`}>
+                    {p.type.toUpperCase()}
+                  </span>
+                </div>
+                <p className="text-zinc-400 text-xs font-mono truncate">
+                  {p.host}:{p.port}
+                  {p.username && <span className="text-zinc-600"> · {p.username}</span>}
+                </p>
+              </div>
+              <div className="flex gap-1 shrink-0">
+                <button
+                  onClick={() => startEdit(p)}
+                  disabled={mode !== 'idle'}
+                  className="px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-30 text-zinc-300 text-xs rounded-lg transition-colors"
+                >編集</button>
+                {deleteConfirm === p.id ? (
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => handleDelete(p.id)}
+                      className="px-2.5 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs rounded-lg transition-colors"
+                    >確認</button>
+                    <button
+                      onClick={() => setDeleteConfirm(null)}
+                      className="px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors"
+                    >✕</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setDeleteConfirm(p.id)}
+                    disabled={mode !== 'idle'}
+                    className="px-2.5 py-1.5 bg-zinc-700 hover:bg-red-600/30 disabled:opacity-30 text-zinc-400 hover:text-red-400 text-xs rounded-lg transition-colors"
+                  >削除</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {presets.length === 0 && mode === 'idle' && (
+        <p className="text-zinc-600 text-xs py-3 text-center">プリセットが登録されていません</p>
+      )}
+
+      {/* Add/Edit form */}
+      {mode === 'add' && (
+        <PresetForm
+          initial={emptyForm()}
+          onSave={handleAdd}
+          onCancel={() => setMode('idle')}
+          saving={saving}
+        />
+      )}
+      {mode === 'edit' && editTarget && (
+        <PresetForm
+          initial={{
+            name: editTarget.name, type: editTarget.type,
+            host: editTarget.host, port: String(editTarget.port),
+            username: editTarget.username ?? '', password: editTarget.password ?? '',
+          }}
+          onSave={handleEdit}
+          onCancel={() => { setMode('idle'); setEditTarget(null) }}
+          saving={saving}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Image Groups section ──────────────────────────────────────────────────────
+
+function parseImageCsv(text: string): { group1: string[]; group2: string[] } {
+  const group1: string[] = []
+  const group2: string[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const cols = line.split(',').map((c) => c.trim())
+    if (cols[0]) group1.push(cols[0])
+    if (cols[1]) group2.push(cols[1])
+  }
+  return { group1, group2 }
+}
+
+export function ImageGroupsSection() {
+  const [groups, setGroups]   = useState<{ group1: string[]; group2: string[] }>({ group1: [], group2: [] })
+  const [saving, setSaving]   = useState(false)
+  const [savedMsg, setSavedMsg] = useState(false)
+  const [newUrl1, setNewUrl1] = useState('')
+  const [newUrl2, setNewUrl2] = useState('')
+  const [csvText, setCsvText] = useState('')
+  const [csvOpen, setCsvOpen] = useState(false)
+  const fileRef1 = useRef<HTMLInputElement>(null)
+  const fileRef2 = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    api.imageGroups.get().then((res) => { if (res.success && res.data) setGroups(res.data) })
+  }, [])
+
+  const save = async (updated: { group1: string[]; group2: string[] }) => {
+    setSaving(true)
+    await api.imageGroups.save(updated)
+    setSaving(false)
+    setSavedMsg(true)
+    setTimeout(() => setSavedMsg(false), 2000)
+  }
+
+  const addUrl = (slot: 1 | 2) => {
+    const url = slot === 1 ? newUrl1.trim() : newUrl2.trim()
+    if (!url) return
+    const updated = slot === 1
+      ? { ...groups, group1: [...groups.group1, url] }
+      : { ...groups, group2: [...groups.group2, url] }
+    setGroups(updated)
+    save(updated)
+    if (slot === 1) { setNewUrl1('') } else { setNewUrl2('') }
+  }
+
+  const removeUrl = (slot: 1 | 2, idx: number) => {
+    const updated = slot === 1
+      ? { ...groups, group1: groups.group1.filter((_, i) => i !== idx) }
+      : { ...groups, group2: groups.group2.filter((_, i) => i !== idx) }
+    setGroups(updated)
+    save(updated)
+  }
+
+  const handleFileSelect = (slot: 1 | 2) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const path = (file as File & { path: string }).path
+    const fileUrl = `file://${path}`
+    const updated = slot === 1
+      ? { ...groups, group1: [...groups.group1, fileUrl] }
+      : { ...groups, group2: [...groups.group2, fileUrl] }
+    setGroups(updated)
+    save(updated)
+    e.target.value = ''
+  }
+
+  const importCsv = () => {
+    const parsed = parseImageCsv(csvText)
+    const updated = {
+      group1: [...groups.group1, ...parsed.group1],
+      group2: [...groups.group2, ...parsed.group2],
+    }
+    setGroups(updated)
+    save(updated)
+    setCsvText('')
+    setCsvOpen(false)
+  }
+
+  const [bulkRunning, setBulkRunning] = useState(false)
+  const [bulkResult, setBulkResult]   = useState<string | null>(null)
+
+  const handleBulkRandomize = async () => {
+    const totalImages = groups.group1.length + groups.group2.length
+    if (totalImages === 0) {
+      alert('画像グループに画像が登録されていません。先に画像を追加してください。')
+      return
+    }
+    const ok = window.confirm(
+      '全アカウントのストックに対してランダムで画像を挿入します。\n既存の画像設定は上書きされます。よろしいですか？'
+    )
+    if (!ok) return
+
+    setBulkRunning(true)
+    setBulkResult(null)
+    try {
+      const accounts = await api.accounts.list()
+      let totalUpdated = 0
+      let errorCount = 0
+      for (const account of accounts) {
+        const res = await api.stocks.randomizeImages(account.id)
+        if (res.success) {
+          totalUpdated += res.updated ?? 0
+        } else {
+          errorCount++
+        }
+      }
+      setBulkResult(
+        errorCount > 0
+          ? `完了: ${totalUpdated}件更新（${errorCount}アカウントでエラー）`
+          : `完了: ${totalUpdated}件のストックに画像を挿入しました`
+      )
+    } catch (err) {
+      setBulkResult(`エラー: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setBulkRunning(false)
+      setTimeout(() => setBulkResult(null), 4000)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-zinc-300 text-sm font-semibold">🖼 画像グループ管理</h3>
+        <div className="flex items-center gap-2">
+          {savedMsg    && <span className="text-emerald-400 text-xs">✓ 保存しました</span>}
+          {saving      && <span className="text-zinc-500 text-xs">保存中...</span>}
+          {bulkResult  && <span className="text-emerald-400 text-xs">{bulkResult}</span>}
+          <button
+            onClick={handleBulkRandomize}
+            disabled={bulkRunning}
+            className="px-2.5 py-1 bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >
+            {bulkRunning ? '処理中...' : '🎲 全垢一斉ランダム挿入'}
+          </button>
+          <button
+            onClick={() => setCsvOpen((v) => !v)}
+            className="px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors whitespace-nowrap"
+          >
+            CSVインポート
+          </button>
+        </div>
+      </div>
+
+      {csvOpen && (
+        <div className="space-y-2 bg-zinc-800 rounded-xl p-3">
+          <p className="text-zinc-500 text-xs">1列目=グループ1（1枚目）、2列目=グループ2（2枚目）で貼り付け</p>
+          <textarea
+            value={csvText}
+            onChange={(e) => setCsvText(e.target.value)}
+            placeholder={"https://example.com/img1.jpg,https://example.com/img2.jpg\nhttps://example.com/img3.jpg,https://example.com/img4.jpg"}
+            rows={5}
+            className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 outline-none focus:border-blue-500 font-mono resize-none"
+          />
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => setCsvOpen(false)} className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors">キャンセル</button>
+            <button onClick={importCsv} disabled={!csvText.trim()} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors">追加インポート</button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        {([1, 2] as const).map((slot) => {
+          const urls     = slot === 1 ? groups.group1 : groups.group2
+          const input    = slot === 1 ? newUrl1 : newUrl2
+          const setInput = slot === 1 ? setNewUrl1 : setNewUrl2
+          const fileRef  = slot === 1 ? fileRef1 : fileRef2
+          return (
+            <div key={slot} className="space-y-2">
+              <p className="text-zinc-400 text-xs font-semibold">
+                {slot}枚目グループ <span className="text-zinc-600 font-normal">{urls.length}件</span>
+              </p>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {urls.length === 0 && <p className="text-zinc-700 text-xs">画像なし</p>}
+                {urls.map((url, i) => (
+                  <div key={i} className="flex items-center gap-1.5 bg-zinc-800 rounded-lg px-2 py-1.5 group">
+                    {url.startsWith('file://') ? (
+                      <span className="shrink-0 text-[9px] text-zinc-600 bg-zinc-700 rounded px-1">ローカル</span>
+                    ) : (
+                      <span className="shrink-0 text-[9px] text-zinc-600 bg-zinc-700 rounded px-1">URL</span>
+                    )}
+                    <span className="flex-1 text-zinc-400 text-[10px] truncate font-mono">{url}</span>
+                    <button
+                      onClick={() => removeUrl(slot, i)}
+                      className="shrink-0 text-zinc-600 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition-all"
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+              {/* URL input */}
+              <div className="flex gap-1">
+                <input
+                  type="url"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addUrl(slot)}
+                  placeholder="https://..."
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-zinc-800 border border-zinc-700 focus:border-blue-500 rounded-lg text-white text-xs placeholder-zinc-600 outline-none transition-colors"
+                />
+                <button
+                  onClick={() => addUrl(slot)}
+                  disabled={!input.trim()}
+                  className="shrink-0 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+                >追加</button>
+              </div>
+              {/* File picker */}
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleFileSelect(slot)}
+              />
+              <button
+                onClick={() => fileRef.current?.click()}
+                className="w-full px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors"
+              >📁 ファイルを選択</button>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

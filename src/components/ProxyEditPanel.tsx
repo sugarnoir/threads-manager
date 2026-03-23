@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Account } from '../lib/ipc'
+import { useState, useEffect } from 'react'
+import { Account, ProxyPreset, api } from '../lib/ipc'
 
 interface Props {
   account: Account
@@ -28,7 +28,23 @@ export function ProxyEditPanel({ account, onSave, onClose }: Props) {
   const [username, setUsername]   = useState(account.proxy_username ?? '')
   const [password, setPassword]   = useState(account.proxy_password ?? '')
   const [showPassword, setShowPassword] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [saving, setSaving]       = useState(false)
+  const [presets, setPresets]     = useState<ProxyPreset[]>([])
+
+  useEffect(() => {
+    api.proxyPresets.list().then(setPresets).catch(() => {})
+  }, [])
+
+  const applyPreset = (id: string) => {
+    if (!id) return
+    const p = presets.find((x) => String(x.id) === id)
+    if (!p) return
+    setProxyType(p.type as ProxyType)
+    setHost(p.host)
+    setPort(String(p.port))
+    setUsername(p.username ?? '')
+    setPassword(p.password ?? '')
+  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -55,6 +71,25 @@ export function ProxyEditPanel({ account, onSave, onClose }: Props) {
           <h3 className="text-white font-bold text-sm">プロキシ設定</h3>
           <span className="text-zinc-500 text-xs">@{account.username}</span>
         </div>
+
+        {/* プリセット選択 */}
+        {presets.length > 0 && (
+          <div>
+            <label className="text-zinc-400 text-xs font-medium block mb-1.5">プリセットから選択</label>
+            <select
+              defaultValue=""
+              onChange={(e) => applyPreset(e.target.value)}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            >
+              <option value="">── プリセットを選択 ──</option>
+              {presets.map((p) => (
+                <option key={p.id} value={String(p.id)}>
+                  {p.name}　{p.type.toUpperCase()} {p.host}:{p.port}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* プロキシ種別 */}
         <div>

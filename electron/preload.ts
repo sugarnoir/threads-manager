@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     check: (id: number) => ipcRenderer.invoke('accounts:check', id),
     checkAll: () => ipcRenderer.invoke('accounts:check-all'),
     delete: (id: number) => ipcRenderer.invoke('accounts:delete', id),
+    fingerprint: (id: number) => ipcRenderer.invoke('accounts:fingerprint', id),
   },
 
   // Posts
@@ -94,6 +95,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     back: (accountId: number)    => ipcRenderer.invoke('browserView:back', accountId),
     forward: (accountId: number) => ipcRenderer.invoke('browserView:forward', accountId),
     reload: (accountId: number)  => ipcRenderer.invoke('browserView:reload', accountId),
+    openCompose: (accountId: number, content: string, images?: string[]) =>
+      ipcRenderer.invoke('browserView:open-compose', accountId, content, images ?? []),
   },
 
   // Settings
@@ -105,6 +108,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     botStart: () => ipcRenderer.invoke('settings:bot-start'),
     botStop: () => ipcRenderer.invoke('settings:bot-stop'),
     botStatus: () => ipcRenderer.invoke('settings:bot-status'),
+  },
+
+  // Proxy Presets
+  proxyPresets: {
+    list:   () => ipcRenderer.invoke('proxy-presets:list'),
+    create: (data: { name: string; type: string; host: string; port: number; username?: string | null; password?: string | null }) =>
+      ipcRenderer.invoke('proxy-presets:create', data),
+    update: (data: { id: number; name: string; type: string; host: string; port: number; username?: string | null; password?: string | null }) =>
+      ipcRenderer.invoke('proxy-presets:update', data),
+    delete: (id: number) => ipcRenderer.invoke('proxy-presets:delete', id),
   },
 
   // Groups
@@ -137,6 +150,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     update: (data: { id: number; title?: string | null; content: string; image_url?: string | null }) =>
       ipcRenderer.invoke('stocks:update', data),
     delete: (id: number) => ipcRenderer.invoke('stocks:delete', id),
+    importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) =>
+      ipcRenderer.invoke('stocks:import-csv', rows),
+    randomizeImages: (accountId: number) => ipcRenderer.invoke('stocks:randomize-images', accountId),
+  },
+
+  // Image Groups
+  imageGroups: {
+    get:  () => ipcRenderer.invoke('imageGroups:get'),
+    save: (data: { group1: string[]; group2: string[] }) => ipcRenderer.invoke('imageGroups:save', data),
   },
 
   // Templates

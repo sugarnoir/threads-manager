@@ -1,4 +1,4 @@
-import { WebContentsView, session, BrowserWindow } from 'electron'
+import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage } from 'electron'
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
 import { getContextCookiesIfOpen } from '../playwright/browser-manager'
 import { getSetting, setSetting } from '../db/repositories/settings'
@@ -62,6 +62,73 @@ async function injectCookies(cookies: RawCookie[], sess: Electron.Session): Prom
   return true
 }
 
+// ── Profile extraction (main process → Instagram API) ─────────────────────────
+//
+// メインプロセスから net.fetch で Instagram API を直接叩く。
+// レンダラー側の fetch と違い CORS 制限がないため確実に取得できる。
+// ds_user_id Cookie → /api/v1/users/{id}/info/ → username + full_name
+
+async function fetchProfileFromInstagram(
+  cookies: Electron.Cookie[]
+): Promise<{ username: string; displayName: string | null }> {
+  // ds_user_id はログイン中ユーザーの数値 ID (Instagram がセットする)
+  const dsUserId = cookies.find((c) => c.name === 'ds_user_id')?.value
+  if (!dsUserId) return { username: 'unknown', displayName: null }
+
+  // Cookie ヘッダー文字列を構築（instagram.com / threads.com 両ドメイン分）
+  const cookieHeader = cookies
+    .filter((c) => c.value && (c.domain?.includes('instagram.com') || c.domain?.includes('threads.com')))
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ')
+
+  const csrfToken = cookies.find((c) => c.name === 'csrftoken')?.value ?? ''
+
+  try {
+    const resp = await net.fetch(
+      `https://i.instagram.com/api/v1/users/${dsUserId}/info/`,
+      {
+        headers: {
+          Cookie:         cookieHeader,
+          'X-CSRFToken':  csrfToken,
+          'X-IG-App-ID':  '936619743392459',
+          'User-Agent':   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+        },
+      }
+    )
+    if (resp.ok) {
+      const data = await resp.json() as { user?: { username?: string; full_name?: string } }
+      const username    = data.user?.username?.trim()  || 'unknown'
+      const displayName = data.user?.full_name?.trim() || null
+      return { username, displayName }
+    }
+  } catch { /* ネットワークエラーなど */ }
+
+  return { username: 'unknown', displayName: null }
+}
+
+// ── StatusCheckResult ─────────────────────────────────────────────────────────
+
+export type AccountStatus = 'active' | 'needs_login' | 'frozen' | 'error'
+
+export interface StatusCheckResult {
+  status: AccountStatus
+  message?: string
+}
+
+const FROZEN_KEYWORDS = [
+  'account has been disabled',
+  'account was disabled',
+  'suspended',
+  'temporarily blocked',
+  'temporarily restricted',
+  'アカウントが無効',
+  '一時的にブロック',
+  '一時的に制限',
+  'ご利用いただけません',
+  'account disabled',
+  'we suspended your account',
+]
+
 // ── ViewInfo ──────────────────────────────────────────────────────────────────
 
 export interface ViewInfo {
@@ -118,12 +185,14 @@ export class ViewManager {
   // x と width はウィンドウサイズと SIDEBAR_WIDTH 定数から算出する
   private calcBounds(y: number, height: number): Electron.Rectangle {
     const cb = this.mainWindow.getContentBounds()
-    return {
+    const bounds = {
       x:      SIDEBAR_WIDTH,
       y,
       width:  Math.max(cb.width - SIDEBAR_WIDTH, 0),
       height: Math.max(height, 0),
     }
+    console.log('[calcBounds] contentBounds=', cb, '→ viewBounds=', bounds)
+    return bounds
   }
 
   // ── Session cookie management ─────────────────────────────────────────────
@@ -276,7 +345,7 @@ export class ViewManager {
 
   // ── Login flow ────────────────────────────────────────────────────────────
 
-  async startLogin(tempKey: string): Promise<{ username: string }> {
+  async startLogin(tempKey: string): Promise<{ username: string; displayName: string | null }> {
     const partition = `persist:login-${tempKey}`
 
     const mainBounds = this.mainWindow.getBounds()
@@ -325,53 +394,31 @@ export class ViewManager {
       const checkCookies = async () => {
         if (done) return
 
-        let hasSession = false
+        let allCookies: Electron.Cookie[] = []
         try {
           if (popup.isDestroyed()) return
-          const cookies = await popup.webContents.session.cookies.get({})
+          allCookies = await popup.webContents.session.cookies.get({})
           if (done) return
-          hasSession = cookies.some(
-            (c) =>
-              c.name === 'sessionid' &&
-              c.value.length > 0 &&
-              (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
-          )
         } catch { return }
 
+        const hasSession = allCookies.some(
+          (c) =>
+            c.name === 'sessionid' &&
+            c.value.length > 0 &&
+            (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
+        )
         if (!hasSession) return
 
         done = true
         clearTimeout(timer)
         if (pollInterval) clearInterval(pollInterval)
 
-        await new Promise<void>((r) => setTimeout(r, 800))
-
-        let username = 'unknown'
-        try {
-          if (!popup.isDestroyed()) {
-            const currentUrl = popup.webContents.getURL()
-            const urlMatch = currentUrl.match(/threads\.(?:com|net)\/@([^/?#]+)/)
-            if (urlMatch) {
-              username = urlMatch[1]
-            } else {
-              username = await popup.webContents.executeJavaScript(`
-                (function() {
-                  const a = document.querySelector('a[href*="/@"]');
-                  if (a) {
-                    const m = a.getAttribute('href').match(/@([^/?#]+)/);
-                    if (m) return m[1];
-                  }
-                  const m = document.title.match(/@([^\\s|]+)/);
-                  if (m) return m[1];
-                  return 'unknown';
-                })()
-              `)
-            }
-          }
-        } catch { /* popup が 800ms 待機中に破棄された場合は username='unknown' で続行 */ }
+        // Cookie はすでに取得済み → メインプロセスから Instagram API を直接叩く
+        // CORS なし・DOM 待機不要・他人のリンクを誤検知しない
+        const { username, displayName } = await fetchProfileFromInstagram(allCookies)
 
         if (!popup.isDestroyed()) popup.close()
-        resolve({ username })
+        resolve({ username, displayName })
       }
 
       pollInterval = setInterval(checkCookies, 1000)
@@ -386,7 +433,7 @@ export class ViewManager {
     proxyUrl?: string | null,
     proxyUsername?: string | null,
     proxyPassword?: string | null,
-  ): Promise<{ username: string }> {
+  ): Promise<{ username: string; displayName: string | null }> {
     const INSTAGRAM_SIGNUP_URL = 'https://www.instagram.com/accounts/emailsignup/'
     const partition = `persist:login-${tempKey}`
     const sess = session.fromPartition(partition)
@@ -452,66 +499,30 @@ export class ViewManager {
       const checkCookies = async () => {
         if (done) return
 
-        let hasSession = false
+        let allCookies: Electron.Cookie[] = []
         try {
           if (popup.isDestroyed()) return
-          const cookies = await popup.webContents.session.cookies.get({})
+          allCookies = await popup.webContents.session.cookies.get({})
           if (done) return
-          hasSession = cookies.some(
-            (c) =>
-              c.name === 'sessionid' &&
-              c.value.length > 0 &&
-              (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
-          )
         } catch { return }
 
+        const hasSession = allCookies.some(
+          (c) =>
+            c.name === 'sessionid' &&
+            c.value.length > 0 &&
+            (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
+        )
         if (!hasSession) return
 
         done = true
         clearTimeout(timer)
         if (pollInterval) clearInterval(pollInterval)
 
-        await new Promise<void>((r) => setTimeout(r, 800))
-
-        let username = 'unknown'
-        const NON_USERNAME_PATHS = new Set(['accounts', 'explore', 'p', 'reel', 'reels', 'stories', 'direct', 'tv'])
-        try {
-          if (!popup.isDestroyed()) {
-            const currentUrl = popup.webContents.getURL()
-            // Threads URL
-            const threadsMatch = currentUrl.match(/threads\.(?:com|net)\/@([^/?#]+)/)
-            if (threadsMatch) {
-              username = threadsMatch[1]
-            } else {
-              // Instagram URL
-              const igMatch = currentUrl.match(/instagram\.com\/([^/?#@]+)(?:\/|$)/)
-              if (igMatch && !NON_USERNAME_PATHS.has(igMatch[1])) {
-                username = igMatch[1]
-              } else {
-                username = await popup.webContents.executeJavaScript(`
-                  (function() {
-                    // Threads プロフィールリンク
-                    const ta = document.querySelector('a[href*="threads.net/@"], a[href*="threads.com/@"]');
-                    if (ta) { const m = ta.getAttribute('href').match(/@([^/?#]+)/); if (m) return m[1]; }
-                    // Instagram プロフィールリンク
-                    const ia = document.querySelector('a[href*="instagram.com/"]');
-                    if (ia) {
-                      const m = ia.getAttribute('href').match(/instagram\\.com\\/([^/?#@]+)/);
-                      if (m && !['accounts','explore','p','reel','reels','stories','direct'].includes(m[1])) return m[1];
-                    }
-                    // タイトルから
-                    const m = document.title.match(/@([^\\s|]+)/);
-                    if (m) return m[1];
-                    return 'unknown';
-                  })()
-                `)
-              }
-            }
-          }
-        } catch { /* popup が閉じた場合は username='unknown' で続行 */ }
+        // Cookie はすでに取得済み → メインプロセスから Instagram API を直接叩く
+        const { username, displayName } = await fetchProfileFromInstagram(allCookies)
 
         if (!popup.isDestroyed()) popup.close()
-        resolve({ username })
+        resolve({ username, displayName })
       }
 
       pollInterval = setInterval(checkCookies, 1000)
@@ -569,7 +580,12 @@ export class ViewManager {
     if (existing && !existing.view.webContents.isDestroyed()) {
       // 既存ビューを再利用 — setBounds で表示するだけ、loadURL は呼ばない
       this.activeAccountId = accountId
-      existing.view.setBounds(this.calcBounds(y, height))
+      const existBounds = this.calcBounds(y, height)
+      console.log(`[showView] EXISTING account=${accountId} y=${y} height=${height} → setBounds`, existBounds)
+      existing.view.setBounds(existBounds)
+      console.log(`[showView] getBounds after set=`, existing.view.getBounds())
+      // HIDDEN_BOUNDS (0×0) から正しい bounds に変更した際に GPU が再描画しない場合があるため強制更新
+      this.nudgeRepaint(accountId)
       this.notify()
       return
     }
@@ -582,10 +598,13 @@ export class ViewManager {
 
     // アタッチしてから setBounds（Electron 仕様: アタッチ前の setBounds は無効）
     this.mainWindow.contentView.addChildView(view)
-    view.setBounds(this.calcBounds(y, height))
+    const newBounds = this.calcBounds(y, height)
+    console.log(`[showView] NEW account=${accountId} y=${y} height=${height} → setBounds`, newBounds)
+    view.setBounds(newBounds)
+    console.log(`[showView] getBounds after set=`, view.getBounds())
     this.notify()
 
-    // バックグラウンドでセッション Cookie を確認して Threads を読み込む（初回のみ）
+    // バックグラウンドでセッション Cookie を確認して Threads を読み込む（直列化）
     this.showQueue = this.showQueue
       .then(() => this._bgInitView(accountId))
       .catch(() => {})
@@ -596,10 +615,33 @@ export class ViewManager {
     // loaded フラグで二重実行を防ぐ
     if (!entry || entry.loaded || entry.view.webContents.isDestroyed()) return
     entry.loaded = true
+    console.log(`[_bgInitView] START account=${accountId} bounds=`, entry.view.getBounds())
     const sess = session.fromPartition(`persist:account-${accountId}`)
     await this.ensureSessionCookies(accountId, sess).catch(() => {})
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
+    console.log(`[_bgInitView] loadURL account=${accountId} bounds=`, entry.view.getBounds())
     entry.view.webContents.loadURL(THREADS_URL)
+    // macOS vibrancy 環境でロード後に黒くなる問題の対策:
+    // did-finish-load 後に setBounds を ±1px 微調整して GPU コンポジターの再描画を強制する
+    entry.view.webContents.once('did-finish-load', () => this.nudgeRepaint(accountId))
+  }
+
+  /**
+   * macOS の vibrancy ウィンドウ上で WebContentsView が黒くなる問題の対策。
+   * GPU コンポジターに再描画を強制するため bounds を ±1px 微調整する。
+   */
+  private nudgeRepaint(accountId: number): void {
+    const e = this.views.get(accountId)
+    if (!e || e.view.webContents.isDestroyed()) return
+    const b = e.view.getBounds()
+    if (b.width <= 0 || b.height <= 0) return
+    e.view.setBounds({ ...b, width: b.width + 1 })
+    setTimeout(() => {
+      const e2 = this.views.get(accountId)
+      if (!e2 || e2.view.webContents.isDestroyed()) return
+      const cur = e2.view.getBounds()
+      e2.view.setBounds({ ...cur, width: cur.width - 1 })
+    }, 50)
   }
 
   /**
@@ -666,6 +708,347 @@ export class ViewManager {
   }
 
   getActiveAccountId(): number | null { return this.activeAccountId }
+
+  // ── Compose with pre-filled text ─────────────────────────────────────────
+  //
+  // /compose URL に直接遷移してテキストを自動入力する。
+  // ボタンクリック方式は SPA ナビゲーションが発生すると executeJavaScript の
+  // コンテキストが消滅するため、loadURL 方式に統一する。
+
+  async openCompose(accountId: number, content: string, images: string[] = []): Promise<{ success: boolean; error?: string }> {
+    console.log(`[openCompose] account=${accountId} content=${content.slice(0, 30)}...`)
+
+    // ── Step 1: ビューを取得 or 新規作成 ────────────────────────────────────
+    let entry = this.views.get(accountId)
+
+    if (!entry || entry.view.webContents.isDestroyed()) {
+      const view = this.makeView(accountId)
+      entry = { view, restoringSession: false, loaded: false }
+      this.views.set(accountId, entry)
+      this.mainWindow.contentView.addChildView(view)
+      view.setBounds(HIDDEN_BOUNDS)
+    }
+
+    const wc = entry.view.webContents
+
+    try {
+      // ── Step 2: Cookie を確保 ─────────────────────────────────────────────
+      if (!entry.loaded) {
+        entry.loaded = true
+        const sess = session.fromPartition(`persist:account-${accountId}`)
+        await this.ensureSessionCookies(accountId, sess).catch(() => {})
+      }
+
+      if (wc.isDestroyed()) return { success: false, error: 'View destroyed' }
+
+      // ── Step 3: Threads ホームを確保（ページ未ロード or ログインページの場合のみ遷移）──
+      // /compose に直接 loadURL すると SPA が compose ダイアログを開かない。
+      // ホームでボタンクリック → SPA ルーティングでダイアログを開く方式を採用。
+      const currentUrl = wc.getURL()
+      const onThreads   = currentUrl?.includes('threads.com') && !currentUrl.includes('/login')
+
+      if (!onThreads || wc.isLoading()) {
+        console.log(`[openCompose] loading home (current: ${currentUrl})`)
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            wc.removeListener('did-finish-load', done)
+            wc.removeListener('did-fail-load',   done)
+            resolve()
+          }
+          wc.once('did-finish-load', done)
+          wc.once('did-fail-load',   done)
+          wc.loadURL(THREADS_URL)
+          setTimeout(resolve, 15_000)
+        })
+        await new Promise((r) => setTimeout(r, 800))
+      }
+
+      if (wc.isDestroyed()) return { success: false, error: 'View destroyed' }
+      if (wc.getURL().includes('/login')) {
+        return { success: false, error: 'セッションが切れています。ブラウザで再ログインしてください。' }
+      }
+
+      console.log(`[openCompose] executing script on: ${wc.getURL()}`)
+
+      // ── Step 4: compose ダイアログを開いてテキスト入力（SPA 内で完結）───
+      // loadURL で /compose に遷移すると SPA がダイアログを開かないため、
+      // ホームページ上でナビゲーションの compose ボタンをクリックする。
+      // SPA ルーティングはページ遷移なし（同一 JS コンテキスト）なので
+      // executeJavaScript のスクリプトが継続して動作する。
+      const contentJson = JSON.stringify(content)
+
+      const script = `
+        (async function() {
+          var text = ${contentJson};
+
+          function waitFor(selectors, timeoutMs) {
+            var sel = Array.isArray(selectors) ? selectors.join(', ') : selectors;
+            return new Promise(function(resolve) {
+              var el = document.querySelector(sel);
+              if (el) return resolve(el);
+              var deadline = Date.now() + timeoutMs;
+              var id = setInterval(function() {
+                var found = document.querySelector(sel);
+                if (found) { clearInterval(id); resolve(found); return; }
+                if (Date.now() > deadline) { clearInterval(id); resolve(null); }
+              }, 100);
+            });
+          }
+
+          function fillText(area, text) {
+            area.focus();
+            // Lexical エディタへの入力: execCommand('insertText') が標準的手法
+            document.execCommand('selectAll', false, null);
+            document.execCommand('delete', false, null);
+            var ok = document.execCommand('insertText', false, text);
+            console.log('[openCompose] insertText ok=' + ok + ' len=' + area.textContent.length);
+            // フォールバック: DataTransfer paste
+            if (!ok || area.textContent.trim() === '') {
+              try {
+                var dt = new DataTransfer();
+                dt.setData('text/plain', text);
+                area.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
+              } catch(e) { console.log('[openCompose] paste err', e); }
+            }
+          }
+
+          var COMPOSE_BTN_SELS = [
+            '[aria-label="作成"]',
+            '[aria-label="新しいスレッドを作成"]',
+            '[aria-label="Create new thread"]',
+            '[aria-label="新規スレッド"]',
+            '[aria-label="New thread"]',
+            '[aria-label="スレッドを作成"]',
+            '[aria-label="Create a thread"]',
+            '[aria-label="Threads を作成"]',
+            '[aria-label="Create a Thread"]',
+          ];
+
+          // フィード上部のインライン入力エリア（ダイアログ不要）
+          var INLINE_SELS = [
+            '[placeholder*="スレッドを開始"]',
+            '[placeholder*="Start a thread"]',
+            '[placeholder*="いま何"]',
+            '[placeholder*="What"]',
+          ];
+
+          // compose ダイアログ内またはインラインのテキストエリア
+          var TEXT_AREA_SELS = [
+            'div[contenteditable="true"][role="textbox"]',
+            'div[contenteditable="true"][data-lexical-editor="true"]',
+            'div[contenteditable="true"][aria-multiline]',
+            'div[contenteditable="true"]',
+          ];
+
+          // まずインライン入力エリアを試す（すでにページ上にある）
+          var inline = document.querySelector(INLINE_SELS.join(', '));
+          if (inline) {
+            console.log('[openCompose] inline compose found, clicking');
+            inline.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            await new Promise(function(r) { setTimeout(r, 400); });
+          } else {
+            // ナビゲーションの compose ボタンをクリック
+            console.log('[openCompose] waiting for compose button...');
+            var btn = await waitFor(COMPOSE_BTN_SELS, 8000);
+            if (!btn) {
+              // ページ上の全 aria-label を調べてデバッグ情報を返す
+              var labels = Array.from(document.querySelectorAll('[aria-label]'))
+                .map(function(el) { return el.getAttribute('aria-label'); })
+                .filter(function(l) { return l && l.length < 60; })
+                .slice(0, 20);
+              return { ok: false, error: 'compose ボタン未検出. labels=' + JSON.stringify(labels) };
+            }
+            console.log('[openCompose] compose btn found, clicking');
+            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            await new Promise(function(r) { setTimeout(r, 600); });
+          }
+
+          // テキストエリアを探して入力
+          var area = await waitFor(TEXT_AREA_SELS, 10000);
+          if (!area) {
+            var allEdit = Array.from(document.querySelectorAll('[contenteditable]'))
+              .map(function(el) { return el.tagName + '[role=' + el.getAttribute('role') + '][data-lexical=' + el.getAttribute('data-lexical-editor') + ']'; });
+            return { ok: false, error: 'テキストエリア未検出. editables=' + JSON.stringify(allEdit) };
+          }
+
+          console.log('[openCompose] textarea found: role=' + area.getAttribute('role'));
+
+          // Lexical は beforeinput イベントを処理後に DOM を非同期更新するため
+          // イベント発火 → 200ms 待機 → 結果確認 の順で実行する
+          area.focus();
+          area.dispatchEvent(new InputEvent('beforeinput', {
+            inputType: 'insertText',
+            data: text,
+            bubbles: true,
+            cancelable: true,
+          }));
+          await new Promise(function(r) { setTimeout(r, 200); });
+          console.log('[openCompose] after beforeinput len=' + area.textContent.length);
+
+          // beforeinput で入力できなかった場合は execCommand / paste にフォールバック
+          if (area.textContent.trim().length === 0) {
+            fillText(area, text);
+          }
+          return { ok: true, len: area.textContent.length };
+        })()
+      `
+
+      const res = await Promise.race<{ ok: boolean; error?: string; len?: number }>([
+        wc.executeJavaScript(script),
+        new Promise<{ ok: false; error: string }>((resolve) =>
+          setTimeout(() => resolve({ ok: false, error: 'JS タイムアウト (25秒)' }), 25_000)
+        ),
+      ])
+
+      console.log(`[openCompose] result:`, res)
+      if (!res?.ok) return { success: false, error: res?.error ?? '失敗' }
+      if (images.length === 0) return { success: true }
+
+      // ── Step 5: 画像をクリップボード経由で貼り付け ───────────────────────
+      // テキスト入力後 500ms 待ってから画像をペースト
+      await new Promise((r) => setTimeout(r, 500))
+      // nativeImage → clipboard.writeImage → wc.paste() で貼り付ける
+      // ローカルファイル(file://): HTTPS コンテキストから file:// は読めないため
+      //   メインプロセスで nativeImage.createFromPath() を使う
+      // HTTP URL: net.fetch で取得して Buffer → nativeImage
+      const pasteKey = process.platform === 'darwin' ? 'meta' : 'control'
+      for (const imgData of images.slice(0, 2)) {
+        if (!imgData || wc.isDestroyed()) break
+        console.log(`[openCompose] processing image: ${imgData.slice(0, 80)}`)
+        try {
+          let ni: Electron.NativeImage | null = null
+
+          if (imgData.startsWith('data:')) {
+            // data URL: そのまま nativeImage に変換
+            ni = nativeImage.createFromDataURL(imgData)
+            console.log(`[openCompose] data URL → nativeImage: ${ni.getSize().width}x${ni.getSize().height} empty=${ni.isEmpty()}`)
+
+          } else if (imgData.startsWith('file://')) {
+            // ローカルファイル: メインプロセスで直接読み込む（HTTPS コンテキスト不要）
+            const filePath = imgData.replace(/^file:\/\//, '')
+            console.log(`[openCompose] local file path: ${filePath}`)
+            ni = nativeImage.createFromPath(filePath)
+            console.log(`[openCompose] createFromPath: ${ni.getSize().width}x${ni.getSize().height} empty=${ni.isEmpty()}`)
+
+          } else {
+            // HTTP(S) URL: net.fetch で取得して Buffer から nativeImage を作成
+            console.log(`[openCompose] fetching URL: ${imgData.slice(0, 80)}`)
+            const resp = await Promise.race([
+              net.fetch(imgData),
+              new Promise<null>((r) => setTimeout(() => r(null), 10000)),
+            ])
+            if (!resp || !('ok' in resp) || !resp.ok) {
+              console.warn(`[openCompose] fetch failed: ${imgData.slice(0, 80)}`)
+              continue
+            }
+            const buf = Buffer.from(await resp.arrayBuffer())
+            ni = nativeImage.createFromBuffer(buf)
+            console.log(`[openCompose] URL → nativeImage: ${ni.getSize().width}x${ni.getSize().height} empty=${ni.isEmpty()}`)
+          }
+
+          if (!ni || ni.isEmpty()) {
+            console.warn('[openCompose] nativeImage is empty, skipping')
+            continue
+          }
+
+          clipboard.writeImage(ni)
+          await new Promise((r) => setTimeout(r, 300))
+
+          wc.focus()
+          wc.paste()
+          console.log('[openCompose] wc.paste() called')
+          await new Promise((r) => setTimeout(r, 800))
+
+          console.log('[openCompose] pasted image')
+        } catch (e) {
+          console.warn('[openCompose] image paste error:', e)
+        }
+      }
+
+      return { success: true }
+
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[openCompose] error:', msg)
+      return { success: false, error: msg }
+    }
+  }
+
+  // ── Status check via WebContentsView ────────────────────────────────────
+  //
+  // Playwright の代わりに WebContentsView で threads.com に遷移してステータスを確認。
+  // 配布ビルドに Playwright Chromium が含まれていなくても動作する。
+
+  async checkStatus(accountId: number): Promise<StatusCheckResult> {
+    try {
+      // ビューを取得または作成（非表示の一時ビューとして利用）
+      let entry = this.views.get(accountId)
+      if (!entry || entry.view.webContents.isDestroyed()) {
+        const view = this.makeView(accountId)
+        entry = { view, restoringSession: false, loaded: false }
+        this.views.set(accountId, entry)
+        this.mainWindow.contentView.addChildView(view)
+        view.setBounds(HIDDEN_BOUNDS)
+      }
+
+      const wc = entry.view.webContents
+
+      // セッション Cookie を確保
+      if (!entry.loaded) {
+        entry.loaded = true
+        const sess = session.fromPartition(`persist:account-${accountId}`)
+        await this.ensureSessionCookies(accountId, sess).catch(() => {})
+      }
+
+      if (wc.isDestroyed()) return { status: 'error', message: 'View destroyed' }
+
+      // 既に threads.com でロード済みなら遷移不要
+      const currentUrl = wc.getURL()
+      const alreadyOnThreads =
+        currentUrl?.includes('threads.com') &&
+        !currentUrl.includes('/login') &&
+        !wc.isLoading()
+
+      if (!alreadyOnThreads) {
+        wc.loadURL(THREADS_URL)
+        // ページが安定するまでポーリング（リダイレクトを含む）
+        const deadline = Date.now() + 20_000
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 500))
+          if (!wc.isLoading()) break
+        }
+        // クッキー復元 → リダイレクト完了を待つ余裕
+        await new Promise((r) => setTimeout(r, 500))
+      }
+
+      if (wc.isDestroyed()) return { status: 'error', message: 'View destroyed' }
+
+      const finalUrl = wc.getURL()
+
+      if (finalUrl.includes('/login')) {
+        return { status: 'needs_login', message: 'セッションが切れています。再ログインが必要です。' }
+      }
+
+      try {
+        const bodyText = (await wc.executeJavaScript('document.body?.innerText ?? ""')) as string
+        const isFrozen = FROZEN_KEYWORDS.some((kw) =>
+          bodyText.toLowerCase().includes(kw.toLowerCase())
+        )
+        if (isFrozen) {
+          return { status: 'frozen', message: 'アカウントが凍結または制限されています。' }
+        }
+      } catch { /* DOM 未準備の場合は無視 */ }
+
+      if (finalUrl.includes('threads.com')) {
+        return { status: 'active' }
+      }
+
+      return { status: 'error', message: `予期しないURL: ${finalUrl}` }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { status: 'error', message: msg }
+    }
+  }
 
   closeAll(): void {
     for (const accountId of [...this.views.keys()]) {

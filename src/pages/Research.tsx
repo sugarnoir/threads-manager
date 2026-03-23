@@ -31,15 +31,23 @@ function HashtagTab({ accountId }: { accountId: number | null }) {
   const [query, setQuery]     = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState<string | null>(null)
-  const [result, setResult]   = useState<{ hashtag: string; topPosts: { text: string; likes: string; url: string }[] } | null>(null)
+  const [result, setResult]   = useState<{ hashtag: string; topPosts: { text: string; likes: string; reposts: string; replies: string; url: string }[] } | null>(null)
   const [sort, setSort]       = useState<'default' | 'likes'>('default')
+  const [filter, setFilter]   = useState<FilterState>(emptyFilter())
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!accountId || !query.trim()) return
     setLoading(true)
     setError(null)
-    const res = await api.research.hashtag({ accountId, hashtag: query.trim() })
+    setResult(null)
+    const res = await api.research.hashtag({
+      accountId,
+      hashtag:    query.trim(),
+      minLikes:   parseInt(filter.minLikes)   || undefined,
+      minReposts: parseInt(filter.minReposts) || undefined,
+      minReplies: parseInt(filter.minReplies) || undefined,
+    })
     setLoading(false)
     if (res.success) setResult(res.data)
     else setError(res.error ?? '取得に失敗しました')
@@ -71,6 +79,8 @@ function HashtagTab({ accountId }: { accountId: number | null }) {
         </button>
       </form>
 
+      <FilterBar filter={filter} onChange={setFilter} onReset={() => setFilter(emptyFilter())} />
+
       {loading && <LoadingBox label="ハッシュタグを調査中..." />}
       {!loading && error && <ErrorBox message={error} />}
 
@@ -78,23 +88,26 @@ function HashtagTab({ accountId }: { accountId: number | null }) {
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-2">
             <span className="text-blue-400 font-bold text-lg">{result.hashtag}</span>
-            {result.topPosts.length > 0 && (
-              <SortSelect
-                value={sort}
-                onChange={setSort}
-                options={[
-                  { value: 'default', label: 'デフォルト' },
-                  { value: 'likes',   label: 'いいね順' },
-                ]}
-              />
-            )}
+            <div className="flex items-center gap-2">
+              <span className="text-zinc-600 text-[10px]">{sorted.length} 件</span>
+              {result.topPosts.length > 0 && (
+                <SortSelect
+                  value={sort}
+                  onChange={setSort}
+                  options={[
+                    { value: 'default', label: 'デフォルト' },
+                    { value: 'likes',   label: 'いいね順' },
+                  ]}
+                />
+              )}
+            </div>
           </div>
           {sorted.length === 0 ? (
-            <p className="text-zinc-500 text-sm">投稿が見つかりませんでした</p>
+            <p className="text-zinc-500 text-sm">条件に一致する投稿がありません</p>
           ) : (
             <div className="space-y-2">
               {sorted.map((p, i) => (
-                <PostCard key={i} text={p.text} likes={p.likes} url={p.url} />
+                <PostCard key={i} text={p.text} likes={p.likes} reposts={p.reposts} replies={p.replies} url={p.url} />
               ))}
             </div>
           )}
@@ -123,6 +136,7 @@ function AccountTab({ accountId }: { accountId: number | null }) {
     recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string; imageUrl: string | null; timestamp: string | null }[]
   } | null>(null)
   const [sort, setSort]           = useState<AccountSort>('default')
+  const [filter, setFilter]       = useState<FilterState>(emptyFilter())
   const [stockingIdx, setStockingIdx] = useState<number | null>(null)
   const [stockedUrls, setStockedUrls] = useState<Set<string>>(new Set())
 
@@ -133,7 +147,13 @@ function AccountTab({ accountId }: { accountId: number | null }) {
     setError(null)
     setStockedUrls(new Set())
     setSort('default')
-    const res = await api.research.account({ accountId, targetUsername: query.trim() })
+    const res = await api.research.account({
+      accountId,
+      targetUsername: query.trim(),
+      minLikes:   parseInt(filter.minLikes)   || undefined,
+      minReposts: parseInt(filter.minReposts) || undefined,
+      minReplies: parseInt(filter.minReplies) || undefined,
+    })
     setLoading(false)
     if (res.success) setResult(res.data)
     else setError(res.error ?? '取得に失敗しました')
@@ -189,6 +209,8 @@ function AccountTab({ accountId }: { accountId: number | null }) {
         </button>
       </form>
 
+      <FilterBar filter={filter} onChange={setFilter} onReset={() => setFilter(emptyFilter())} />
+
       {loading && <LoadingBox label="アカウントを分析中..." />}
       {!loading && error && <ErrorBox message={error} />}
 
@@ -222,7 +244,7 @@ function AccountTab({ accountId }: { accountId: number | null }) {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">
-                  投稿 ({result.recentPosts.length}件)
+                  投稿 ({sorted.length}/{result.recentPosts.length}件)
                 </p>
                 <SortSelect
                   value={sort}
@@ -293,14 +315,21 @@ function KeywordTab({ accountId }: { accountId: number | null }) {
     username: string; text: string; likes: string; replies: string
     reposts: string; url: string; timestamp: string | null
   }[] | null>(null)
-  const [sort, setSort] = useState<KeywordSort>('default')
+  const [sort, setSort]     = useState<KeywordSort>('default')
+  const [filter, setFilter] = useState<FilterState>(emptyFilter())
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!accountId || !query.trim()) return
     setLoading(true)
     setError(null)
-    const res = await api.research.keyword({ accountId, keyword: query.trim() })
+    const res = await api.research.keyword({
+      accountId,
+      keyword:    query.trim(),
+      minLikes:   parseInt(filter.minLikes)   || undefined,
+      minReposts: parseInt(filter.minReposts) || undefined,
+      minReplies: parseInt(filter.minReplies) || undefined,
+    })
     setLoading(false)
     if (res.success) setResults(res.data)
     else setError(res.error ?? '取得に失敗しました')
@@ -335,13 +364,15 @@ function KeywordTab({ accountId }: { accountId: number | null }) {
         </button>
       </form>
 
+      <FilterBar filter={filter} onChange={setFilter} onReset={() => setFilter(emptyFilter())} />
+
       {loading && <LoadingBox label="投稿を検索中..." />}
       {!loading && error && <ErrorBox message={error} />}
 
       {!loading && results !== null && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-zinc-500 text-xs">{results.length} 件の投稿</p>
+            <p className="text-zinc-500 text-xs">{sorted.length} 件の投稿</p>
             {results.length > 0 && (
               <SortSelect
                 value={sort}
@@ -357,7 +388,7 @@ function KeywordTab({ accountId }: { accountId: number | null }) {
             )}
           </div>
           {sorted.length === 0 ? (
-            <p className="text-zinc-500 text-sm">投稿が見つかりませんでした</p>
+            <p className="text-zinc-500 text-sm">条件に一致する投稿がありません</p>
           ) : (
             sorted.map((p, i) => (
               <PostCard
@@ -392,14 +423,21 @@ function CompetitiveTab({ accountId }: { accountId: number | null }) {
     username: string; text: string; likes: number; reposts: number
     replies: number; url: string; score: number
   }[] | null>(null)
-  const [sort, setSort] = useState<CompetitiveSort>('score')
+  const [sort, setSort]     = useState<CompetitiveSort>('score')
+  const [filter, setFilter] = useState<FilterState>(emptyFilter())
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!accountId || !query.trim()) return
     setLoading(true)
     setError(null)
-    const res = await api.research.competitive({ accountId, keyword: query.trim() })
+    const res = await api.research.competitive({
+      accountId,
+      keyword:    query.trim(),
+      minLikes:   parseInt(filter.minLikes)   || undefined,
+      minReposts: parseInt(filter.minReposts) || undefined,
+      minReplies: parseInt(filter.minReplies) || undefined,
+    })
     setLoading(false)
     if (res.success) setResults(res.data)
     else setError(res.error ?? '取得に失敗しました')
@@ -434,13 +472,15 @@ function CompetitiveTab({ accountId }: { accountId: number | null }) {
         </button>
       </form>
 
+      <FilterBar filter={filter} onChange={setFilter} onReset={() => setFilter(emptyFilter())} />
+
       {loading && <LoadingBox label="コンペ投稿を分析中..." />}
       {!loading && error && <ErrorBox message={error} />}
 
       {!loading && results !== null && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-zinc-500 text-xs">{results.length} 件</p>
+            <p className="text-zinc-500 text-xs">{sorted.length} 件</p>
             {results.length > 0 && (
               <SortSelect
                 value={sort}
@@ -455,7 +495,7 @@ function CompetitiveTab({ accountId }: { accountId: number | null }) {
             )}
           </div>
           {sorted.length === 0 ? (
-            <p className="text-zinc-500 text-sm">投稿が見つかりませんでした</p>
+            <p className="text-zinc-500 text-sm">条件に一致する投稿がありません</p>
           ) : (
             sorted.map((p, i) => (
               <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 space-y-2">
@@ -492,6 +532,92 @@ function CompetitiveTab({ accountId }: { accountId: number | null }) {
 
       {!accountId && <NoAccountNotice />}
     </div>
+  )
+}
+
+// ── Filter ────────────────────────────────────────────────────────────────────
+
+interface FilterState {
+  minLikes:   string
+  minReposts: string
+  minReplies: string
+}
+
+const emptyFilter = (): FilterState => ({ minLikes: '', minReposts: '', minReplies: '' })
+
+function applyFilter<T extends { likes: string | number; reposts?: string | number; replies?: string | number }>(
+  arr: T[],
+  filter: FilterState,
+): T[] {
+  const minL = parseInt(filter.minLikes)   || 0
+  const minRp = parseInt(filter.minReposts) || 0
+  const minRe = parseInt(filter.minReplies) || 0
+  return arr.filter((p) => {
+    if (minL  > 0 && parseCount(p.likes)               < minL)  return false
+    if (minRp > 0 && parseCount(p.reposts ?? 0)        < minRp) return false
+    if (minRe > 0 && parseCount(p.replies ?? 0)        < minRe) return false
+    return true
+  })
+}
+
+function FilterBar({
+  filter,
+  onChange,
+  onReset,
+  hasReposts = true,
+  hasReplies = true,
+}: {
+  filter:     FilterState
+  onChange:   (f: FilterState) => void
+  onReset:    () => void
+  hasReposts?: boolean
+  hasReplies?: boolean
+}) {
+  const active = filter.minLikes !== '' || filter.minReposts !== '' || filter.minReplies !== ''
+  const set = (key: keyof FilterState) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    onChange({ ...filter, [key]: e.target.value })
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl">
+      <span className="text-zinc-500 text-[10px] font-semibold shrink-0">フィルター</span>
+      <div className="flex flex-wrap gap-1.5 flex-1">
+        <FilterInput label="いいね≥"   value={filter.minLikes}   onChange={set('minLikes')} />
+        {hasReposts && <FilterInput label="RT≥"       value={filter.minReposts} onChange={set('minReposts')} />}
+        {hasReplies && <FilterInput label="返信≥"     value={filter.minReplies} onChange={set('minReplies')} />}
+      </div>
+      {active && (
+        <button
+          onClick={onReset}
+          className="shrink-0 px-2 py-0.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded-lg transition-colors"
+        >
+          リセット
+        </button>
+      )}
+    </div>
+  )
+}
+
+function FilterInput({
+  label,
+  value,
+  onChange,
+}: {
+  label:    string
+  value:    string
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+}) {
+  return (
+    <label className="flex items-center gap-1">
+      <span className="text-zinc-500 text-[10px] whitespace-nowrap">{label}</span>
+      <input
+        type="number"
+        min="0"
+        value={value}
+        onChange={onChange}
+        placeholder="0"
+        className="w-16 px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 focus:border-blue-500 rounded text-white text-[11px] outline-none"
+      />
+    </label>
   )
 }
 

@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { api } from '../lib/ipc'
+import type { ProxyPreset } from '../lib/ipc'
 
 type Mode = 'login' | 'register'
 type ProxyType = 'none' | 'http' | 'https' | 'socks5'
@@ -20,17 +22,47 @@ function ProxyForm({
   port, setPort,
   username, setUsername,
   password, setPassword,
+  presets,
 }: {
   proxyType: ProxyType; setProxyType: (v: ProxyType) => void
   host: string; setHost: (v: string) => void
   port: string; setPort: (v: string) => void
   username: string; setUsername: (v: string) => void
   password: string; setPassword: (v: string) => void
+  presets: ProxyPreset[]
 }) {
   const [showPw, setShowPw] = useState(false)
 
+  const applyPreset = (id: string) => {
+    if (!id) return
+    const p = presets.find((x) => String(x.id) === id)
+    if (!p) return
+    setProxyType(p.type as ProxyType)
+    setHost(p.host)
+    setPort(String(p.port))
+    setUsername(p.username ?? '')
+    setPassword(p.password ?? '')
+  }
+
   return (
     <div className="space-y-3">
+      {presets.length > 0 && (
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1.5">プリセットから選択</label>
+          <select
+            defaultValue=""
+            onChange={(e) => applyPreset(e.target.value)}
+            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+          >
+            <option value="">── プリセットを選択 ──</option>
+            {presets.map((p) => (
+              <option key={p.id} value={String(p.id)}>
+                {p.name}　{p.type.toUpperCase()} {p.host}:{p.port}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div>
         <label className="text-zinc-400 text-xs font-medium block mb-2">プロキシ設定</label>
         <div className="grid grid-cols-4 gap-1.5">
@@ -120,6 +152,11 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
   const [port, setPort]           = useState('')
   const [username, setUsername]   = useState('')
   const [password, setPassword]   = useState('')
+  const [presets, setPresets]     = useState<ProxyPreset[]>([])
+
+  useEffect(() => {
+    api.proxyPresets.list().then(setPresets).catch(() => {})
+  }, [])
 
   const buildProxy = (): ProxyOptions | null => {
     if (proxyType === 'none' || !host || !port) return null
@@ -197,6 +234,7 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
           port={port} setPort={setPort}
           username={username} setUsername={setUsername}
           password={password} setPassword={setPassword}
+          presets={presets}
         />
 
         {/* Actions */}

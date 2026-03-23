@@ -3,9 +3,38 @@ import { ipcMain, BrowserWindow, session } from 'electron'
 const THREADS_URL   = 'https://www.threads.com'
 const LOAD_TIMEOUT  = 20_000
 const POLL_MS       = 400
-const TARGET_POSTS  = 30
-const MAX_SCROLLS   = 6
+const TARGET_POSTS  = 50   // 目標取得件数
+const MAX_SCROLLS   = 20   // 最大スクロール回数（増量）
 const SCROLL_WAIT   = 3_000
+
+// ── Filter helpers ────────────────────────────────────────────────────────────
+
+function parseNum(v: string | number): number {
+  if (typeof v === 'number') return v
+  const s = String(v).replace(/,/g, '')
+  if (/万/.test(s)) return Math.round(parseFloat(s) * 10_000)
+  if (/[kK]/.test(s)) return Math.round(parseFloat(s) * 1_000)
+  if (/[mM]/.test(s)) return Math.round(parseFloat(s) * 1_000_000)
+  return parseInt(s.replace(/\D/g, '')) || 0
+}
+
+interface PostFilter {
+  minLikes?:   number
+  minReposts?: number
+  minReplies?: number
+}
+
+function applyPostFilter<T extends { likes: string | number; reposts?: string | number; replies?: string | number }>(
+  posts: T[],
+  f: PostFilter,
+): T[] {
+  return posts.filter((p) => {
+    if (f.minLikes   && f.minLikes   > 0 && parseNum(p.likes)        < f.minLikes)   return false
+    if (f.minReposts && f.minReposts > 0 && parseNum(p.reposts ?? 0) < f.minReposts) return false
+    if (f.minReplies && f.minReplies > 0 && parseNum(p.replies ?? 0) < f.minReplies) return false
+    return true
+  })
+}
 
 // ── Core helpers ──────────────────────────────────────────────────────────────
 
@@ -62,37 +91,38 @@ async function waitForContent(win: BrowserWindow, selector: string, ms = 10_000)
 }
 
 /**
- * Scroll down repeatedly to trigger lazy loading until we have targetCount
- * containers or we hit maxScrolls with no new content appearing.
+ * Scroll down repeatedly to trigger lazy loading.
+ * Uses instant scroll + actual extracted-post count (not raw DOM count)
+ * to handle Threads' virtualised list correctly.
  */
 async function scrollToLoad(win: BrowserWindow, targetCount = TARGET_POSTS, maxScrolls = MAX_SCROLLS): Promise<void> {
+  const countPosts = async (): Promise<number> => {
+    try {
+      const posts: { url: string }[] = await win.webContents.executeJavaScript(EXTRACT_POSTS)
+      return posts.length
+    } catch { return 0 }
+  }
+
   let staleRounds = 0
   for (let i = 0; i < maxScrolls; i++) {
-    const before: number = await win.webContents.executeJavaScript(
-      `document.querySelectorAll('[data-pressable-container]').length`
-    ).catch(() => 0)
-
+    const before = await countPosts()
     if (before >= targetCount) break
 
-    // Scroll to bottom
     await win.webContents.executeJavaScript(
-      `window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })`
+      `window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' })`
     ).catch(() => {})
 
-    // Wait up to SCROLL_WAIT ms for new containers to appear
     const deadline = Date.now() + SCROLL_WAIT
     let after = before
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, POLL_MS))
-      after = await win.webContents.executeJavaScript(
-        `document.querySelectorAll('[data-pressable-container]').length`
-      ).catch(() => before)
+      after = await countPosts()
       if (after > before) break
     }
 
     if (after <= before) {
       staleRounds++
-      if (staleRounds >= 2) break
+      if (staleRounds >= 3) break  // 3回連続で増えなければ打ち切り
     } else {
       staleRounds = 0
     }
@@ -224,6 +254,7 @@ const EXTRACT_PROFILE_INFO = /* js */ `
 
 interface ProfilePost {
   url:       string
+  username:  string
   text:      string
   likes:     string
   replies:   string
@@ -242,7 +273,7 @@ interface ProfilePost {
  */
 async function scrollAndCollectPosts(
   win: BrowserWindow,
-  target  = 30,
+  target     = TARGET_POSTS,
   maxScrolls = 40,
 ): Promise<ProfilePost[]> {
   const collected = new Map<string, ProfilePost>()
@@ -266,13 +297,13 @@ async function scrollAndCollectPosts(
 
     const before = collected.size
 
-    // instant scroll avoids waiting for smooth-scroll animation
+    // Scroll to bottom of page (instant to avoid animation delay)
     await win.webContents.executeJavaScript(
-      `window.scrollBy({ top: window.innerHeight * 2, behavior: 'instant' })`
+      `window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' })`
     ).catch(() => {})
 
-    // Poll for up to 3 s; stop early once new posts appear
-    const deadline = Date.now() + 3_000
+    // Poll up to SCROLL_WAIT ms; stop early once new posts appear
+    const deadline = Date.now() + SCROLL_WAIT
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 500))
       await harvest()
@@ -281,7 +312,7 @@ async function scrollAndCollectPosts(
 
     if (collected.size <= before) {
       staleRounds++
-      if (staleRounds >= 2) break   // two consecutive dry scrolls → end of feed
+      if (staleRounds >= 3) break   // 3回連続で増えなければフィード末尾
     } else {
       staleRounds = 0
     }
@@ -341,15 +372,14 @@ export function registerResearchHandlers(): void {
   // ── Keyword search ──────────────────────────────────────────────────────────
   ipcMain.handle(
     'research:keyword',
-    async (_event, data: { accountId: number; keyword: string }) => {
+    async (_event, data: { accountId: number; keyword: string; minLikes?: number; minReposts?: number; minReplies?: number }) => {
       const win = makeScrapeWindow(data.accountId)
       try {
         const url = `${THREADS_URL}/search?q=${encodeURIComponent(data.keyword)}&serp_type=default`
         await loadURL(win, url)
         await waitForContent(win, '[data-pressable-container]')
-        await scrollToLoad(win)
-        const posts = await win.webContents.executeJavaScript(EXTRACT_POSTS)
-        return { success: true, data: posts }
+        const posts = await scrollAndCollectPosts(win, TARGET_POSTS, MAX_SCROLLS)
+        return { success: true, data: applyPostFilter(posts, data) }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
       } finally {
@@ -361,18 +391,18 @@ export function registerResearchHandlers(): void {
   // ── Hashtag search ──────────────────────────────────────────────────────────
   ipcMain.handle(
     'research:hashtag',
-    async (_event, data: { accountId: number; hashtag: string }) => {
+    async (_event, data: { accountId: number; hashtag: string; minLikes?: number; minReposts?: number; minReplies?: number }) => {
       const win = makeScrapeWindow(data.accountId)
       try {
         const tag = data.hashtag.startsWith('#') ? data.hashtag.slice(1) : data.hashtag
         const url = `${THREADS_URL}/search?q=%23${encodeURIComponent(tag)}&serp_type=default`
         await loadURL(win, url)
         await waitForContent(win, '[data-pressable-container]')
-        await scrollToLoad(win)
-        const posts: { text: string; url: string; likes: string }[] = await win.webContents.executeJavaScript(EXTRACT_POSTS)
+        const posts = await scrollAndCollectPosts(win, TARGET_POSTS, MAX_SCROLLS)
+        const filtered = applyPostFilter(posts, data)
         return {
           success: true,
-          data: { hashtag: `#${tag}`, topPosts: posts.map((p) => ({ text: p.text, likes: '0', url: p.url })) },
+          data: { hashtag: `#${tag}`, topPosts: filtered.map((p) => ({ text: p.text, likes: p.likes, reposts: p.reposts, replies: p.replies, url: p.url })) },
         }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
@@ -385,7 +415,7 @@ export function registerResearchHandlers(): void {
   // ── Account analysis ────────────────────────────────────────────────────────
   ipcMain.handle(
     'research:account',
-    async (_event, data: { accountId: number; targetUsername: string }) => {
+    async (_event, data: { accountId: number; targetUsername: string; minLikes?: number; minReposts?: number; minReplies?: number }) => {
       const win = makeScrapeWindow(data.accountId)
       try {
         const username = data.targetUsername.startsWith('@') ? data.targetUsername.slice(1) : data.targetUsername
@@ -394,7 +424,8 @@ export function registerResearchHandlers(): void {
 
         // Incremental scroll: collect posts one scroll at a time, accumulate by URL.
         // This handles Threads' virtual list (DOM nodes removed while scrolling).
-        const recentPosts = await scrollAndCollectPosts(win, 30, 40)
+        const allPosts    = await scrollAndCollectPosts(win, TARGET_POSTS, 40)
+        const recentPosts = applyPostFilter(allPosts, data)
 
         const profileInfo: { displayName: string | null; bio: string | null; followerCount: string | null } =
           await win.webContents.executeJavaScript(EXTRACT_PROFILE_INFO)
@@ -416,24 +447,23 @@ export function registerResearchHandlers(): void {
   // ── Competitive analysis ────────────────────────────────────────────────────
   ipcMain.handle(
     'research:competitive',
-    async (_event, data: { accountId: number; keyword: string }) => {
+    async (_event, data: { accountId: number; keyword: string; minLikes?: number; minReposts?: number; minReplies?: number }) => {
       const win = makeScrapeWindow(data.accountId)
       try {
         const url = `${THREADS_URL}/search?q=${encodeURIComponent(data.keyword)}&serp_type=default`
         await loadURL(win, url)
         await waitForContent(win, '[data-pressable-container]')
-        await scrollToLoad(win)
-        const raw: { username: string; text: string; likes: string; reposts: string; replies: string; url: string }[] =
-          await win.webContents.executeJavaScript(EXTRACT_POSTS)
+        const raw = await scrollAndCollectPosts(win, TARGET_POSTS, MAX_SCROLLS)
 
-        const ranked = raw
-          .map((p) => {
+        const ranked = applyPostFilter(
+          raw.map((p) => {
             const likes   = parseInt(p.likes.replace(/\D/g, ''))   || 0
             const reposts = parseInt(p.reposts.replace(/\D/g, '')) || 0
             const replies = parseInt(p.replies.replace(/\D/g, '')) || 0
             return { username: p.username, text: p.text, likes, reposts, replies, url: p.url, score: likes + reposts * 2 + replies }
-          })
-          .sort((a, b) => b.score - a.score)
+          }),
+          data,
+        ).sort((a, b) => b.score - a.score)
 
         return { success: true, data: ranked }
       } catch (err) {

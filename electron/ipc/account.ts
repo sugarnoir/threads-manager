@@ -13,9 +13,10 @@ import {
   reorderAccounts,
   deleteAccount,
   getAccountById,
+  getAccountFingerprint,
 } from '../db/repositories/accounts'
 import { setSetting } from '../db/repositories/settings'
-import { checkLoginStatus, checkAccountStatus } from '../playwright/threads-client'
+import type { StatusCheckResult } from '../browser-views/view-manager'
 import { createAndSaveFingerprint } from '../fingerprint'
 import { closeContext, reloadContext } from '../playwright/browser-manager'
 import { getViewManager } from '../browser-views/view-manager'
@@ -39,10 +40,11 @@ export function registerAccountHandlers(): void {
 
       try {
         const viewManager = getViewManager()
-        const { username } = await viewManager.startLogin(tempKey)
+        const { username, displayName } = await viewManager.startLogin(tempKey)
 
         const account = createAccount({
           username,
+          display_name: displayName ?? undefined,
           session_dir: sessionDir,
           proxy_url: options?.proxy_url,
           proxy_username: options?.proxy_username,
@@ -50,7 +52,7 @@ export function registerAccountHandlers(): void {
         })
         // アカウント作成直後にフィンガープリントを固定
         createAndSaveFingerprint(account.id)
-        updateAccountStatus(account.id, 'active')
+        updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
 
         // Copy login session cookies into the permanent account partition
         await viewManager.migrateLoginSession(tempKey, account.id)
@@ -87,7 +89,7 @@ export function registerAccountHandlers(): void {
 
       try {
         const viewManager = getViewManager()
-        const { username } = await viewManager.startRegister(
+        const { username, displayName } = await viewManager.startRegister(
           tempKey,
           options?.proxy_url,
           options?.proxy_username,
@@ -96,6 +98,7 @@ export function registerAccountHandlers(): void {
 
         const account = createAccount({
           username,
+          display_name: displayName ?? undefined,
           session_dir: sessionDir,
           proxy_url: options?.proxy_url,
           proxy_username: options?.proxy_username,
@@ -103,7 +106,7 @@ export function registerAccountHandlers(): void {
         })
         // アカウント作成直後にフィンガープリントを固定
         createAndSaveFingerprint(account.id)
-        updateAccountStatus(account.id, 'active')
+        updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
         await viewManager.migrateLoginSession(tempKey, account.id)
 
         return { success: true, account: { ...account, status: 'active' } }
@@ -158,7 +161,7 @@ export function registerAccountHandlers(): void {
   )
 
   ipcMain.handle('accounts:check', async (_event, id: number) => {
-    const result = await checkAccountStatus(id)
+    const result: StatusCheckResult = await getViewManager().checkStatus(id)
     updateAccountStatus(id, result.status)
     if (result.status !== 'active') {
       const account = getAccountById(id)
@@ -194,7 +197,7 @@ export function registerAccountHandlers(): void {
       const account = accounts[i]
       push({ type: 'checking', accountId: account.id, index: i, total })
 
-      const result = await checkAccountStatus(account.id)
+      const result: StatusCheckResult = await getViewManager().checkStatus(account.id)
       updateAccountStatus(account.id, result.status)
 
       if (result.status !== 'active') {
@@ -294,6 +297,12 @@ export function registerAccountHandlers(): void {
 
     deleteAccount(id)
     return { success: true }
+  })
+
+  ipcMain.handle('accounts:fingerprint', (_event, id: number) => {
+    const json = getAccountFingerprint(id)
+    if (!json) return null
+    try { return JSON.parse(json) } catch { return null }
   })
 
   // ── ネイティブコンテキストメニュー ──────────────────────────────────────────

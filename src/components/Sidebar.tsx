@@ -16,7 +16,7 @@ interface Props {
   onOpenTool: (tool: ToolType) => void
 }
 
-export type ToolType = 'compose' | 'scheduler' | 'engagement' | 'history' | 'settings' | 'status' | 'research' | 'templates'
+export type ToolType = 'compose' | 'scheduler' | 'engagement' | 'history' | 'settings' | 'status' | 'research' | 'templates' | 'proxy' | 'image-list'
 
 interface GroupEditState {
   accountId: number
@@ -139,18 +139,6 @@ const BOTTOM_TOOLS: { id: ToolType; label: string; icon: JSX.Element }[] = [
       </svg>
     ),
   },
-  {
-    id: 'scheduler',
-    label: '自動投稿',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="17 1 21 5 17 9" />
-        <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-        <polyline points="7 23 3 19 7 15" />
-        <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-      </svg>
-    ),
-  },
 ]
 
 export function Sidebar({
@@ -167,6 +155,82 @@ export function Sidebar({
   onReorderAccounts,
   onOpenTool,
 }: Props) {
+  const [showNumbers, setShowNumbers] = useState(
+    () => localStorage.getItem('showAccountNumbers') === 'true'
+  )
+
+  useEffect(() => {
+    const handler = () => setShowNumbers(localStorage.getItem('showAccountNumbers') === 'true')
+    window.addEventListener('showAccountNumbersChanged', handler)
+    return () => window.removeEventListener('showAccountNumbersChanged', handler)
+  }, [])
+
+  // グループ関係なく全体の連番マップを作成
+  const accountNumberMap = new Map(accounts.map((a, i) => [a.id, i + 1]))
+
+  // ── CSV インポート ────────────────────────────────────────────────────────
+  const csvInputRef = useRef<HTMLInputElement>(null)
+  const [csvImporting, setCsvImporting] = useState(false)
+  const [csvToast, setCsvToast]         = useState<{ msg: string; ok: boolean } | null>(null)
+
+  const showCsvToast = (msg: string, ok: boolean) => {
+    setCsvToast({ msg, ok })
+    setTimeout(() => setCsvToast(null), 5000)
+  }
+
+  const handleSidebarCsvFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setCsvImporting(true)
+    try {
+      const text = await file.text()
+      // 列 = アカウント番号（1列目→アカウント1番, 2列目→アカウント2番…）
+      // 行 = 各アカウントのストック（最大50行）
+      const parseRow = (line: string): string[] => {
+        const cols: string[] = []
+        let cur = '', inQ = false
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i]
+          if (ch === '"') {
+            if (inQ && line[i + 1] === '"') { cur += '"'; i++ } else inQ = !inQ
+          } else if (ch === ',' && !inQ) { cols.push(cur); cur = '' } else { cur += ch }
+        }
+        cols.push(cur)
+        return cols
+      }
+      const matrix = text.split(/\r?\n/).filter(l => l.trim()).map(parseRow)
+      if (matrix.length === 0) { showCsvToast('空のCSVです', false); return }
+
+      const numCols = Math.max(...matrix.map(r => r.length))
+      const payload: Array<{ account_id: number; content: string; image_url: null; image_url_2: null }> = []
+      let skippedCols = 0
+
+      for (let col = 0; col < numCols; col++) {
+        const account = accounts[col]
+        if (!account) { skippedCols++; continue }
+
+        for (let row = 0; row < matrix.length; row++) {
+          const content = matrix[row][col]?.trim() ?? ''
+          if (!content) continue
+          payload.push({ account_id: account.id, content, image_url: null, image_url_2: null })
+        }
+      }
+
+      if (payload.length === 0) { showCsvToast('インポートできるストックがありません', false); return }
+
+      const res = await api.stocks.importCsv(payload)
+      const parts = [`${res.imported}件インポートしました`]
+      if (skippedCols > 0)       parts.push(`列超過スキップ: ${skippedCols}列`)
+      if (res.errors.length > 0) parts.push(`エラー: ${res.errors.length}件`)
+      showCsvToast(parts.join(' / '), res.errors.length === 0 && skippedCols === 0)
+    } catch (err) {
+      showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setCsvImporting(false)
+    }
+  }
+
   const [groupEdit, setGroupEdit] = useState<GroupEditState | null>(null)
   const groupInputRef = useRef<HTMLInputElement>(null)
 
@@ -364,25 +428,34 @@ export function Sidebar({
       <div className="px-3 pb-3 shrink-0">
         <div className="grid grid-cols-4 gap-1.5">
           {([
-            { id: 'settings'    as ToolType, label: '設定',            Icon: IconProxy },
-            { id: 'compose'     as ToolType, label: '一括操作',        Icon: IconBulk  },
-            { id: 'status'      as ToolType, label: 'ステータス',          Icon: IconCheck },
-            { id: 'engagement'  as ToolType, label: 'いいね/RT',       Icon: IconHeart },
-          ] as const).map(({ id, label, Icon }) => {
+            { id: 'settings'    as ToolType, label: '設定',       Icon: IconProxy, disabled: false },
+            { id: 'image-list'  as ToolType, label: '画像リスト', Icon: IconBulk,  disabled: false },
+            { id: 'status'      as ToolType, label: 'ステータス', Icon: IconCheck, disabled: false },
+            { id: 'engagement'  as ToolType, label: 'いいね/RT',  Icon: IconHeart, disabled: true  },
+          ] as const).map(({ id, label, Icon, disabled }) => {
             const isActive = activeTool === id
             return (
-              <button
-                key={id}
-                onClick={() => onOpenTool(id)}
-                className={`flex flex-col items-center gap-1.5 py-2.5 px-1 rounded-xl text-center transition-all ${
-                  isActive
-                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
-                    : 'bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                }`}
-              >
-                <Icon />
-                <span className="text-[9px] leading-tight font-medium whitespace-nowrap">{label}</span>
-              </button>
+              <div key={id} className="relative">
+                <button
+                  disabled={disabled}
+                  onClick={() => !disabled && onOpenTool(id)}
+                  className={`w-full flex flex-col items-center gap-1.5 py-2.5 px-1 rounded-xl text-center transition-all ${
+                    disabled
+                      ? 'bg-zinc-900 text-zinc-600 cursor-not-allowed opacity-50'
+                      : isActive
+                        ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
+                        : 'bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                  }`}
+                >
+                  <Icon />
+                  <span className="text-[9px] leading-tight font-medium whitespace-nowrap">{label}</span>
+                </button>
+                {disabled && (
+                  <span className="absolute -top-1.5 -right-1 bg-zinc-700 text-zinc-400 text-[7px] font-bold leading-none px-1 py-0.5 rounded-full whitespace-nowrap">
+                    使用不可
+                  </span>
+                )}
+              </div>
             )
           })}
         </div>
@@ -516,6 +589,13 @@ export function Sidebar({
                         ⠿
                       </span>
 
+                      {/* 番号バッジ */}
+                      {showNumbers && (
+                        <span className="shrink-0 w-6 text-center text-[10px] font-mono font-semibold text-zinc-500 leading-none tabular-nums">
+                          {accountNumberMap.get(account.id)}
+                        </span>
+                      )}
+
                       {/* Avatar */}
                       <div className="relative shrink-0">
                         {account.avatar_url ? (
@@ -594,6 +674,16 @@ export function Sidebar({
 
       {/* ── Compact bottom tools (カード型) ── */}
       <div className="px-2 pt-2 border-t border-zinc-800/60 shrink-0">
+        {/* CSV インポートトースト */}
+        {csvToast && (
+          <div className={`mb-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-medium leading-tight ${
+            csvToast.ok
+              ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+              : 'bg-amber-500/15 border border-amber-500/30 text-amber-400'
+          }`}>
+            {csvToast.msg}
+          </div>
+        )}
         <div className="flex gap-1.5">
           {BOTTOM_TOOLS.map((t) => (
             <button
@@ -611,6 +701,32 @@ export function Sidebar({
               <span className="text-[9px] leading-none font-medium whitespace-nowrap">{t.label}</span>
             </button>
           ))}
+
+          {/* CSV インポートボタン */}
+          <input
+            ref={csvInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={handleSidebarCsvFile}
+          />
+          <button
+            onClick={() => csvInputRef.current?.click()}
+            disabled={csvImporting}
+            title="CSVインポート"
+            style={{ background: '#2a2a2a', borderRadius: '8px' }}
+            className="flex-1 flex flex-col items-center gap-1.5 py-2.5 transition-colors text-center text-zinc-400 hover:text-zinc-200 disabled:opacity-50"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="12" y1="12" x2="12" y2="18" />
+              <polyline points="9 15 12 18 15 15" />
+            </svg>
+            <span className="text-[9px] leading-none font-medium whitespace-nowrap">
+              {csvImporting ? '読込中' : 'CSV'}
+            </span>
+          </button>
         </div>
       </div>
 
@@ -640,8 +756,8 @@ export function Sidebar({
 
         {/* 設定ボタン */}
         <button
-          onClick={() => onOpenTool('settings')}
-          title="設定"
+          onClick={() => onOpenTool('proxy')}
+          title="プロキシ"
           className="w-10 shrink-0 flex items-center justify-center rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

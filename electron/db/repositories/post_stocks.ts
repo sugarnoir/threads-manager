@@ -1,14 +1,15 @@
 import { getDb } from '../index'
 
 export interface PostStock {
-  id:         number
-  account_id: number
-  title:      string | null
-  content:    string
-  image_url:  string | null
-  sort_order: number
-  created_at: string
-  updated_at: string
+  id:          number
+  account_id:  number
+  title:       string | null
+  content:     string
+  image_url:   string | null
+  image_url_2: string | null
+  sort_order:  number
+  created_at:  string
+  updated_at:  string
 }
 
 export function getStocksByAccount(accountId: number): PostStock[] {
@@ -18,37 +19,39 @@ export function getStocksByAccount(accountId: number): PostStock[] {
 }
 
 export function createStock(data: {
-  account_id: number
-  title?:     string | null
-  content:    string
-  image_url?: string | null
+  account_id:   number
+  title?:       string | null
+  content:      string
+  image_url?:   string | null
+  image_url_2?: string | null
 }): PostStock {
   const db = getDb()
   const { c } = db
     .prepare('SELECT COUNT(*) as c FROM post_stocks WHERE account_id = ?')
     .get(data.account_id) as { c: number }
-  if (c >= 20) throw new Error('ストックは最大20件までです')
+  if (c >= 50) throw new Error('ストックは最大50件までです')
 
   const { m } = db
     .prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM post_stocks WHERE account_id = ?')
     .get(data.account_id) as { m: number }
 
   const result = db
-    .prepare('INSERT INTO post_stocks (account_id, title, content, image_url, sort_order) VALUES (?, ?, ?, ?, ?)')
-    .run(data.account_id, data.title ?? null, data.content, data.image_url ?? null, m + 1000)
+    .prepare('INSERT INTO post_stocks (account_id, title, content, image_url, image_url_2, sort_order) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(data.account_id, data.title ?? null, data.content, data.image_url ?? null, data.image_url_2 ?? null, m + 1000)
 
   return db.prepare('SELECT * FROM post_stocks WHERE id = ?').get(result.lastInsertRowid) as PostStock
 }
 
 export function updateStock(id: number, data: {
-  title?:    string | null
-  content:   string
-  image_url?: string | null
+  title?:       string | null
+  content:      string
+  image_url?:   string | null
+  image_url_2?: string | null
 }): PostStock {
   const db = getDb()
   db.prepare(
-    "UPDATE post_stocks SET title = ?, content = ?, image_url = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(data.title ?? null, data.content, data.image_url ?? null, id)
+    "UPDATE post_stocks SET title = ?, content = ?, image_url = ?, image_url_2 = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(data.title ?? null, data.content, data.image_url ?? null, data.image_url_2 ?? null, id)
   return db.prepare('SELECT * FROM post_stocks WHERE id = ?').get(id) as PostStock
 }
 

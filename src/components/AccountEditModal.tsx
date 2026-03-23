@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react'
-import { User, Shield, FileText, Bookmark, Settings } from 'lucide-react'
-import { Account, PostStock, api } from '../lib/ipc'
+import React, { useState, useEffect, useRef } from 'react'
+import { User, Shield, FileText, Bookmark, Settings, Fingerprint } from 'lucide-react'
+import { Account, PostStock, FingerprintData, api } from '../lib/ipc'
 
 interface Props {
   account: Account
@@ -16,9 +16,10 @@ interface Props {
   onDelete: () => Promise<unknown>
   onOpenBrowser: () => void
   onClose: () => void
+  onUseStock?: (content: string, images: string[]) => void
 }
 
-type Tab = 'profile' | 'proxy' | 'memo' | 'stocks' | 'danger'
+type Tab = 'profile' | 'proxy' | 'memo' | 'stocks' | 'fingerprint' | 'danger'
 type ProxyType = 'none' | 'http' | 'https' | 'socks5'
 
 function parseProxyUrl(url: string | null): { type: ProxyType; host: string; port: string } {
@@ -57,19 +58,126 @@ const STATUS_LABEL: Record<Account['status'], string> = {
 
 // ── Stocks tab ────────────────────────────────────────────────────────────────
 
-const STOCK_MAX = 20
+const STOCK_MAX = 50
 
-function StocksTab({ accountId }: { accountId: number }) {
+// ── CSV parser ────────────────────────────────────────────────────────────────
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = []
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    const cols: string[] = []
+    let cur = ''
+    let inQ = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (ch === '"') {
+        if (inQ && line[i + 1] === '"') { cur += '"'; i++ }
+        else inQ = !inQ
+      } else if (ch === ',' && !inQ) {
+        cols.push(cur); cur = ''
+      } else {
+        cur += ch
+      }
+    }
+    cols.push(cur)
+    rows.push(cols)
+  }
+  return rows
+}
+
+// ── StocksTab ─────────────────────────────────────────────────────────────────
+
+function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: (content: string, images: string[]) => void }) {
   const [stocks, setStocks]     = useState<PostStock[]>([])
   const [loading, setLoading]   = useState(true)
   const [editingId, setEditingId] = useState<number | 'new' | null>(null)
 
   // form state
-  const [fTitle, setFTitle]     = useState('')
   const [fContent, setFContent] = useState('')
-  const [fImage, setFImage]     = useState('')
+  const [fImage1, setFImage1]   = useState('')  // base64 data URL
+  const [fImage2, setFImage2]   = useState('')  // base64 data URL
   const [saving, setSaving]     = useState(false)
   const [error, setError]       = useState<string | null>(null)
+
+  // CSV import state
+  const csvInputRef                       = useRef<HTMLInputElement>(null)
+  const [importing, setImporting]         = useState(false)
+  const [randomizing, setRandomizing]     = useState(false)
+  const [toast, setToast]                 = useState<{ msg: string; ok: boolean } | null>(null)
+
+  const showToast = (msg: string, ok: boolean) => {
+    setToast({ msg, ok })
+    setTimeout(() => setToast(null), 5000)
+  }
+
+  const handleCsvFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setImporting(true)
+    try {
+      const text = await file.text()
+      // 列 = アカウント番号（1列目→アカウント1番, 2列目→アカウント2番…）
+      // 行 = 各アカウントのストック（最大50行）
+      const matrix = parseCsv(text)  // matrix[rowIdx][colIdx]
+      if (matrix.length === 0) { showToast('空のCSVです', false); return }
+
+      const accounts = await api.accounts.list()
+      const numCols = Math.max(...matrix.map(r => r.length))
+
+      const payload: Array<{ account_id: number; content: string; image_url: null; image_url_2: null }> = []
+      let skippedCols = 0
+
+      for (let col = 0; col < numCols; col++) {
+        const account = accounts[col]
+        if (!account) { skippedCols++; continue }
+
+        for (let row = 0; row < matrix.length; row++) {
+          const content = matrix[row][col]?.trim() ?? ''
+          if (!content) continue
+          payload.push({ account_id: account.id, content, image_url: null, image_url_2: null })
+        }
+      }
+
+      if (payload.length === 0) { showToast('インポートできるストックがありません', false); return }
+
+      const res = await api.stocks.importCsv(payload)
+      const parts: string[] = [`${res.imported}件インポートしました`]
+      if (skippedCols > 0)       parts.push(`列超過スキップ: ${skippedCols}列`)
+      if (res.errors.length > 0) parts.push(`エラー: ${res.errors.length}件`)
+      showToast(parts.join(' / '), res.errors.length === 0 && skippedCols === 0)
+      if (res.errors.length > 0) console.warn('[CSV import] errors:', res.errors)
+
+      // 現在のアカウントのストック一覧を再取得
+      const listRes = await api.stocks.list(accountId)
+      if (listRes.success) setStocks(listRes.data)
+    } catch (err) {
+      showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleRandomizeImages = async () => {
+    if (stocks.length === 0) return
+    setRandomizing(true)
+    try {
+      const res = await api.stocks.randomizeImages(accountId)
+      if (res.success) {
+        const listRes = await api.stocks.list(accountId)
+        if (listRes.success) setStocks(listRes.data)
+        showToast(`${res.updated}件に画像をランダム挿入しました`, true)
+      } else {
+        showToast(`エラー: ${res.error}`, false)
+      }
+    } catch (err) {
+      showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setRandomizing(false)
+    }
+  }
 
   useEffect(() => {
     try {
@@ -85,12 +193,12 @@ function StocksTab({ accountId }: { accountId: number }) {
   }, [accountId])
 
   const openNew = () => {
-    setFTitle(''); setFContent(''); setFImage(''); setError(null)
+    setFContent(''); setFImage1(''); setFImage2(''); setError(null)
     setEditingId('new')
   }
 
   const openEdit = (s: PostStock) => {
-    setFTitle(s.title ?? ''); setFContent(s.content); setFImage(s.image_url ?? ''); setError(null)
+    setFContent(s.content); setFImage1(s.image_url ?? ''); setFImage2(s.image_url_2 ?? ''); setError(null)
     setEditingId(s.id)
   }
 
@@ -102,19 +210,21 @@ function StocksTab({ accountId }: { accountId: number }) {
     try {
       if (editingId === 'new') {
         const res = await api.stocks.create({
-          account_id: accountId,
-          title:     fTitle.trim() || null,
-          content:   fContent.trim(),
-          image_url: fImage.trim() || null,
+          account_id:  accountId,
+          title:       null,
+          content:     fContent.trim(),
+          image_url:   fImage1 || null,
+          image_url_2: fImage2 || null,
         })
         if (!res.success) throw new Error(res.error)
         setStocks((prev) => [...prev, res.data])
       } else if (typeof editingId === 'number') {
         const res = await api.stocks.update({
-          id:        editingId,
-          title:     fTitle.trim() || null,
-          content:   fContent.trim(),
-          image_url: fImage.trim() || null,
+          id:          editingId,
+          title:       null,
+          content:     fContent.trim(),
+          image_url:   fImage1 || null,
+          image_url_2: fImage2 || null,
         })
         if (!res.success) throw new Error(res.error)
         setStocks((prev) => prev.map((s) => s.id === editingId ? res.data : s))
@@ -140,18 +250,54 @@ function StocksTab({ accountId }: { accountId: number }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-zinc-400 text-xs font-semibold">
+      {/* Toast */}
+      {toast && (
+        <div className={`px-3 py-2 rounded-lg text-xs font-medium ${
+          toast.ok
+            ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+            : 'bg-amber-500/15 border border-amber-500/30 text-amber-400'
+        }`}>
+          {toast.msg}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-zinc-400 text-xs font-semibold shrink-0">
           投稿ストック <span className="text-zinc-600">{stocks.length}/{STOCK_MAX}</span>
         </p>
-        {stocks.length < STOCK_MAX && editingId === null && (
+        <div className="flex items-center gap-1.5 flex-nowrap">
+          {/* CSV import */}
+          <input
+            ref={csvInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={handleCsvFile}
+          />
           <button
-            onClick={openNew}
-            className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors"
+            onClick={() => csvInputRef.current?.click()}
+            disabled={importing}
+            className="flex items-center gap-1 px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-zinc-300 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
           >
-            + 追加
+            {importing ? '読込中...' : 'CSVインポート'}
           </button>
-        )}
+          <button
+            onClick={handleRandomizeImages}
+            disabled={randomizing || stocks.length === 0}
+            title="設定の画像グループからランダムに画像を全ストックに挿入"
+            className="flex items-center gap-1 px-2.5 py-1 bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >
+            {randomizing ? '処理中...' : '🎲 画像をランダム挿入'}
+          </button>
+          {stocks.length < STOCK_MAX && editingId === null && (
+            <button
+              onClick={openNew}
+              className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+            >
+              + 追加
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Stock list */}
@@ -163,8 +309,8 @@ function StocksTab({ accountId }: { accountId: number }) {
         <div key={s.id}>
           {editingId === s.id ? (
             <StockForm
-              title={fTitle} content={fContent} imageUrl={fImage}
-              onTitle={setFTitle} onContent={setFContent} onImage={setFImage}
+              content={fContent} image1={fImage1} image2={fImage2}
+              onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2}
               onSave={handleSave} onCancel={cancelEdit}
               saving={saving} error={error}
             />
@@ -172,10 +318,25 @@ function StocksTab({ accountId }: { accountId: number }) {
             <div className="bg-zinc-800 rounded-xl p-3 space-y-1.5">
               {s.title && <p className="text-zinc-300 text-xs font-semibold">{s.title}</p>}
               <p className="text-zinc-200 text-xs leading-relaxed line-clamp-2">{s.content}</p>
-              {s.image_url && (
-                <p className="text-blue-400 text-[10px] truncate">🖼 {s.image_url}</p>
+              {(s.image_url || s.image_url_2) && (
+                <div className="flex gap-1.5 mt-1">
+                  {s.image_url && (
+                    <img src={toImgSrc(s.image_url)} alt="画像1" className="w-16 h-12 object-cover rounded-md border border-zinc-600" />
+                  )}
+                  {s.image_url_2 && (
+                    <img src={toImgSrc(s.image_url_2)} alt="画像2" className="w-16 h-12 object-cover rounded-md border border-zinc-600" />
+                  )}
+                </div>
               )}
               <div className="flex gap-1.5 pt-0.5">
+                {onUseStock && (
+                  <button
+                    onClick={() => { console.log('[Stock] 投稿に使う clicked', s.id); onUseStock(s.content, [s.image_url, s.image_url_2].filter(Boolean) as string[]) }}
+                    className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold rounded-lg transition-colors"
+                  >
+                    投稿に使う
+                  </button>
+                )}
                 <button
                   onClick={() => openEdit(s)}
                   className="px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[11px] rounded-lg transition-colors"
@@ -197,8 +358,8 @@ function StocksTab({ accountId }: { accountId: number }) {
       {/* New stock form */}
       {editingId === 'new' && (
         <StockForm
-          title={fTitle} content={fContent} imageUrl={fImage}
-          onTitle={setFTitle} onContent={setFContent} onImage={setFImage}
+          content={fContent} image1={fImage1} image2={fImage2}
+          onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2}
           onSave={handleSave} onCancel={cancelEdit}
           saving={saving} error={error}
         />
@@ -207,25 +368,81 @@ function StocksTab({ accountId }: { accountId: number }) {
   )
 }
 
+/** 画像パス/URLを img src に使える形式に変換する
+ * - data:...        → そのまま
+ * - http(s)://...   → そのまま
+ * - file://...      → そのまま
+ * - /path/to/file   → file:///path/to/file
+ */
+function toImgSrc(value: string): string {
+  if (!value) return ''
+  if (value.startsWith('data:') || value.startsWith('http://') || value.startsWith('https://') || value.startsWith('file://')) {
+    return value
+  }
+  return `file://${value}`
+}
+
+function ImageUpload({ value, onChange, label }: { value: string; onChange: (v: string) => void; label: string }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // クリップボード互換性のため canvas で PNG に変換して保存（WebP 等も対応）
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width  = img.naturalWidth
+      canvas.height = img.naturalHeight
+      canvas.getContext('2d')!.drawImage(img, 0, 0)
+      onChange(canvas.toDataURL('image/png'))
+      URL.revokeObjectURL(url)
+    }
+    img.src = url
+    e.target.value = ''
+  }
+
+  return (
+    <div className="flex-1">
+      <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+      {value ? (
+        <div className="relative group">
+          <img src={toImgSrc(value)} alt={label} className="w-full h-20 object-cover rounded-lg border border-zinc-600" />
+          <button
+            type="button"
+            onClick={() => onChange('')}
+            className="absolute top-1 right-1 w-5 h-5 bg-black/70 hover:bg-red-600 text-white text-[10px] rounded-full flex items-center justify-center transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="w-full h-20 border-2 border-dashed border-zinc-600 hover:border-blue-500 rounded-lg flex flex-col items-center justify-center gap-1 text-zinc-500 hover:text-blue-400 transition-colors"
+        >
+          <span className="text-lg">🖼</span>
+          <span className="text-[10px]">{label}</span>
+        </button>
+      )}
+    </div>
+  )
+}
+
 function StockForm({
-  title, content, imageUrl,
-  onTitle, onContent, onImage,
+  content, image1, image2,
+  onContent, onImage1, onImage2,
   onSave, onCancel, saving, error,
 }: {
-  title: string; content: string; imageUrl: string
-  onTitle: (v: string) => void; onContent: (v: string) => void; onImage: (v: string) => void
+  content: string; image1: string; image2: string
+  onContent: (v: string) => void; onImage1: (v: string) => void; onImage2: (v: string) => void
   onSave: () => void; onCancel: () => void
   saving: boolean; error: string | null
 }) {
   return (
     <div className="bg-zinc-800 border border-blue-500/30 rounded-xl p-3 space-y-2">
-      <input
-        type="text"
-        value={title}
-        onChange={(e) => onTitle(e.target.value)}
-        placeholder="タイトル（任意）"
-        className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
-      />
       <textarea
         value={content}
         onChange={(e) => onContent(e.target.value)}
@@ -234,13 +451,10 @@ function StockForm({
         maxLength={500}
         className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 resize-none"
       />
-      <input
-        type="text"
-        value={imageUrl}
-        onChange={(e) => onImage(e.target.value)}
-        placeholder="画像URL（任意）"
-        className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono"
-      />
+      <div className="flex gap-2">
+        <ImageUpload value={image1} onChange={onImage1} label="画像1を追加" />
+        <ImageUpload value={image2} onChange={onImage2} label="画像2を追加" />
+      </div>
       {error && <p className="text-red-400 text-xs">{error}</p>}
       <div className="flex gap-2">
         <button
@@ -261,6 +475,70 @@ function StockForm({
   )
 }
 
+// ── Fingerprint tab ────────────────────────────────────────────────────────────
+
+function FpRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-2 items-start py-1.5 border-b border-zinc-800/60 last:border-0">
+      <span className="text-zinc-500 text-[11px] w-28 shrink-0 pt-px">{label}</span>
+      <span className="text-zinc-200 text-[11px] font-mono leading-relaxed break-all">{value}</span>
+    </div>
+  )
+}
+
+function FingerprintTab({ accountId }: { accountId: number }) {
+  const [fp, setFp] = useState<FingerprintData | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.accounts.fingerprint(accountId)
+      .then((data) => { setFp(data); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [accountId])
+
+  if (loading) return <p className="text-zinc-500 text-sm text-center py-6">読み込み中...</p>
+  if (!fp) return (
+    <p className="text-zinc-600 text-xs text-center py-6">
+      フィンガープリントが未生成です。<br />
+      アカウントを一度ブラウザで開くと自動生成されます。
+    </p>
+  )
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-zinc-800/50 rounded-xl px-4 py-1">
+        <FpRow label="User-Agent"       value={fp.userAgent} />
+        <FpRow label="Platform"         value={fp.platform} />
+        <FpRow label="Vendor"           value={fp.vendor || '(なし)'} />
+      </div>
+      <div className="bg-zinc-800/50 rounded-xl px-4 py-1">
+        <FpRow label="画面サイズ"        value={`${fp.screenWidth} × ${fp.screenHeight}`} />
+        <FpRow label="タイムゾーン"      value={fp.timezone} />
+        <FpRow label="言語"             value={fp.languages.join(', ')} />
+      </div>
+      <div className="bg-zinc-800/50 rounded-xl px-4 py-1">
+        <FpRow label="CPU コア数"        value={String(fp.hardwareConcurrency)} />
+        <FpRow label="デバイスメモリ"    value={`${fp.deviceMemory} GB`} />
+      </div>
+      <div className="bg-zinc-800/50 rounded-xl px-4 py-1">
+        <FpRow label="WebGL Vendor"     value={fp.webglVendor} />
+        <FpRow label="WebGL Renderer"   value={fp.webglRenderer} />
+      </div>
+      <div className="bg-zinc-800/50 rounded-xl px-4 py-1">
+        <FpRow label="バッテリー"        value={`${Math.round(fp.batteryLevel * 100)}% · ${fp.batteryCharging ? '充電中' : '放電中'}`} />
+        <FpRow label="Canvas Seed"      value={String(fp.canvasSeed)} />
+        <FpRow label="Audio Seed"       value={String(fp.audioSeed)} />
+      </div>
+      <div className="bg-zinc-800/50 rounded-xl px-4 py-1">
+        <FpRow
+          label={`フォント (${fp.fontList.length})`}
+          value={fp.fontList.slice(0, 8).join(', ') + (fp.fontList.length > 8 ? ` …他${fp.fontList.length - 8}件` : '')}
+        />
+      </div>
+    </div>
+  )
+}
+
 // ── Main modal ─────────────────────────────────────────────────────────────────
 
 export function AccountEditModal({
@@ -273,6 +551,7 @@ export function AccountEditModal({
   onDelete,
   onOpenBrowser,
   onClose,
+  onUseStock,
 }: Props) {
   const [tab, setTab] = useState<Tab>('profile')
 
@@ -415,11 +694,12 @@ export function AccountEditModal({
           {/* Tabs */}
           <div className="flex gap-1 mt-4 flex-wrap">
             {([
-              { id: 'profile', icon: User,     label: 'プロフィール' },
-              { id: 'proxy',   icon: Shield,   label: 'プロキシ' },
-              { id: 'memo',    icon: FileText,  label: 'メモ' },
-              { id: 'stocks',  icon: Bookmark, label: 'ストック' },
-              { id: 'danger',  icon: Settings, label: '管理' },
+              { id: 'profile',     icon: User,        label: 'プロフィール' },
+              { id: 'proxy',       icon: Shield,      label: 'プロキシ' },
+              { id: 'memo',        icon: FileText,    label: 'メモ' },
+              { id: 'stocks',      icon: Bookmark,    label: 'ストック' },
+              { id: 'fingerprint', icon: Fingerprint, label: 'FP' },
+              { id: 'danger',      icon: Settings,    label: '管理' },
             ] as { id: Tab; icon: React.ElementType; label: string }[]).map((t) => (
               <button
                 key={t.id}
@@ -645,7 +925,10 @@ export function AccountEditModal({
           )}
 
           {/* ── Stocks tab ── */}
-          {tab === 'stocks' && <StocksTab accountId={account.id} />}
+          {tab === 'stocks' && <StocksTab accountId={account.id} onUseStock={onUseStock} />}
+
+          {/* ── Fingerprint tab ── */}
+          {tab === 'fingerprint' && <FingerprintTab accountId={account.id} />}
 
           {/* ── Danger tab ── */}
           {tab === 'danger' && (

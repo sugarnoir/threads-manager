@@ -123,6 +123,19 @@ export function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_autopost_configs_account_id ON autopost_configs(account_id);
   `)
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS proxy_presets (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT NOT NULL,
+      type       TEXT NOT NULL DEFAULT 'http',
+      host       TEXT NOT NULL,
+      port       INTEGER NOT NULL,
+      username   TEXT,
+      password   TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `)
+
   // 既存DBへのマイグレーション
   const cols = db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]
   const colNames = cols.map((c) => c.name)
@@ -161,6 +174,12 @@ export function initializeSchema(db: Database.Database): void {
   if (!templateCols.map(c => c.name).includes('account_id')) {
     db.exec("ALTER TABLE post_templates ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE")
     db.exec("CREATE INDEX IF NOT EXISTS idx_post_templates_account_id ON post_templates(account_id)")
+  }
+
+  // post_stocks テーブルへの image_url_2 カラム追加
+  const stockCols = db.prepare("PRAGMA table_info(post_stocks)").all() as { name: string }[]
+  if (!stockCols.map(c => c.name).includes('image_url_2')) {
+    db.exec("ALTER TABLE post_stocks ADD COLUMN image_url_2 TEXT")
   }
 
   // license_keys テーブルへの user_name カラム追加

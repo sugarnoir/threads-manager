@@ -81,7 +81,7 @@ export type Bounds = { x: number; y: number; width: number; height: number }
 
 export interface HashtagResult {
   hashtag: string
-  topPosts: { text: string; likes: string; url: string }[]
+  topPosts: { text: string; likes: string; reposts: string; replies: string; url: string }[]
 }
 
 export interface AccountAnalysis {
@@ -114,14 +114,15 @@ export interface CompetitivePost {
 }
 
 export interface PostStock {
-  id:         number
-  account_id: number
-  title:      string | null
-  content:    string
-  image_url:  string | null
-  sort_order: number
-  created_at: string
-  updated_at: string
+  id:          number
+  account_id:  number
+  title:       string | null
+  content:     string
+  image_url:   string | null
+  image_url_2: string | null
+  sort_order:  number
+  created_at:  string
+  updated_at:  string
 }
 
 export interface PostTemplate {
@@ -134,6 +135,37 @@ export interface PostTemplate {
   updated_at: string
 }
 
+
+export interface FingerprintData {
+  userAgent:           string
+  platform:            string
+  vendor:              string
+  screenWidth:         number
+  screenHeight:        number
+  timezone:            string
+  language:            string
+  languages:           string[]
+  hardwareConcurrency: number
+  deviceMemory:        number
+  webglVendor:         string
+  webglRenderer:       string
+  canvasSeed:          number
+  batteryLevel:        number
+  batteryCharging:     boolean
+  audioSeed:           number
+  fontList:            string[]
+}
+
+export interface ProxyPreset {
+  id: number
+  name: string
+  type: 'http' | 'https' | 'socks5'
+  host: string
+  port: number
+  username: string | null
+  password: string | null
+  created_at: string
+}
 
 export interface AutopostConfig {
   id:            number
@@ -148,6 +180,11 @@ export interface AutopostConfig {
   rewrite_texts: string[]
   created_at:    string
   updated_at:    string
+}
+
+export interface ImageGroups {
+  group1: string[]
+  group2: string[]
 }
 
 export interface LicenseRow {
@@ -194,6 +231,7 @@ declare global {
         check: (id: number) => Promise<{ status: string; message?: string }>
         checkAll: () => Promise<{ success: boolean }>
         delete: (id: number) => Promise<{ success: boolean }>
+        fingerprint: (id: number) => Promise<FingerprintData | null>
       }
       posts: {
         list: (accountId: number) => Promise<Post[]>
@@ -239,6 +277,7 @@ declare global {
         back: (accountId: number) => Promise<void>
         forward: (accountId: number) => Promise<void>
         reload: (accountId: number) => Promise<void>
+        openCompose: (accountId: number, content: string, images?: string[]) => Promise<{ success: boolean; error?: string }>
       }
       settings: {
         getAll: () => Promise<Record<string, string>>
@@ -249,6 +288,12 @@ declare global {
         botStop: () => Promise<{ ok: boolean }>
         botStatus: () => Promise<{ running: boolean }>
       }
+      proxyPresets: {
+        list:   () => Promise<ProxyPreset[]>
+        create: (data: { name: string; type: string; host: string; port: number; username?: string | null; password?: string | null }) => Promise<ProxyPreset>
+        update: (data: { id: number; name: string; type: string; host: string; port: number; username?: string | null; password?: string | null }) => Promise<{ success: boolean }>
+        delete: (id: number) => Promise<{ success: boolean }>
+      }
       groups: {
         list: () => Promise<Group[]>
         create: (name: string) => Promise<{ success: boolean; group: Group }>
@@ -257,9 +302,15 @@ declare global {
       }
       stocks: {
         list:   (accountId: number) => Promise<{ success: boolean; data: PostStock[]; error?: string }>
-        create: (data: { account_id: number; title?: string | null; content: string; image_url?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
-        update: (data: { id: number; title?: string | null; content: string; image_url?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
+        create: (data: { account_id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
+        update: (data: { id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
         delete: (id: number) => Promise<{ success: boolean; error?: string }>
+        importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) => Promise<{ success: boolean; imported: number; errors: string[] }>
+        randomizeImages: (accountId: number) => Promise<{ success: boolean; updated?: number; errors?: string[]; error?: string }>
+      }
+      imageGroups: {
+        get:  () => Promise<{ success: boolean; data?: ImageGroups; error?: string }>
+        save: (data: ImageGroups) => Promise<{ success: boolean; error?: string }>
       }
       templates: {
         list:   (accountId?: number | null) => Promise<{ success: boolean; data: PostTemplate[]; error?: string }>
@@ -274,10 +325,10 @@ declare global {
       }
       research: {
         debug: (data: { accountId: number; keyword: string }) => Promise<{ success: boolean; data: unknown; error?: string }>
-        hashtag: (data: { accountId: number; hashtag: string }) => Promise<{ success: boolean; data: HashtagResult; error?: string }>
-        account: (data: { accountId: number; targetUsername: string }) => Promise<{ success: boolean; data: AccountAnalysis; error?: string }>
-        keyword: (data: { accountId: number; keyword: string }) => Promise<{ success: boolean; data: SearchPost[]; error?: string }>
-        competitive: (data: { accountId: number; keyword: string }) => Promise<{ success: boolean; data: CompetitivePost[]; error?: string }>
+        hashtag: (data: { accountId: number; hashtag: string; minLikes?: number; minReposts?: number; minReplies?: number }) => Promise<{ success: boolean; data: HashtagResult; error?: string }>
+        account: (data: { accountId: number; targetUsername: string; minLikes?: number; minReposts?: number; minReplies?: number }) => Promise<{ success: boolean; data: AccountAnalysis; error?: string }>
+        keyword: (data: { accountId: number; keyword: string; minLikes?: number; minReposts?: number; minReplies?: number }) => Promise<{ success: boolean; data: SearchPost[]; error?: string }>
+        competitive: (data: { accountId: number; keyword: string; minLikes?: number; minReposts?: number; minReplies?: number }) => Promise<{ success: boolean; data: CompetitivePost[]; error?: string }>
       }
       autopost: {
         get:       (accountId: number) => Promise<AutopostConfig | null>

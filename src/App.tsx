@@ -204,6 +204,16 @@ export default function App() {
           onDelete={() => handleDeleteAccount(editTarget.id)}
           onOpenBrowser={() => { setActiveAccountId(editTarget.id); setEditTarget(null) }}
           onClose={() => setEditTarget(null)}
+          onUseStock={(content, images) => {
+            const accountId = editTarget.id
+            console.log('[App] onUseStock accountId=', accountId, 'content=', content.slice(0, 30), 'images=', images?.length ?? 0)
+            setEditTarget(null)
+            setActiveAccountId(accountId)
+            setActiveTool(null)
+            api.browserView.openCompose(accountId, content, images)
+              .then((res) => { if (!res.success) alert(`投稿画面を開けませんでした: ${res.error}`) })
+              .catch((err) => alert(`エラー: ${err}`))
+          }}
         />
       )}
     </div>

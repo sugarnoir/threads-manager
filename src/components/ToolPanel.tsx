@@ -3,7 +3,7 @@ import { Composer } from '../pages/Composer'
 import { Scheduler } from '../pages/Scheduler'
 import { Engagement } from '../pages/Engagement'
 import { History } from '../pages/History'
-import { Settings } from '../pages/Settings'
+import { Settings, ProxyPresetsSection, ImageGroupsSection } from '../pages/Settings'
 import { StatusCheck } from '../pages/StatusCheck'
 import { Research } from '../pages/Research'
 import { Templates } from '../pages/Templates'
@@ -13,23 +13,26 @@ interface Props {
   tool: ToolType
   accounts: Account[]
   selectedAccountId: number | null
+  composerInitialContent?: string
   onClose: () => void
   onCheckOne: (id: number) => Promise<{ status: string; message?: string }>
   onCheckAll: (onProgress: (data: { type: string; accountId?: number; status?: string; message?: string; index?: number; total?: number }) => void) => Promise<void>
 }
 
 const LABELS: Record<ToolType, string> = {
-  compose:    '✏️ 投稿',
-  scheduler:  '🕐 スケジュール',
-  engagement: '❤️ いいね/RT',
-  history:    '📋 履歴',
-  settings:   '⚙️ 設定',
-  status:     '🔍 ステータス確認',
-  research:   '🔎 リサーチ',
-  templates:  '📝 テンプレート',
+  compose:      '✏️ 投稿',
+  scheduler:    '🕐 スケジュール',
+  engagement:   '❤️ いいね/RT',
+  history:      '📋 履歴',
+  settings:     '⚙️ 設定',
+  proxy:        '🔗 プロキシ管理',
+  'image-list': '🖼 画像グループ管理',
+  status:       '🔍 ステータス確認',
+  research:     '🔎 リサーチ',
+  templates:    '📝 テンプレート',
 }
 
-export function ToolPanel({ tool, accounts, selectedAccountId, onClose, onCheckOne, onCheckAll }: Props) {
+export function ToolPanel({ tool, accounts, selectedAccountId, composerInitialContent, onClose, onCheckOne, onCheckAll }: Props) {
   return (
     <div className="absolute inset-0 z-40 flex flex-col bg-zinc-950">
       {/* Header */}
@@ -47,7 +50,7 @@ export function ToolPanel({ tool, accounts, selectedAccountId, onClose, onCheckO
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-5">
         {tool === 'compose' && (
-          <Composer accounts={accounts} selectedAccountId={selectedAccountId} />
+          <Composer accounts={accounts} selectedAccountId={selectedAccountId} initialContent={composerInitialContent} />
         )}
         {tool === 'scheduler' && <Scheduler accounts={accounts} />}
         {tool === 'engagement' && <Engagement accounts={accounts} />}
@@ -66,6 +69,8 @@ export function ToolPanel({ tool, accounts, selectedAccountId, onClose, onCheckO
           <Research accounts={accounts} selectedAccountId={selectedAccountId} />
         )}
         {tool === 'templates' && <Templates accounts={accounts} />}
+        {tool === 'proxy' && <ProxyPresetsSection />}
+        {tool === 'image-list' && <ImageGroupsSection />}
       </div>
     </div>
   )
