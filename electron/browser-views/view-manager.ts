@@ -195,6 +195,17 @@ export class ViewManager {
     return bounds
   }
 
+  /**
+   * ビューを画面外（左外）に移動して「非表示」にする。
+   * HIDDEN_BOUNDS (0×0) と異なり GPU コンポジターサーフェスが保持されるため
+   * 再表示時に黒くなる問題が起きない。
+   */
+  private moveOffscreen(view: WebContentsView): void {
+    const b = view.getBounds()
+    if (b.width <= 0 || b.height <= 0) return
+    view.setBounds({ ...b, x: -(b.width + SIDEBAR_WIDTH + 100) })
+  }
+
   // ── Session cookie management ─────────────────────────────────────────────
 
   private backupCookiesToDb(accountId: number, cookies: RawCookie[]): void {
@@ -245,19 +256,11 @@ export class ViewManager {
     const partition = `persist:account-${accountId}`
     const sess = session.fromPartition(partition)
 
-    // DBのプロキシ設定をセッションに反映（fire-and-forget）
-    void (async () => {
-      try {
-        const account = getAccountById(accountId)
-        if (account?.proxy_url) {
-          await sess.setProxy({ proxyRules: account.proxy_url })
-        } else {
-          await sess.setProxy({ proxyRules: 'direct://' })
-        }
-      } catch { /* セッションが破棄済みなどは無視 */ }
-    })()
-
     // DBからフィンガープリントを取得（なければ生成してDBに保存）
+    // ※ setProxy は _bgInitView で loadURL より前に await する。
+    //   fire-and-forget にすると loadURL 開始後に proxy が設定され、
+    //   Chromium が接続を再確立 → did-finish-load が複数回発火 →
+    //   nudgeRepaint の setTimeout が干渉して黒画面になるため。
     const fp = loadOrCreateFingerprint(accountId)
     const overrideScript = buildOverrideScript(fp)
 
@@ -322,6 +325,26 @@ export class ViewManager {
     })
     view.webContents.on('did-navigate-in-page', () => this.notify())
     view.webContents.on('page-title-updated',   () => this.notify())
+
+    // プロキシ認証（407）に自動応答する
+    try {
+      const acct = getAccountById(accountId)
+      console.log(`[makeView] account=${accountId} proxy_url=${acct?.proxy_url ?? 'none'} proxy_username=${acct?.proxy_username ?? 'none'}`)
+      if (acct?.proxy_username) {
+        view.webContents.on('login', (event, _details, authInfo, callback) => {
+          console.log(`[login event] account=${accountId} isProxy=${authInfo.isProxy} host=${authInfo.host} scheme=${authInfo.scheme}`)
+          if (authInfo.isProxy) {
+            event.preventDefault()
+            console.log(`[login event] → responding with credentials for account=${accountId}`)
+            callback(acct.proxy_username!, acct.proxy_password ?? '')
+          }
+        })
+        console.log(`[makeView] login event listener registered for account=${accountId}`)
+      } else {
+        console.log(`[makeView] no proxy_username → login listener NOT registered for account=${accountId}`)
+      }
+    } catch (err) { console.error(`[makeView] proxy setup error account=${accountId}:`, err) }
+
     return view
   }
 
@@ -571,7 +594,7 @@ export class ViewManager {
     if (this.activeAccountId !== null && this.activeAccountId !== accountId) {
       const prev = this.views.get(this.activeAccountId)
       if (prev && !prev.view.webContents.isDestroyed()) {
-        prev.view.setBounds(HIDDEN_BOUNDS)
+        this.moveOffscreen(prev.view)
       }
     }
 
@@ -618,40 +641,70 @@ export class ViewManager {
     console.log(`[_bgInitView] START account=${accountId} bounds=`, entry.view.getBounds())
     const sess = session.fromPartition(`persist:account-${accountId}`)
     await this.ensureSessionCookies(accountId, sess).catch(() => {})
+
+    // プロキシを loadURL より前に await で設定する。
+    // fire-and-forget にすると loadURL 後に proxy が設定され Chromium が接続を再確立するため
+    // did-finish-load が複数回発火し nudgeRepaint が干渉して黒画面になる。
+    try {
+      const acct = getAccountById(accountId)
+      if (acct?.proxy_url) {
+        console.log(`[_bgInitView] setProxy START account=${accountId} proxyRules=${acct.proxy_url}`)
+        await sess.setProxy({ proxyRules: acct.proxy_url })
+        console.log(`[_bgInitView] setProxy DONE account=${accountId}`)
+      } else {
+        console.log(`[_bgInitView] no proxy_url for account=${accountId}`)
+      }
+    } catch (err) { console.error(`[_bgInitView] setProxy error account=${accountId}:`, err) }
+
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
     console.log(`[_bgInitView] loadURL account=${accountId} bounds=`, entry.view.getBounds())
     entry.view.webContents.loadURL(THREADS_URL)
     // macOS vibrancy 環境でロード後に黒くなる問題の対策:
     // did-finish-load 後に setBounds を ±1px 微調整して GPU コンポジターの再描画を強制する
-    entry.view.webContents.once('did-finish-load', () => this.nudgeRepaint(accountId))
+    entry.view.webContents.once('did-finish-load', () => {
+      console.log(`[_bgInitView] did-finish-load account=${accountId}`)
+      this.nudgeRepaint(accountId)
+    })
+    entry.view.webContents.once('did-fail-load', (_e, errCode, errDesc, url) => {
+      console.log(`[_bgInitView] did-fail-load account=${accountId} errCode=${errCode} errDesc=${errDesc} url=${url}`)
+    })
   }
 
   /**
    * macOS の vibrancy ウィンドウ上で WebContentsView が黒くなる問題の対策。
    * GPU コンポジターに再描画を強制するため bounds を ±1px 微調整する。
+   *
+   * target を先にキャプチャし、setTimeout 内では target.width に戻すことで
+   * updateBounds が割り込んでも正しい値に復元できる。
+   * moveOffscreen で画面外にある間は nudge 不要（GPU サーフェスは生きている）。
    */
   private nudgeRepaint(accountId: number): void {
     const e = this.views.get(accountId)
     if (!e || e.view.webContents.isDestroyed()) return
-    const b = e.view.getBounds()
-    if (b.width <= 0 || b.height <= 0) return
-    e.view.setBounds({ ...b, width: b.width + 1 })
+    const target = e.view.getBounds()
+    if (target.width <= 0 || target.height <= 0) return
+    // 画面外（moveOffscreen）なら nudge 不要
+    if (target.x < 0) return
+    e.view.setBounds({ ...target, width: target.width + 1 })
     setTimeout(() => {
       const e2 = this.views.get(accountId)
       if (!e2 || e2.view.webContents.isDestroyed()) return
       const cur = e2.view.getBounds()
-      e2.view.setBounds({ ...cur, width: cur.width - 1 })
+      // bounce 中に moveOffscreen が呼ばれた場合は復元しない
+      if (cur.x < 0) return
+      e2.view.setBounds({ ...cur, width: target.width })
     }, 50)
   }
 
   /**
    * ビューを「非表示」にする。contentView からは取り外さない。
    * isVisible=false のとき（ツールパネル表示中など）に呼ばれる。
+   * GPU サーフェスを保持するため moveOffscreen を使う。
    */
   hideView(accountId: number): void {
     const entry = this.views.get(accountId)
     if (entry && !entry.view.webContents.isDestroyed()) {
-      entry.view.setBounds(HIDDEN_BOUNDS)
+      this.moveOffscreen(entry.view)
     }
     this.notify()
   }
