@@ -42,6 +42,10 @@ export function registerAccountHandlers(): void {
         const viewManager = getViewManager()
         const { username, displayName } = await viewManager.startLogin(tempKey)
 
+        if (!username || username === 'unknown') {
+          return { success: false, error: 'ユーザー名を取得できませんでした。ログインが完了しているか確認してください。' }
+        }
+
         const account = createAccount({
           username,
           display_name: displayName ?? undefined,
@@ -60,6 +64,9 @@ export function registerAccountHandlers(): void {
         return { success: true, account: { ...account, status: 'active' } }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('UNIQUE constraint')) {
+          return { success: false, error: 'このアカウントは既に追加されています。別のアカウントをお試しください。' }
+        }
         // Notify login failure (but not for user-cancelled)
         if (!msg.includes('キャンセル')) {
           sendDiscordNotification({
@@ -96,6 +103,10 @@ export function registerAccountHandlers(): void {
           options?.proxy_password,
         )
 
+        if (!username || username === 'unknown') {
+          return { success: false, error: 'ユーザー名を取得できませんでした。登録が完了しているか確認してください。' }
+        }
+
         const account = createAccount({
           username,
           display_name: displayName ?? undefined,
@@ -112,6 +123,9 @@ export function registerAccountHandlers(): void {
         return { success: true, account: { ...account, status: 'active' } }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('UNIQUE constraint')) {
+          return { success: false, error: 'このアカウントは既に追加されています。別のアカウントをお試しください。' }
+        }
         if (!msg.includes('キャンセル')) {
           sendDiscordNotification({
             event: 'login_failed',
