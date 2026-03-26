@@ -110,6 +110,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
   // 予約投稿モーダル state
   const [scheduleTarget, setScheduleTarget] = useState<PostStock | null>(null)
   const [selectedHours, setSelectedHours]   = useState<number | null>(null)
+  const [scheduledDate, setScheduledDate]   = useState<Date | null>(null)  // ±30分ランダム済み
   const [scheduling, setScheduling]         = useState(false)
 
   const showToast = (msg: string, ok: boolean) => {
@@ -381,11 +382,11 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
 
       {/* 予約投稿モーダル */}
       {scheduleTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => !scheduling && setScheduleTarget(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { if (!scheduling) { setScheduleTarget(null); setSelectedHours(null); setScheduledDate(null) } }}>
           <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 w-80 space-y-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h3 className="text-white font-semibold text-sm">🗓 予約投稿</h3>
-              <button onClick={() => !scheduling && setScheduleTarget(null)} className="text-zinc-500 hover:text-white text-lg leading-none">×</button>
+              <button onClick={() => { if (!scheduling) { setScheduleTarget(null); setSelectedHours(null); setScheduledDate(null) } }} className="text-zinc-500 hover:text-white text-lg leading-none">×</button>
             </div>
 
             {/* プレビュー */}
@@ -413,7 +414,14 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
                 {([3, 6, 9, 12, 15, 18, 21, 24, 48, 72] as const).map((h) => (
                   <button
                     key={h}
-                    onClick={() => setSelectedHours(h)}
+                    onClick={() => {
+                      // ±30分（-1800000〜+1800000ms）のランダムオフセットを加算
+                      const offsetMs = (Math.random() * 2 - 1) * 30 * 60 * 1000
+                      const date = new Date(Date.now() + h * 3600_000 + offsetMs)
+                      date.setSeconds(0, 0)
+                      setSelectedHours(h)
+                      setScheduledDate(date)
+                    }}
                     disabled={scheduling}
                     className={`py-1.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-colors ${
                       selectedHours === h
@@ -428,13 +436,12 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
             </div>
 
             {/* 確認表示 */}
-            {selectedHours != null && (() => {
-              const d = new Date(Date.now() + selectedHours * 3600_000)
+            {selectedHours != null && scheduledDate != null && (() => {
               const pad = (n: number) => String(n).padStart(2, '0')
-              const label = `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}に予約`
+              const timeStr = `${scheduledDate.getFullYear()}/${pad(scheduledDate.getMonth()+1)}/${pad(scheduledDate.getDate())} ${pad(scheduledDate.getHours())}:${pad(scheduledDate.getMinutes())}`
               return (
                 <p className="text-violet-300 text-xs text-center font-medium bg-violet-900/30 rounded-lg py-2 px-3">
-                  {label}
+                  {selectedHours}時間後 ({timeStr}に予約)
                 </p>
               )
             })()}
@@ -443,8 +450,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
             <div className="flex gap-2 pt-1">
               <button
                 onClick={async () => {
-                  if (selectedHours == null) { showToast('タイミングを選択してください', false); return }
-                  const scheduledDate = new Date(Date.now() + selectedHours * 3600_000)
+                  if (selectedHours == null || !scheduledDate) { showToast('タイミングを選択してください', false); return }
                   setScheduling(true)
                   const result = await api.stocks.schedulePost({
                     account_id:   accountId,
@@ -461,7 +467,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
                     showToast(`失敗: ${result.error ?? '不明なエラー'}`, false)
                   }
                 }}
-                disabled={scheduling || selectedHours == null}
+                disabled={scheduling || selectedHours == null || !scheduledDate}
                 className="flex-1 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors"
               >
                 {scheduling ? (
@@ -472,7 +478,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
                 ) : '予約実行'}
               </button>
               <button
-                onClick={() => { setScheduleTarget(null); setSelectedHours(null) }}
+                onClick={() => { setScheduleTarget(null); setSelectedHours(null); setScheduledDate(null) }}
                 disabled={scheduling}
                 className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-zinc-300 text-sm rounded-xl transition-colors"
               >
