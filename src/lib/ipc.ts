@@ -307,6 +307,7 @@ declare global {
         delete: (id: number) => Promise<{ success: boolean; error?: string }>
         importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) => Promise<{ success: boolean; imported: number; errors: string[] }>
         randomizeImages: (accountId: number) => Promise<{ success: boolean; updated?: number; errors?: string[]; error?: string }>
+        schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; error?: string }>
       }
       imageGroups: {
         get:  () => Promise<{ success: boolean; data?: ImageGroups; error?: string }>

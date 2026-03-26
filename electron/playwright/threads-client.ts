@@ -3,6 +3,8 @@ import { withContext, openLoginBrowser, ProxyConfig } from './browser-manager'
 import { getAccountById } from '../db/repositories/accounts'
 import { SPEED_PRESETS, SpeedPreset, randomDelay, shortDelay, humanType, randomScroll } from './human-behavior'
 import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 function getConfig(accountId: number) {
   const account = getAccountById(accountId)
@@ -362,6 +364,296 @@ export async function postThread(
       await page.close().catch(() => {})
     }
   })
+}
+
+// ─── Schedule Post ────────────────────────────────────────────────────────────
+
+// スケジュール設定ボタン（コンポーザー内のクロックアイコン）
+const SCHEDULE_OPEN_BTN = [
+  '[aria-label="スケジュール"]',
+  '[aria-label="Schedule"]',
+  '[aria-label="投稿を予約"]',
+  '[aria-label="Schedule post"]',
+  'button[aria-label*="スケジュール"]',
+  'button[aria-label*="schedule" i]',
+]
+
+// スケジュール確認ボタン（日時設定後に押す）
+const SCHEDULE_CONFIRM_BTN = [
+  'button:has-text("予約投稿")',
+  'button:has-text("投稿を予約")',
+  'button:has-text("スケジュール設定")',
+  'button:has-text("Schedule")',
+  'button:has-text("Set schedule")',
+  'div[role="button"]:has-text("予約投稿")',
+  'div[role="button"]:has-text("Schedule")',
+]
+
+/**
+ * 画像パス/URLをローカルファイルパスに解決する。
+ * - file://... → プレフィックスを除去
+ * - http/https → 一時ファイルにダウンロード（呼び出し元が tmpPaths に追加して後で削除する）
+ * - ローカルパス → そのまま
+ * 解決できない場合は null を返す。
+ */
+async function resolveToLocalPath(urlOrPath: string, tmpPaths: string[]): Promise<string | null> {
+  if (!urlOrPath) return null
+
+  // file:// → strip prefix
+  if (urlOrPath.startsWith('file://')) {
+    const local = decodeURIComponent(urlOrPath.replace(/^file:\/\//, ''))
+    return fs.existsSync(local) ? local : null
+  }
+
+  // http/https → download to temp file
+  if (urlOrPath.startsWith('http://') || urlOrPath.startsWith('https://')) {
+    try {
+      const res = await fetch(urlOrPath)
+      if (!res.ok) return null
+      const buf = Buffer.from(await res.arrayBuffer())
+      const ext = path.extname(new URL(urlOrPath).pathname) || '.jpg'
+      const tmpPath = path.join(os.tmpdir(), `threads-media-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`)
+      fs.writeFileSync(tmpPath, buf)
+      tmpPaths.push(tmpPath)
+      return tmpPath
+    } catch (err) {
+      console.warn('[resolveToLocalPath] download failed:', err)
+      return null
+    }
+  }
+
+  // local path
+  return fs.existsSync(urlOrPath) ? urlOrPath : null
+}
+
+/**
+ * Threads の「予約投稿」機能を使って投稿を予約する。
+ * scheduledAt は JST の Date オブジェクトで渡す。
+ */
+export async function scheduleThread(
+  accountId: number,
+  content: string,
+  scheduledAt: Date,
+  mediaPaths: string[] = []
+): Promise<PostResult> {
+  console.log(`[scheduleThread] START account=${accountId} scheduledAt=${scheduledAt.toISOString()}`)
+
+  // 全体タイムアウト: 120秒
+  const timeoutPromise = new Promise<PostResult>((_, reject) =>
+    setTimeout(() => reject(new Error('タイムアウト: 予約処理が120秒を超えました。ネットワーク接続またはPlaywrightの状態を確認してください。')), 120_000)
+  )
+
+  // 画像パスを事前解決（URL はダウンロード）
+  const tmpPaths: string[] = []
+  const resolvedMedia: string[] = []
+  for (const p of mediaPaths) {
+    const local = await resolveToLocalPath(p, tmpPaths)
+    if (local) resolvedMedia.push(local)
+  }
+  console.log(`[scheduleThread] resolvedMedia=${resolvedMedia.length} (requested=${mediaPaths.length})`)
+
+  const task = withContext(accountId, async (ctx) => {
+    const page = await ctx.newPage()
+    try {
+      console.log(`[scheduleThread] page.goto ${THREADS_URL}`)
+      await page.goto(THREADS_URL, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+
+      const currentUrl = page.url()
+      console.log(`[scheduleThread] loaded url=${currentUrl}`)
+
+      if (!isLoggedInUrl(currentUrl)) {
+        return { success: false, error: 'ログインが必要です' }
+      }
+
+      // ── Step 1: コンポーザーを開く ──────────────────────────────────────────
+      console.log('[scheduleThread] Step1: opening composer')
+      const composeNavBtn = await page.waitForSelector(
+        COMPOSE_BTN.join(', '),
+        { timeout: 8_000 }
+      ).catch(() => null)
+
+      if (composeNavBtn) {
+        await composeNavBtn.click()
+        console.log('[scheduleThread] Step1: compose btn clicked')
+      } else {
+        const inlineArea = await page.waitForSelector(
+          INLINE_COMPOSE.join(', '),
+          { timeout: 8_000 }
+        ).catch(() => null)
+
+        if (inlineArea) {
+          await inlineArea.click()
+          console.log('[scheduleThread] Step1: inline area clicked')
+        } else {
+          console.log('[scheduleThread] Step1: navigating to /compose')
+          await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+        }
+      }
+
+      // ── Step 2: テキスト入力（高速モード） ───────────────────────────────────
+      console.log('[scheduleThread] Step2: typing content')
+      const textArea = await waitForAny(page, TEXT_AREA, 12_000)
+      await textArea.click()
+      await page.waitForTimeout(300)
+      // ユーザー起動の操作なので humanType ではなく高速入力を使用
+      await page.keyboard.type(content, { delay: 20 })
+      console.log('[scheduleThread] Step2: content typed')
+
+      // ── Step 3: 画像添付 ────────────────────────────────────────────────────
+      if (resolvedMedia.length > 0) {
+        console.log(`[scheduleThread] Step3: attaching ${resolvedMedia.length} image(s)`)
+        for (const mediaPath of resolvedMedia) {
+          const fileInput = await page.$('input[type="file"]').catch(() => null)
+          if (fileInput) {
+            await fileInput.setInputFiles(mediaPath)
+            await page.waitForTimeout(1500)
+            console.log(`[scheduleThread] Step3: attached ${mediaPath}`)
+          } else {
+            console.warn('[scheduleThread] Step3: file input not found, skipping image')
+          }
+        }
+      }
+
+      await page.waitForTimeout(400)
+
+      // ── Step 4: スケジュールボタンをクリック ────────────────────────────────
+      console.log('[scheduleThread] Step4: looking for schedule button')
+      console.log('[scheduleThread] current page HTML snippet:', await page.evaluate('document.body?.innerHTML?.slice(0,500) ?? ""').catch(() => ''))
+      const scheduleOpenBtn = await page.waitForSelector(
+        SCHEDULE_OPEN_BTN.join(', '),
+        { timeout: 10_000 }
+      ).catch(() => null)
+
+      if (!scheduleOpenBtn) {
+        // DOM上のボタン一覧をログ出力して診断
+        const buttons = await page.evaluate(
+          'Array.from(document.querySelectorAll("button, [role=\'button\']")).slice(0,20).map(el => el.tagName + "[" + el.getAttribute("aria-label") + "] text=" + (el.innerText || "").slice(0,30))'
+        ).catch(() => []) as string[]
+        console.error('[scheduleThread] schedule btn not found. Buttons on page:', buttons)
+        return { success: false, error: 'スケジュールボタンが見つかりませんでした。Threadsの投稿予約機能が利用できない可能性があります。\n見つかったボタン: ' + (Array.isArray(buttons) ? buttons.slice(0,5).join(', ') : '') }
+      }
+      console.log('[scheduleThread] Step4: schedule btn found, clicking')
+      await scheduleOpenBtn.click()
+      await page.waitForTimeout(1000)
+
+      // ── Step 5: 日時を設定 ──────────────────────────────────────────────────
+      console.log('[scheduleThread] Step5: setting datetime')
+      await setScheduleDateTime(page, scheduledAt)
+      console.log('[scheduleThread] Step5: datetime set')
+
+      // ── Step 6: 予約確認ボタンをクリック ────────────────────────────────────
+      console.log('[scheduleThread] Step6: looking for confirm button')
+      const confirmBtn = await page.waitForSelector(
+        SCHEDULE_CONFIRM_BTN.join(', '),
+        { timeout: 10_000 }
+      ).catch(() => null)
+
+      if (!confirmBtn) {
+        const buttons = await page.evaluate(
+          'Array.from(document.querySelectorAll("button, [role=\'button\']")).slice(0,20).map(el => el.tagName + " text=" + (el.innerText || "").slice(0,30))'
+        ).catch(() => []) as string[]
+        console.error('[scheduleThread] confirm btn not found. Buttons:', buttons)
+        return { success: false, error: '予約確認ボタンが見つかりませんでした。\n見つかったボタン: ' + (Array.isArray(buttons) ? buttons.slice(0,5).join(', ') : '') }
+      }
+      console.log('[scheduleThread] Step6: confirm btn found, clicking')
+      await confirmBtn.click()
+      await page.waitForTimeout(3000)
+
+      console.log('[scheduleThread] SUCCESS')
+      return { success: true }
+    } finally {
+      await page.close().catch(() => {})
+    }
+  })
+
+  try {
+    return await Promise.race([task, timeoutPromise])
+  } finally {
+    // ダウンロードした一時ファイルを削除
+    for (const tmp of tmpPaths) {
+      fs.unlink(tmp, () => {})
+    }
+  }
+}
+
+/**
+ * Threads の日時ピッカーに scheduledAt を設定するヘルパー。
+ *
+ * Threads の予約投稿 UI は月/日/年/時/分 の個別 <input type="number"> か、
+ * または <input type="date"> + <input type="time"> の組み合わせで実装されている。
+ * どちらにも対応するため両パターンを試みる。
+ */
+async function setScheduleDateTime(page: Page, dt: Date): Promise<void> {
+  // 月(1-12), 日(1-31), 年, 時(0-23), 分
+  const month  = dt.getMonth() + 1
+  const day    = dt.getDate()
+  const year   = dt.getFullYear()
+  const hour   = dt.getHours()
+  const minute = dt.getMinutes()
+
+  // パターン A: <input type="date"> + <input type="time">
+  const dateInput = await page.$('input[type="date"]').catch(() => null)
+  if (dateInput) {
+    const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`
+    await dateInput.fill(dateStr)
+    await page.waitForTimeout(300)
+
+    const timeInput = await page.$('input[type="time"]').catch(() => null)
+    if (timeInput) {
+      const timeStr = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`
+      await timeInput.fill(timeStr)
+      await page.waitForTimeout(300)
+    }
+    return
+  }
+
+  // パターン B: <input type="datetime-local">
+  const dtLocalInput = await page.$('input[type="datetime-local"]').catch(() => null)
+  if (dtLocalInput) {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const val = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}`
+    await dtLocalInput.fill(val)
+    await page.waitForTimeout(300)
+    return
+  }
+
+  // パターン C: Threads 独自の数値入力フィールド（月/日/年/時/分 の順に spinbutton が並ぶ）
+  // role="spinbutton" を持つ input を順に取得して値を入力する
+  const spinners = await page.$$('[role="spinbutton"], input[aria-label*="月"], input[aria-label*="日"], input[aria-label*="年"], input[aria-label*="時"], input[aria-label*="分"]')
+  if (spinners.length >= 3) {
+    // Threads の順序: 月→日→年→時→分 (ロケールにより異なる可能性あり)
+    const values = [month, day, year, hour, minute]
+    for (let i = 0; i < Math.min(spinners.length, values.length); i++) {
+      await spinners[i].click({ clickCount: 3 })
+      await spinners[i].type(String(values[i]))
+      await page.waitForTimeout(200)
+    }
+    return
+  }
+
+  // パターン D: キーボードフォーカスで日時フィールドを探す
+  // 月フィールドに近いラベルテキストを探す
+  const monthLabels = ['月', 'Month', 'MM']
+  for (const label of monthLabels) {
+    const el = await page.$(`[aria-label*="${label}"]`).catch(() => null)
+    if (el) {
+      await el.click({ clickCount: 3 })
+      await el.type(String(month))
+      await page.keyboard.press('Tab')
+      await el.type(String(day))
+      await page.keyboard.press('Tab')
+      await el.type(String(year))
+      await page.keyboard.press('Tab')
+      await el.type(String(hour))
+      await page.keyboard.press('Tab')
+      await el.type(String(minute))
+      await page.waitForTimeout(300)
+      return
+    }
+  }
+
+  // いずれも見つからない場合はエラーではなく続行（確認ボタン側でエラーになる）
+  console.warn('[scheduleThread] 日時入力フィールドが見つかりませんでした')
 }
 
 // ─── Like ─────────────────────────────────────────────────────────────────────

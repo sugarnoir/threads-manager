@@ -6,6 +6,7 @@ import {
   deleteStock,
 } from '../db/repositories/post_stocks'
 import { getSetting, setSetting } from '../db/repositories/settings'
+import { scheduleThread } from '../playwright/threads-client'
 
 function getImageGroups(): { group1: string[]; group2: string[] } {
   const g1 = getSetting('image_group_1')
@@ -137,6 +138,29 @@ export function registerStockHandlers(): void {
         }
       }
       return { success: true, updated, errors }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // ── Browser schedule post ────────────────────────────────────────────────────
+  ipcMain.handle('stocks:schedule-post', async (_e, data: {
+    account_id:   number
+    content:      string
+    scheduled_at: string   // ISO 8601
+    image_url?:   string | null
+    image_url_2?: string | null
+  }) => {
+    try {
+      const mediaPaths = [data.image_url, data.image_url_2]
+        .filter((p): p is string => typeof p === 'string' && p.length > 0)
+      const result = await scheduleThread(
+        data.account_id,
+        data.content,
+        new Date(data.scheduled_at),
+        mediaPaths,
+      )
+      return result
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }

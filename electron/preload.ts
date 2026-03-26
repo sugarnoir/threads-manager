@@ -153,6 +153,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) =>
       ipcRenderer.invoke('stocks:import-csv', rows),
     randomizeImages: (accountId: number) => ipcRenderer.invoke('stocks:randomize-images', accountId),
+    schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null }) =>
+      ipcRenderer.invoke('stocks:schedule-post', data),
   },
 
   // Image Groups

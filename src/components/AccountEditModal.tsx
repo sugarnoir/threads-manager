@@ -107,6 +107,11 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
   const [randomizing, setRandomizing]     = useState(false)
   const [toast, setToast]                 = useState<{ msg: string; ok: boolean } | null>(null)
 
+  // 予約投稿モーダル state
+  const [scheduleTarget, setScheduleTarget] = useState<PostStock | null>(null)
+  const [selectedHours, setSelectedHours]   = useState<number | null>(null)
+  const [scheduling, setScheduling]         = useState(false)
+
   const showToast = (msg: string, ok: boolean) => {
     setToast({ msg, ok })
     setTimeout(() => setToast(null), 5000)
@@ -328,7 +333,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
                   )}
                 </div>
               )}
-              <div className="flex gap-1.5 pt-0.5">
+              <div className="flex gap-1.5 pt-0.5 flex-wrap">
                 {onUseStock && (
                   <button
                     onClick={() => { console.log('[Stock] 投稿に使う clicked', s.id); onUseStock(s.content, [s.image_url, s.image_url_2].filter(Boolean) as string[]) }}
@@ -337,6 +342,15 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
                     投稿に使う
                   </button>
                 )}
+                <button
+                  onClick={() => {
+                    setSelectedHours(null)
+                    setScheduleTarget(s)
+                  }}
+                  className="px-2.5 py-1 bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-semibold rounded-lg transition-colors"
+                >
+                  予約投稿
+                </button>
                 <button
                   onClick={() => openEdit(s)}
                   className="px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[11px] rounded-lg transition-colors"
@@ -363,6 +377,110 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
           onSave={handleSave} onCancel={cancelEdit}
           saving={saving} error={error}
         />
+      )}
+
+      {/* 予約投稿モーダル */}
+      {scheduleTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => !scheduling && setScheduleTarget(null)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 w-80 space-y-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-white font-semibold text-sm">🗓 予約投稿</h3>
+              <button onClick={() => !scheduling && setScheduleTarget(null)} className="text-zinc-500 hover:text-white text-lg leading-none">×</button>
+            </div>
+
+            {/* プレビュー */}
+            <div className="bg-zinc-800 rounded-xl p-3 max-h-24 overflow-y-auto">
+              <p className="text-zinc-300 text-xs leading-relaxed">{scheduleTarget.content}</p>
+            </div>
+
+            {/* 画像インジケーター */}
+            {(scheduleTarget.image_url || scheduleTarget.image_url_2) && (
+              <div className="flex gap-2 items-center">
+                <span className="text-zinc-500 text-xs">画像:</span>
+                {scheduleTarget.image_url && (
+                  <img src={toImgSrc(scheduleTarget.image_url)} className="w-10 h-10 rounded object-cover border border-zinc-600" />
+                )}
+                {scheduleTarget.image_url_2 && (
+                  <img src={toImgSrc(scheduleTarget.image_url_2)} className="w-10 h-10 rounded object-cover border border-zinc-600" />
+                )}
+              </div>
+            )}
+
+            {/* 時間プリセットボタン */}
+            <div className="space-y-2">
+              <p className="text-zinc-400 text-xs font-medium">予約タイミング</p>
+              <div className="grid grid-cols-5 gap-1.5">
+                {([1, 3, 6, 12, 24] as const).map((h) => (
+                  <button
+                    key={h}
+                    onClick={() => setSelectedHours(h)}
+                    disabled={scheduling}
+                    className={`py-2 rounded-lg text-xs font-semibold transition-colors ${
+                      selectedHours === h
+                        ? 'bg-violet-600 text-white'
+                        : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
+                    } disabled:opacity-40`}
+                  >
+                    {h}時間後
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 確認表示 */}
+            {selectedHours != null && (() => {
+              const d = new Date(Date.now() + selectedHours * 3600_000)
+              const pad = (n: number) => String(n).padStart(2, '0')
+              const label = `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}に予約`
+              return (
+                <p className="text-violet-300 text-xs text-center font-medium bg-violet-900/30 rounded-lg py-2 px-3">
+                  {label}
+                </p>
+              )
+            })()}
+
+            {/* 実行ボタン */}
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={async () => {
+                  if (selectedHours == null) { showToast('タイミングを選択してください', false); return }
+                  const scheduledDate = new Date(Date.now() + selectedHours * 3600_000)
+                  setScheduling(true)
+                  const result = await api.stocks.schedulePost({
+                    account_id:   accountId,
+                    content:      scheduleTarget.content,
+                    scheduled_at: scheduledDate.toISOString(),
+                    image_url:    scheduleTarget.image_url,
+                    image_url_2:  scheduleTarget.image_url_2,
+                  })
+                  setScheduling(false)
+                  if (result.success) {
+                    setScheduleTarget(null)
+                    showToast('予約投稿を設定しました ✓', true)
+                  } else {
+                    showToast(`失敗: ${result.error ?? '不明なエラー'}`, false)
+                  }
+                }}
+                disabled={scheduling || selectedHours == null}
+                className="flex-1 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors"
+              >
+                {scheduling ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    実行中...
+                  </span>
+                ) : '予約実行'}
+              </button>
+              <button
+                onClick={() => { setScheduleTarget(null); setSelectedHours(null) }}
+                disabled={scheduling}
+                className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-zinc-300 text-sm rounded-xl transition-colors"
+              >
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
