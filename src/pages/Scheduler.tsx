@@ -427,10 +427,74 @@ function ScheduleTab({ accounts }: { accounts: Account[] }) {
   )
 }
 
+// ── Auto DM tab ───────────────────────────────────────────────────────────────
+
+function AutoDmTab() {
+  const [greetMessage, setGreetMessage] = useState('')
+  const [saving, setSaving]             = useState(false)
+  const [saved, setSaved]               = useState(false)
+
+  useEffect(() => {
+    api.settings.getAll().then((s) => {
+      setGreetMessage(s.auto_dm_greet_message ?? '')
+    })
+  }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    await api.settings.set('auto_dm_greet_message', greetMessage)
+    setSaving(false)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  return (
+    <div className="space-y-5 p-1">
+      <div className="space-y-2">
+        <label className="block text-sm font-medium text-gray-700">
+          グリートメッセージ
+        </label>
+        <p className="text-xs text-gray-500">
+          新規フォロワーに自動送信するDMのテンプレートです。
+        </p>
+        <textarea
+          value={greetMessage}
+          onChange={(e) => setGreetMessage(e.target.value)}
+          rows={6}
+          placeholder="例: フォローありがとうございます！よろしくお願いします。"
+          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+        />
+        <p className="text-xs text-gray-400 text-right">
+          {greetMessage.length} 文字
+        </p>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+        >
+          {saving ? '保存中...' : '保存'}
+        </button>
+        {saved && (
+          <span className="text-emerald-600 text-xs font-medium">✓ 保存しました</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Main Scheduler page ───────────────────────────────────────────────────────
 
 export function Scheduler({ accounts }: Props) {
-  const [tab, setTab] = useState<'schedule' | 'autopost'>('schedule')
+  const [tab, setTab] = useState<'schedule' | 'autopost' | 'autodm'>('schedule')
+
+  const TAB_LABELS: Record<typeof tab, string> = {
+    schedule: 'スケジュール',
+    autopost: '自動投稿',
+    autodm:   '自動DM',
+  }
 
   return (
     <div className="h-full flex flex-col gap-4">
@@ -438,7 +502,7 @@ export function Scheduler({ accounts }: Props) {
 
       {/* タブ */}
       <div className="flex border-b border-gray-200">
-        {(['schedule', 'autopost'] as const).map((t) => (
+        {(['schedule', 'autopost', 'autodm'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -448,7 +512,7 @@ export function Scheduler({ accounts }: Props) {
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
           >
-            {t === 'schedule' ? 'スケジュール' : '自動投稿'}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
@@ -456,8 +520,10 @@ export function Scheduler({ accounts }: Props) {
       <div className="flex-1 overflow-y-auto">
         {tab === 'schedule' ? (
           <ScheduleTab accounts={accounts} />
-        ) : (
+        ) : tab === 'autopost' ? (
           <AutopostTab accounts={accounts} />
+        ) : (
+          <AutoDmTab />
         )}
       </div>
     </div>
