@@ -607,8 +607,33 @@ export class ViewManager {
       console.log(`[showView] EXISTING account=${accountId} y=${y} height=${height} → setBounds`, existBounds)
       existing.view.setBounds(existBounds)
       console.log(`[showView] getBounds after set=`, existing.view.getBounds())
-      // HIDDEN_BOUNDS (0×0) から正しい bounds に変更した際に GPU が再描画しない場合があるため強制更新
-      this.nudgeRepaint(accountId)
+
+      // ── 白画面対策 ──────────────────────────────────────────────────────────
+      // 1) URL が about:blank (ページ未ロード) の場合: loaded フラグをリセットして
+      //    _bgInitView を再キューイング → Cookie/Proxy セットアップ込みで再ロード
+      // 2) URL は有るが threads.com でない (ロード失敗等) の場合: threads.com をリロード
+      // 3) 正常ロード済みの場合: GPU レンダリング失敗に備えて nudgeRepaint
+      const currentUrl = existing.view.webContents.getURL()
+      const isBlank     = !currentUrl || currentUrl === 'about:blank'
+      const isLoading   = existing.view.webContents.isLoading()
+      const isOnThreads = currentUrl?.includes('threads.com') && !currentUrl.includes('/login')
+
+      if (isBlank && !isLoading) {
+        // ページ未ロード: _bgInitView を再実行（Cookie/Proxy セットアップ込み）
+        console.log(`[showView] account=${accountId} blank page — re-queuing _bgInitView`)
+        existing.loaded = false
+        this.showQueue = this.showQueue
+          .then(() => this._bgInitView(accountId))
+          .catch(() => {})
+      } else if (!isBlank && !isOnThreads && !isLoading) {
+        // threads.com 以外のURLで停止: 直接 threads.com をリロード
+        console.log(`[showView] account=${accountId} not on threads (url="${currentUrl}") — reloading`)
+        existing.view.webContents.loadURL(THREADS_URL)
+      } else {
+        // 正常ロード済み: GPU コンポジターの再描画を強制
+        this.nudgeRepaint(accountId)
+      }
+
       this.notify()
       return
     }
@@ -665,8 +690,20 @@ export class ViewManager {
       console.log(`[_bgInitView] did-finish-load account=${accountId}`)
       this.nudgeRepaint(accountId)
     })
-    entry.view.webContents.once('did-fail-load', (_e, errCode, errDesc, url) => {
-      console.log(`[_bgInitView] did-fail-load account=${accountId} errCode=${errCode} errDesc=${errDesc} url=${url}`)
+    entry.view.webContents.once('did-fail-load', (_e, errCode, errDesc, failedUrl) => {
+      console.log(`[_bgInitView] did-fail-load account=${accountId} errCode=${errCode} errDesc=${errDesc} url=${failedUrl}`)
+      // -3 は USER_ABORTED (ページ遷移による中断) なので無視する
+      if (errCode === -3) return
+      // ロード失敗時: 5秒後にリトライ（プロキシ接続失敗など一時的なエラーへの対処）
+      setTimeout(() => {
+        const e = this.views.get(accountId)
+        if (!e || e.view.webContents.isDestroyed()) return
+        const url = e.view.webContents.getURL()
+        if (!url || url === 'about:blank') {
+          console.log(`[_bgInitView] retrying loadURL after did-fail-load for account=${accountId}`)
+          e.view.webContents.loadURL(THREADS_URL)
+        }
+      }, 5_000)
     })
   }
 
@@ -685,6 +722,8 @@ export class ViewManager {
     if (target.width <= 0 || target.height <= 0) return
     // 画面外（moveOffscreen）なら nudge 不要
     if (target.x < 0) return
+
+    // 1回目の nudge: 幅を ±1px して GPU コンポジターの再描画を強制する
     e.view.setBounds({ ...target, width: target.width + 1 })
     setTimeout(() => {
       const e2 = this.views.get(accountId)
@@ -694,6 +733,22 @@ export class ViewManager {
       if (cur.x < 0) return
       e2.view.setBounds({ ...cur, width: target.width })
     }, 50)
+
+    // 2回目の nudge: 遅延後に高さも変化させて頑固な GPU 白画面を解消する
+    setTimeout(() => {
+      const e3 = this.views.get(accountId)
+      if (!e3 || e3.view.webContents.isDestroyed()) return
+      const b = e3.view.getBounds()
+      if (b.x < 0 || b.width <= 0 || b.height <= 0) return
+      e3.view.setBounds({ ...b, height: b.height + 1 })
+      setTimeout(() => {
+        const e4 = this.views.get(accountId)
+        if (!e4 || e4.view.webContents.isDestroyed()) return
+        const b4 = e4.view.getBounds()
+        if (b4.x < 0) return
+        e4.view.setBounds({ ...b4, height: target.height })
+      }, 50)
+    }, 400)
   }
 
   /**
