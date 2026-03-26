@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:update-speed-preset', data),
     clearCookies: (id: number) =>
       ipcRenderer.invoke('accounts:clear-cookies', id),
+    resetSession: (id: number) =>
+      ipcRenderer.invoke('accounts:reset-session', id),
     reorder: (updates: { id: number; sort_order: number; group_name: string | null }[]) =>
       ipcRenderer.invoke('accounts:reorder', updates),
     contextMenu: (accountId: number) =>

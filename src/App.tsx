@@ -83,7 +83,7 @@ function LicenseKeyScreen({ onLogin }: { onLogin: () => void }) {
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { accounts, loading, addAccount, registerAccount, deleteAccount, checkStatus, checkAllAccounts, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, reorderAccounts } =
+  const { accounts, loading, addAccount, registerAccount, deleteAccount, checkStatus, checkAllAccounts, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, resetSession, reorderAccounts } =
     useAccounts()
 
   const [activeAccountId, setActiveAccountId] = useState<number | null>(null)
@@ -201,6 +201,7 @@ export default function App() {
           onSaveMemo={(memo) => updateMemo(editTarget.id, memo)}
           onSaveSpeedPreset={(preset) => updateSpeedPreset(editTarget.id, preset)}
           onClearCookies={() => clearCookies(editTarget.id)}
+          onResetSession={() => resetSession(editTarget.id)}
           onDelete={() => handleDeleteAccount(editTarget.id)}
           onOpenBrowser={() => { setActiveAccountId(editTarget.id); setEditTarget(null) }}
           onClose={() => setEditTarget(null)}

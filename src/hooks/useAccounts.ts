@@ -124,6 +124,13 @@ export function useAccounts() {
     await api.accounts.clearCookies(id)
   }
 
+  const resetSession = async (id: number) => {
+    await api.accounts.resetSession(id)
+    setAccounts((prev) =>
+      prev.map((a) => a.id === id ? { ...a, status: 'needs_login' as const } : a)
+    )
+  }
+
   const reorderAccounts = (updates: { id: number; sort_order: number; group_name: string | null }[]) => {
     // Optimistic update
     setAccounts((prev) => {
@@ -139,5 +146,5 @@ export function useAccounts() {
     api.accounts.reorder(updates)
   }
 
-  return { accounts, loading, refresh, addAccount, registerAccount, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, reorderAccounts, deleteAccount, checkStatus, checkAllAccounts }
+  return { accounts, loading, refresh, addAccount, registerAccount, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, resetSession, reorderAccounts, deleteAccount, checkStatus, checkAllAccounts }
 }

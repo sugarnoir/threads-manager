@@ -286,6 +286,34 @@ export function registerAccountHandlers(): void {
     return { success: true }
   })
 
+  ipcMain.handle('accounts:reset-session', async (_event, id: number) => {
+    // 1. Electron セッション（WebContentsView partition）のストレージを全消去
+    try {
+      const sess = session.fromPartition(`persist:account-${id}`)
+      await sess.clearStorageData()
+    } catch { /* session may not exist */ }
+
+    // 2. Playwright コンテキストを閉じて session_dir を削除
+    await closeContext(id)
+    const account = getAccountById(id)
+    if (account?.session_dir) {
+      try {
+        fs.rmSync(account.session_dir, { recursive: true, force: true })
+      } catch { /* ignore */ }
+    }
+
+    // 3. DBのCookieバックアップを削除
+    setSetting(`session_cookies_${id}`, '')
+
+    // 4. アカウントステータスを needs_login に更新
+    updateAccountStatus(id, 'needs_login')
+
+    // 5. WebContentsView を閉じる（再ログイン促進）
+    try { getViewManager().closeView(id) } catch { /* ignore */ }
+
+    return { success: true }
+  })
+
   ipcMain.handle('accounts:delete', async (_event, id: number) => {
     const account = getAccountById(id)
 

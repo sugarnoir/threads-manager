@@ -226,6 +226,7 @@ declare global {
         updateMemo: (data: { id: number; memo: string | null }) => Promise<{ success: boolean }>
         updateSpeedPreset: (data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) => Promise<{ success: boolean }>
         clearCookies: (id: number) => Promise<{ success: boolean }>
+        resetSession: (id: number) => Promise<{ success: boolean }>
         reorder: (updates: { id: number; sort_order: number; group_name: string | null }[]) => Promise<{ success: boolean }>
         contextMenu: (accountId: number) => Promise<void>
         check: (id: number) => Promise<{ status: string; message?: string }>

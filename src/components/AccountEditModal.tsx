@@ -13,6 +13,7 @@ interface Props {
   onSaveMemo: (memo: string | null) => Promise<unknown>
   onSaveSpeedPreset: (preset: 'slow' | 'normal' | 'fast') => Promise<unknown>
   onClearCookies: () => Promise<unknown>
+  onResetSession: () => Promise<unknown>
   onDelete: () => Promise<unknown>
   onOpenBrowser: () => void
   onClose: () => void
@@ -672,6 +673,7 @@ export function AccountEditModal({
   onSaveMemo,
   onSaveSpeedPreset,
   onClearCookies,
+  onResetSession,
   onDelete,
   onOpenBrowser,
   onClose,
@@ -723,6 +725,8 @@ export function AccountEditModal({
   // Danger zone states
   const [clearingCookies, setClearingCookies] = useState(false)
   const [cookieCleared, setCookieCleared] = useState(false)
+  const [resettingSession, setResettingSession] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -761,6 +765,18 @@ export function AccountEditModal({
       setCookieCleared(true)
     } finally {
       setClearingCookies(false)
+    }
+  }
+
+  const handleResetSession = async () => {
+    if (!confirmReset) { setConfirmReset(true); return }
+    setResettingSession(true)
+    try {
+      await onResetSession()
+      onClose()
+    } finally {
+      setResettingSession(false)
+      setConfirmReset(false)
     }
   }
 
@@ -1072,6 +1088,41 @@ export function AccountEditModal({
                     className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition-colors"
                   >
                     {clearingCookies ? '削除中...' : 'Cookieを削除'}
+                  </button>
+                )}
+              </div>
+
+              {/* Session reset */}
+              <div className="bg-zinc-800 rounded-xl p-4">
+                <p className="text-white text-xs font-semibold mb-1">セッションをリセット</p>
+                <p className="text-zinc-500 text-xs mb-3">
+                  セッションデータ（Cookie・ブラウザキャッシュ）をすべて削除し、再ログインを促します。アカウント自体は削除されません。
+                </p>
+                {confirmReset ? (
+                  <div className="space-y-2">
+                    <p className="text-amber-400 text-xs font-medium">セッションをリセットしますか？再ログインが必要になります。</p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setConfirmReset(false)}
+                        className="flex-1 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg text-xs transition-colors"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        onClick={handleResetSession}
+                        disabled={resettingSession}
+                        className="flex-1 py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition-colors"
+                      >
+                        {resettingSession ? 'リセット中...' : 'リセットする'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleResetSession}
+                    className="px-4 py-2 bg-orange-600/20 hover:bg-orange-600 border border-orange-600/40 hover:border-transparent text-orange-400 hover:text-white rounded-lg text-xs font-semibold transition-all"
+                  >
+                    セッションをリセット
                   </button>
                 )}
               </div>
