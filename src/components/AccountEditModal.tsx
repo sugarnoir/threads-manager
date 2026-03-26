@@ -410,7 +410,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
             <div className="space-y-2">
               <p className="text-zinc-400 text-xs font-medium">予約タイミング</p>
               <div className="grid grid-cols-5 gap-1.5">
-                {([1, 3, 6, 12, 24] as const).map((h) => (
+                {([3, 6, 9, 12, 15, 18, 21, 24, 48, 72] as const).map((h) => (
                   <button
                     key={h}
                     onClick={() => setSelectedHours(h)}
