@@ -266,41 +266,37 @@ const COMPOSE_BTN = [
 ]
 
 // フィード上部のインライン投稿エリア（クリックでコンポーザーモーダルが開く）
-// Threads は Lexical Editor を採用: data-lexical-editor="true" が目印
-// aria-placeholder="今なにしてる？" または aria-label に "テキストフィールド" を含む
+// 調査済み: クリック前は contenteditable 属性なし
+// → [aria-label*="テキストフィールド"] が唯一確実に動作するセレクター
 const INLINE_COMPOSE = [
-  'div[data-lexical-editor="true"]',                           // Lexical editor（最優先）
-  '[contenteditable="true"][aria-placeholder*="今なにしてる"]', // aria-placeholder
-  '[contenteditable="true"][aria-placeholder*="What"]',        // 英語UI
-  '[contenteditable="true"][aria-label*="テキストフィールド"]', // aria-label
-  '[contenteditable="true"][aria-label*="text field" i]',
-  '[placeholder*="スレッドを開始"]',
-  '[placeholder*="Start a thread"]',
-  '[placeholder*="What\'s new"]',
-  '[placeholder*="いま何"]',
+  '[aria-label*="テキストフィールド"]',                        // ✓ 確認済み（日本語UI）
+  '[aria-label*="text field" i]',                             // 英語UI
+  '[aria-label*="Start a thread"]',
+  '[aria-label*="スレッドを開始"]',
+  'div[data-lexical-editor="true"]',                          // フォールバック（既にモーダルが開いている場合）
+  '[contenteditable="true"][role="textbox"]',
 ]
 
 // テキスト入力エリア（コンポーザーモーダル内）
-// クリック後にモーダルが開き、同じ Lexical editor が使われる
+// 調査済み: data-lexical-editor="true" が確実
 const TEXT_AREA = [
-  'div[data-lexical-editor="true"]',                           // Lexical editor（最優先）
-  '[contenteditable="true"][role="textbox"]',
+  'div[data-lexical-editor="true"]',                          // ✓ 確認済み（最優先）
   '[contenteditable="true"][aria-placeholder*="今なにしてる"]',
-  '[contenteditable="true"][aria-placeholder*="What"]',
+  '[contenteditable="true"][role="textbox"]',
   'div[contenteditable="true"]',
   'textarea[placeholder]',
 ]
 
 // 投稿送信ボタン
+// 調査済み: div[role="button"]:has-text("投稿") が確実
 const POST_BTN = [
+  'div[role="button"]:has-text("投稿する")',
+  'div[role="button"]:has-text("投稿")',                      // ✓ 確認済み
+  'div[role="button"]:has-text("Post")',
   '[aria-label="投稿する"]',
   '[aria-label="Post"]',
-  '[aria-label="投稿"]',
   'button:has-text("投稿する")',
   'button:has-text("投稿")',
-  'div[role="button"]:has-text("投稿する")',
-  'div[role="button"]:has-text("投稿")',
-  'button:has-text("Post")',
 ]
 
 // ─── Post ─────────────────────────────────────────────────────────────────────
@@ -383,27 +379,14 @@ export async function postThread(
 }
 
 // ─── Schedule Post ────────────────────────────────────────────────────────────
-
-// スケジュール設定ボタン（コンポーザー内のクロックアイコン）
-const SCHEDULE_OPEN_BTN = [
-  '[aria-label="スケジュール"]',
-  '[aria-label="Schedule"]',
-  '[aria-label="投稿を予約"]',
-  '[aria-label="Schedule post"]',
-  'button[aria-label*="スケジュール"]',
-  'button[aria-label*="schedule" i]',
-]
-
-// スケジュール確認ボタン（日時設定後に押す）
-const SCHEDULE_CONFIRM_BTN = [
-  'button:has-text("予約投稿")',
-  'button:has-text("投稿を予約")',
-  'button:has-text("スケジュール設定")',
-  'button:has-text("Schedule")',
-  'button:has-text("Set schedule")',
-  'div[role="button"]:has-text("予約投稿")',
-  'div[role="button"]:has-text("Schedule")',
-]
+// 調査済みフロー:
+//   1. [aria-label*="テキストフィールド"] → click → compose modal
+//   2. div[data-lexical-editor="true"] → type
+//   3. dialog内 svg[aria-label="もっと見る"] の parent[role="button"] → click → menu
+//   4. [role="menuitem"]:has-text("日時を指定") → click → calendar picker
+//   5. カレンダーで日付選択 + input[placeholder="hh"]/input[placeholder="mm"] で時刻入力
+//   6. div[role="button"]:has-text("完了") → click
+//   7. div[role="button"]:has-text("投稿") → click → scheduled!
 
 /**
  * 画像パス/URLをローカルファイルパスに解決する。
@@ -540,47 +523,66 @@ export async function scheduleThread(
 
       await page.waitForTimeout(400)
 
-      // ── Step 4: スケジュールボタンをクリック ────────────────────────────────
-      console.log('[scheduleThread] Step4: looking for schedule button')
-      console.log('[scheduleThread] current page HTML snippet:', await page.evaluate('document.body?.innerHTML?.slice(0,500) ?? ""').catch(() => ''))
-      const scheduleOpenBtn = await page.waitForSelector(
-        SCHEDULE_OPEN_BTN.join(', '),
-        { timeout: 10_000 }
-      ).catch(() => null)
-
-      if (!scheduleOpenBtn) {
-        // DOM上のボタン一覧をログ出力して診断
-        const buttons = await page.evaluate(
-          'Array.from(document.querySelectorAll("button, [role=\'button\']")).slice(0,20).map(el => el.tagName + "[" + el.getAttribute("aria-label") + "] text=" + (el.innerText || "").slice(0,30))'
-        ).catch(() => []) as string[]
-        console.error('[scheduleThread] schedule btn not found. Buttons on page:', buttons)
-        return { success: false, error: 'スケジュールボタンが見つかりませんでした。Threadsの投稿予約機能が利用できない可能性があります。\n見つかったボタン: ' + (Array.isArray(buttons) ? buttons.slice(0,5).join(', ') : '') }
+      // ── Step 4: dialog内の「もっと見る」をクリック → メニュー表示 ─────────
+      console.log('[scheduleThread] Step4: clicking もっと見る in dialog')
+      const moreBtnClicked = await page.evaluate(`
+        (() => {
+          const dialog = document.querySelector('[role="dialog"]')
+          if (!dialog) return false
+          const svg = Array.from(dialog.querySelectorAll('svg[aria-label="もっと見る"]'))[0]
+          if (!svg) return false
+          const btn = svg.closest('[role="button"]') || svg.parentElement
+          if (btn) { btn.click(); return true }
+          return false
+        })()
+      `)
+      if (!moreBtnClicked) {
+        return { success: false, error: '「もっと見る」ボタンが見つかりませんでした' }
       }
-      console.log('[scheduleThread] Step4: schedule btn found, clicking')
-      await scheduleOpenBtn.click()
       await page.waitForTimeout(1000)
+      console.log('[scheduleThread] Step4: もっと見る clicked')
 
-      // ── Step 5: 日時を設定 ──────────────────────────────────────────────────
-      console.log('[scheduleThread] Step5: setting datetime')
+      // ── Step 5: 「日時を指定」メニューアイテムをクリック ─────────────────
+      console.log('[scheduleThread] Step5: clicking 日時を指定')
+      const scheduleMenuItem = await page.waitForSelector(
+        '[role="menuitem"]:has-text("日時を指定")',
+        { timeout: 5_000 }
+      ).catch(() => null)
+      if (!scheduleMenuItem) {
+        return { success: false, error: '「日時を指定」メニューが見つかりませんでした' }
+      }
+      await scheduleMenuItem.click()
+      await page.waitForTimeout(2000)
+      console.log('[scheduleThread] Step5: 日時を指定 clicked')
+
+      // ── Step 6: カレンダーで日時を設定 ───────────────────────────────────
+      console.log('[scheduleThread] Step6: setting datetime')
       await setScheduleDateTime(page, scheduledAt)
-      console.log('[scheduleThread] Step5: datetime set')
+      console.log('[scheduleThread] Step6: datetime set')
 
-      // ── Step 6: 予約確認ボタンをクリック ────────────────────────────────────
-      console.log('[scheduleThread] Step6: looking for confirm button')
-      const confirmBtn = await page.waitForSelector(
-        SCHEDULE_CONFIRM_BTN.join(', '),
+      // ── Step 7: 「完了」ボタンをクリック ─────────────────────────────────
+      console.log('[scheduleThread] Step7: clicking 完了')
+      const doneBtn = await page.waitForSelector(
+        'div[role="button"]:has-text("完了")',
+        { timeout: 5_000 }
+      ).catch(() => null)
+      if (!doneBtn) {
+        return { success: false, error: '「完了」ボタンが見つかりませんでした' }
+      }
+      await doneBtn.click()
+      await page.waitForTimeout(1500)
+      console.log('[scheduleThread] Step7: 完了 clicked')
+
+      // ── Step 8: 投稿ボタンをクリック ────────────────────────────────────
+      console.log('[scheduleThread] Step8: clicking 投稿')
+      const postBtn = await page.waitForSelector(
+        POST_BTN.join(', '),
         { timeout: 10_000 }
       ).catch(() => null)
-
-      if (!confirmBtn) {
-        const buttons = await page.evaluate(
-          'Array.from(document.querySelectorAll("button, [role=\'button\']")).slice(0,20).map(el => el.tagName + " text=" + (el.innerText || "").slice(0,30))'
-        ).catch(() => []) as string[]
-        console.error('[scheduleThread] confirm btn not found. Buttons:', buttons)
-        return { success: false, error: '予約確認ボタンが見つかりませんでした。\n見つかったボタン: ' + (Array.isArray(buttons) ? buttons.slice(0,5).join(', ') : '') }
+      if (!postBtn) {
+        return { success: false, error: '投稿ボタンが見つかりませんでした' }
       }
-      console.log('[scheduleThread] Step6: confirm btn found, clicking')
-      await confirmBtn.click()
+      await postBtn.click()
       await page.waitForTimeout(3000)
 
       console.log('[scheduleThread] SUCCESS')
@@ -601,83 +603,89 @@ export async function scheduleThread(
 }
 
 /**
- * Threads の日時ピッカーに scheduledAt を設定するヘルパー。
+ * Threads のカレンダー日時ピッカーに scheduledAt を設定するヘルパー。
  *
- * Threads の予約投稿 UI は月/日/年/時/分 の個別 <input type="number"> か、
- * または <input type="date"> + <input type="time"> の組み合わせで実装されている。
- * どちらにも対応するため両パターンを試みる。
+ * 調査済み UI:
+ *   - カレンダーグリッド: [role="grid"][aria-label="日付を選択"]
+ *   - 表示中の月: [aria-live="polite"] h2 → "2026年3月" 形式
+ *   - 前月/翌月: button[aria-label="前月"] / button[aria-label="翌月"]
+ *   - 日付セル: [role="gridcell"] (textContent = "1"〜"31")
+ *   - 時刻入力: input[placeholder="hh"] / input[placeholder="mm"]
  */
 async function setScheduleDateTime(page: Page, dt: Date): Promise<void> {
-  // 月(1-12), 日(1-31), 年, 時(0-23), 分
-  const month  = dt.getMonth() + 1
-  const day    = dt.getDate()
-  const year   = dt.getFullYear()
-  const hour   = dt.getHours()
-  const minute = dt.getMinutes()
+  const targetYear  = dt.getFullYear()
+  const targetMonth = dt.getMonth() + 1  // 1-12
+  const targetDay   = dt.getDate()
+  const targetHour  = dt.getHours()
+  const targetMin   = dt.getMinutes()
 
-  // パターン A: <input type="date"> + <input type="time">
-  const dateInput = await page.$('input[type="date"]').catch(() => null)
-  if (dateInput) {
-    const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`
-    await dateInput.fill(dateStr)
-    await page.waitForTimeout(300)
+  // カレンダーグリッドが表示されるまで待機
+  await page.waitForSelector('[role="grid"][aria-label="日付を選択"]', { timeout: 10_000 })
 
-    const timeInput = await page.$('input[type="time"]').catch(() => null)
-    if (timeInput) {
-      const timeStr = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`
-      await timeInput.fill(timeStr)
-      await page.waitForTimeout(300)
+  // 現在表示中の月を読み取る（"2026年3月" 形式）
+  const getDisplayedYearMonth = async (): Promise<{ year: number; month: number }> => {
+    const text = await page.evaluate(`
+      (() => {
+        const el = document.querySelector('[aria-live="polite"] h2')
+        return el ? el.textContent : ''
+      })()
+    `).catch(() => '') as string
+    const m = text.match(/(\d+)年(\d+)月/)
+    if (m) return { year: parseInt(m[1]), month: parseInt(m[2]) }
+    return { year: 0, month: 0 }
+  }
+
+  // 目的の月まで前月/翌月ボタンで移動（最大24回）
+  for (let i = 0; i < 24; i++) {
+    const { year, month } = await getDisplayedYearMonth()
+    if (year === targetYear && month === targetMonth) break
+
+    const isBefore = year < targetYear || (year === targetYear && month < targetMonth)
+    if (isBefore) {
+      const nextBtn = await page.$('button[aria-label="翌月"]').catch(() => null)
+      if (nextBtn) await nextBtn.click()
+    } else {
+      const prevBtn = await page.$('button[aria-label="前月"]').catch(() => null)
+      if (prevBtn) await prevBtn.click()
     }
-    return
+    await page.waitForTimeout(400)
   }
 
-  // パターン B: <input type="datetime-local">
-  const dtLocalInput = await page.$('input[type="datetime-local"]').catch(() => null)
-  if (dtLocalInput) {
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const val = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}`
-    await dtLocalInput.fill(val)
-    await page.waitForTimeout(300)
-    return
+  // 目的の日付セルをクリック
+  const dayClicked = await page.evaluate(`
+    (() => {
+      const cells = Array.from(document.querySelectorAll('[role="gridcell"]'))
+      const target = '${targetDay}'
+      for (const cell of cells) {
+        const text = (cell.textContent || '').trim()
+        if (text === target) { cell.click(); return true }
+      }
+      return false
+    })()
+  `)
+  if (!dayClicked) {
+    console.warn(`[setScheduleDateTime] day ${targetDay} not found in calendar`)
+  }
+  await page.waitForTimeout(500)
+
+  // 時刻入力
+  const hhInput = await page.$('input[placeholder="hh"]').catch(() => null)
+  if (hhInput) {
+    await hhInput.click({ clickCount: 3 })
+    await hhInput.type(String(targetHour).padStart(2, '0'))
+    await page.waitForTimeout(200)
+  } else {
+    console.warn('[setScheduleDateTime] hh input not found')
   }
 
-  // パターン C: Threads 独自の数値入力フィールド（月/日/年/時/分 の順に spinbutton が並ぶ）
-  // role="spinbutton" を持つ input を順に取得して値を入力する
-  const spinners = await page.$$('[role="spinbutton"], input[aria-label*="月"], input[aria-label*="日"], input[aria-label*="年"], input[aria-label*="時"], input[aria-label*="分"]')
-  if (spinners.length >= 3) {
-    // Threads の順序: 月→日→年→時→分 (ロケールにより異なる可能性あり)
-    const values = [month, day, year, hour, minute]
-    for (let i = 0; i < Math.min(spinners.length, values.length); i++) {
-      await spinners[i].click({ clickCount: 3 })
-      await spinners[i].type(String(values[i]))
-      await page.waitForTimeout(200)
-    }
-    return
+  const mmInput = await page.$('input[placeholder="mm"]').catch(() => null)
+  if (mmInput) {
+    await mmInput.click({ clickCount: 3 })
+    await mmInput.type(String(targetMin).padStart(2, '0'))
+    await page.waitForTimeout(200)
+  } else {
+    console.warn('[setScheduleDateTime] mm input not found')
   }
-
-  // パターン D: キーボードフォーカスで日時フィールドを探す
-  // 月フィールドに近いラベルテキストを探す
-  const monthLabels = ['月', 'Month', 'MM']
-  for (const label of monthLabels) {
-    const el = await page.$(`[aria-label*="${label}"]`).catch(() => null)
-    if (el) {
-      await el.click({ clickCount: 3 })
-      await el.type(String(month))
-      await page.keyboard.press('Tab')
-      await el.type(String(day))
-      await page.keyboard.press('Tab')
-      await el.type(String(year))
-      await page.keyboard.press('Tab')
-      await el.type(String(hour))
-      await page.keyboard.press('Tab')
-      await el.type(String(minute))
-      await page.waitForTimeout(300)
-      return
-    }
-  }
-
-  // いずれも見つからない場合はエラーではなく続行（確認ボタン側でエラーになる）
-  console.warn('[scheduleThread] 日時入力フィールドが見つかりませんでした')
 }
 
 // ─── Like ─────────────────────────────────────────────────────────────────────
