@@ -49,13 +49,27 @@ const BASE_LAUNCH_OPTIONS = {
 }
 
 /**
+ * proxy_url に scheme が含まれていない場合 http:// を付加して正規化する。
+ * Playwright の proxy.server は必ず scheme://host:port 形式が必要。
+ */
+function normalizeProxyServer(url: string): string {
+  if (/^https?:\/\//i.test(url) || /^socks[45]:\/\//i.test(url)) return url
+  // scheme がない場合は http:// を補う
+  console.warn(`[browser-manager] proxy_url has no scheme, prepending http://: "${url}"`)
+  return `http://${url}`
+}
+
+/**
  * アカウントのコンテキストを取得（なければ作成）。
  * headless=true: 自動化処理用（不可視）/ headless=false: ユーザー操作用（可視）
  * session_dir とプロキシは DB から自動で読み込む。
  */
 export async function getContext(accountId: number, headless = false): Promise<BrowserContext> {
   const entry = pool.get(accountId)
-  if (entry) return entry.ctx
+  if (entry) {
+    console.log(`[getContext] account=${accountId} → reusing existing context (headless=${headless})`)
+    return entry.ctx
+  }
 
   const account = getAccountById(accountId)
   if (!account) throw new Error(`Account ${accountId} not found`)
@@ -66,11 +80,17 @@ export async function getContext(accountId: number, headless = false): Promise<B
 
   const proxy: ProxyConfig | undefined = account.proxy_url
     ? {
-        server: account.proxy_url,
+        server:   normalizeProxyServer(account.proxy_url),
         username: account.proxy_username ?? undefined,
+        // password が null の場合は undefined に統一 (Playwright は undefined を「認証なし」として扱う)
         password: account.proxy_password ?? undefined,
       }
     : undefined
+
+  console.log(
+    `[getContext] account=${accountId} headless=${headless} ` +
+    `proxy=${proxy ? `${proxy.server} user=${proxy.username ?? 'none'}` : 'none'}`
+  )
 
   // プロキシ使用時は非プロキシUDPを全面無効にして WebRTC 経由の IP リークを防ぐ
   const webrtcArgs = proxy

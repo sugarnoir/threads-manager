@@ -435,7 +435,11 @@ export async function scheduleThread(
   scheduledAt: Date,
   mediaPaths: string[] = []
 ): Promise<PostResult> {
-  console.log(`[scheduleThread] START account=${accountId} scheduledAt=${scheduledAt.toISOString()}`)
+  const acct = getAccountById(accountId)
+  console.log(
+    `[scheduleThread] START account=${accountId} scheduledAt=${scheduledAt.toISOString()} ` +
+    `proxy=${acct?.proxy_url ?? 'none'}`
+  )
 
   // 全体タイムアウト: 120秒
   const timeoutPromise = new Promise<PostResult>((_, reject) =>

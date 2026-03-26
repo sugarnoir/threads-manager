@@ -153,15 +153,17 @@ export function registerAccountHandlers(): void {
 
       // 1. Playwright コンテキストを再起動（次回 getContext 時に新プロキシで起動）
       await reloadContext(data.id)
+      console.log(`[accounts:update-proxy] reloadContext done for account=${data.id} proxy=${data.proxy_url ?? 'none'}`)
 
       // 2. Electron セッション（WebContentsView 用）にもプロキシを反映
       try {
         const sess = session.fromPartition(`persist:account-${data.id}`)
         if (data.proxy_url) {
-          // proxy_url が "http://host:port" 形式の場合そのまま渡す
           await sess.setProxy({ proxyRules: data.proxy_url })
+          console.log(`[accounts:update-proxy] Electron session proxy set: ${data.proxy_url}`)
         } else {
           await sess.setProxy({ proxyRules: 'direct://' })
+          console.log(`[accounts:update-proxy] Electron session proxy cleared (direct://)`)
         }
 
         // 3. 開いている WebContentsView をリロードして新プロキシを適用
