@@ -265,18 +265,28 @@ const COMPOSE_BTN = [
   'a[href*="/compose"]',
 ]
 
-// フィード上部のインライン投稿エリア（ナビボタンが見つからない場合の代替）
+// フィード上部のインライン投稿エリア（クリックでコンポーザーモーダルが開く）
+// Threads は Lexical Editor を採用: data-lexical-editor="true" が目印
+// aria-placeholder="今なにしてる？" または aria-label に "テキストフィールド" を含む
 const INLINE_COMPOSE = [
+  'div[data-lexical-editor="true"]',                           // Lexical editor（最優先）
+  '[contenteditable="true"][aria-placeholder*="今なにしてる"]', // aria-placeholder
+  '[contenteditable="true"][aria-placeholder*="What"]',        // 英語UI
+  '[contenteditable="true"][aria-label*="テキストフィールド"]', // aria-label
+  '[contenteditable="true"][aria-label*="text field" i]',
   '[placeholder*="スレッドを開始"]',
   '[placeholder*="Start a thread"]',
   '[placeholder*="What\'s new"]',
   '[placeholder*="いま何"]',
-  'div[contenteditable="true"][data-lexical-editor]',
 ]
 
-// テキスト入力エリア（コンポーザー内）
+// テキスト入力エリア（コンポーザーモーダル内）
+// クリック後にモーダルが開き、同じ Lexical editor が使われる
 const TEXT_AREA = [
+  'div[data-lexical-editor="true"]',                           // Lexical editor（最優先）
   '[contenteditable="true"][role="textbox"]',
+  '[contenteditable="true"][aria-placeholder*="今なにしてる"]',
+  '[contenteditable="true"][aria-placeholder*="What"]',
   'div[contenteditable="true"]',
   'textarea[placeholder]',
 ]
@@ -317,26 +327,32 @@ export async function postThread(
       // ── Step 1: コンポーザーを開く ──────────────────────────────────────────
       const composeNavBtn = await page.waitForSelector(
         COMPOSE_BTN.join(', '),
-        { timeout: 8_000 }
+        { timeout: 5_000 }
       ).catch(() => null)
 
       if (composeNavBtn) {
         await composeNavBtn.click()
+        await page.waitForTimeout(1000)
       } else {
+        // Lexical editor のインラインエリアをクリック → モーダルが開く
         const inlineArea = await page.waitForSelector(
           INLINE_COMPOSE.join(', '),
-          { timeout: 8_000 }
+          { timeout: 12_000 }
         ).catch(() => null)
 
         if (inlineArea) {
           await inlineArea.click()
+          // モーダルアニメーション完了を待機
+          await page.waitForTimeout(1200)
         } else {
           await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+          await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+          await page.waitForTimeout(1000)
         }
       }
 
       // ── Step 2: テキストエリアにフォーカス後、人間らしくタイプ ───────────────
-      const textArea = await waitForAny(page, TEXT_AREA, 12_000)
+      const textArea = await waitForAny(page, TEXT_AREA, 15_000)
       await textArea.click()
       await shortDelay(page, cfg)
       await humanType(page, content, cfg)
@@ -469,30 +485,38 @@ export async function scheduleThread(
       console.log('[scheduleThread] Step1: opening composer')
       const composeNavBtn = await page.waitForSelector(
         COMPOSE_BTN.join(', '),
-        { timeout: 8_000 }
+        { timeout: 5_000 }
       ).catch(() => null)
 
       if (composeNavBtn) {
         await composeNavBtn.click()
+        await page.waitForTimeout(1000)
         console.log('[scheduleThread] Step1: compose btn clicked')
       } else {
+        // Lexical editor のインラインエリアをクリック → モーダルが開く
         const inlineArea = await page.waitForSelector(
           INLINE_COMPOSE.join(', '),
-          { timeout: 8_000 }
+          { timeout: 12_000 }
         ).catch(() => null)
 
         if (inlineArea) {
+          const label = await inlineArea.getAttribute('aria-label').catch(() => '')
+          console.log(`[scheduleThread] Step1: inline area found (aria-label="${label}"), clicking`)
           await inlineArea.click()
-          console.log('[scheduleThread] Step1: inline area clicked')
+          // モーダルアニメーション完了を待機
+          await page.waitForTimeout(1200)
+          console.log('[scheduleThread] Step1: inline area clicked, waiting for modal')
         } else {
           console.log('[scheduleThread] Step1: navigating to /compose')
           await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+          await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+          await page.waitForTimeout(1000)
         }
       }
 
       // ── Step 2: テキスト入力（高速モード） ───────────────────────────────────
       console.log('[scheduleThread] Step2: typing content')
-      const textArea = await waitForAny(page, TEXT_AREA, 12_000)
+      const textArea = await waitForAny(page, TEXT_AREA, 15_000)
       await textArea.click()
       await page.waitForTimeout(300)
       // ユーザー起動の操作なので humanType ではなく高速入力を使用
