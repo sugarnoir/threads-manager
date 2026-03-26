@@ -409,13 +409,13 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
             {/* 時間プリセットボタン */}
             <div className="space-y-2">
               <p className="text-zinc-400 text-xs font-medium">予約タイミング</p>
-              <div className="grid grid-cols-5 gap-1.5">
+              <div className="grid grid-cols-5 gap-1">
                 {([3, 6, 9, 12, 15, 18, 21, 24, 48, 72] as const).map((h) => (
                   <button
                     key={h}
                     onClick={() => setSelectedHours(h)}
                     disabled={scheduling}
-                    className={`py-2 rounded-lg text-xs font-semibold transition-colors ${
+                    className={`py-1.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-colors ${
                       selectedHours === h
                         ? 'bg-violet-600 text-white'
                         : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
