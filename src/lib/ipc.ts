@@ -194,6 +194,13 @@ export interface LicenseRow {
   memo: string | null
 }
 
+export interface MasterKeyRow {
+  key: string
+  is_active: boolean
+  expires_at: string | null
+  memo: string | null
+}
+
 declare global {
   interface Window {
     electronAPI: {
@@ -324,6 +331,14 @@ declare global {
         check:  () => Promise<{ required: boolean; authenticated: boolean }>
         verify: (key: string) => Promise<{ ok: boolean; error?: string }>
         logout: () => Promise<{ ok: boolean }>
+      }
+      masterKey: {
+        check:  () => Promise<{ authenticated: boolean }>
+        verify: (key: string) => Promise<{ ok: boolean; error?: string }>
+        list:   () => Promise<{ success: boolean; data?: MasterKeyRow[]; error?: string }>
+        create: (row: MasterKeyRow) => Promise<{ success: boolean; error?: string }>
+        update: (data: Partial<MasterKeyRow> & { key: string }) => Promise<{ success: boolean; error?: string }>
+        delete: (key: string) => Promise<{ success: boolean; error?: string }>
       }
       research: {
         debug: (data: { accountId: number; keyword: string }) => Promise<{ success: boolean; data: unknown; error?: string }>

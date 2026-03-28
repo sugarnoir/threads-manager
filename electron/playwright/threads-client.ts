@@ -1,5 +1,5 @@
 import { BrowserContext, Page } from 'playwright'
-import { withContext, openLoginBrowser, ProxyConfig } from './browser-manager'
+import { withContext, withContextDirect, closeContext, openLoginBrowser, ProxyConfig } from './browser-manager'
 import { getAccountById } from '../db/repositories/accounts'
 import { SPEED_PRESETS, SpeedPreset, randomDelay, shortDelay, humanType, randomScroll } from './human-behavior'
 import fs from 'fs'
@@ -239,18 +239,53 @@ export async function checkLoginStatus(accountId: number): Promise<boolean> {
 // ─── Selector helpers ─────────────────────────────────────────────────────────
 
 /**
- * 複数セレクターを結合して最初に見つかった要素を返す。
- * 全て見つからなかった場合は試したセレクターをエラーメッセージに含める。
+ * 複数セレクターを順番に試して最初に見つかった要素を返す。
+ *
+ * 先頭セレクターを優先（timeout の大半を割り当て）し、
+ * 見つからなければ残りのセレクターを短いフォールバックタイムアウトで試す。
+ * `waitForSelector('A, B')` はDOM上の出現順で返すため優先度を保証できないが、
+ * この実装は配列先頭を確実に優先する。
  */
 async function waitForAny(
   page: Page,
   selectors: string[],
   timeout = 12_000
 ): Promise<import('playwright').ElementHandle> {
-  const combined = selectors.join(', ')
-  const el = await page.waitForSelector(combined, { timeout }).catch(() => null)
-  if (el) return el
+  if (selectors.length === 0) throw new Error('waitForAny: セレクターが空です')
+
+  // 先頭セレクターを優先: タイムアウトの大半を使って待つ
+  const primaryTimeout = Math.max(timeout - 3_000, Math.floor(timeout * 0.8))
+  const primary = await page.waitForSelector(selectors[0], { timeout: primaryTimeout }).catch(() => null)
+  if (primary) return primary
+
+  // フォールバック: 残りのセレクターを結合して短いタイムアウトで試す
+  if (selectors.length > 1) {
+    const fallback = selectors.slice(1).join(', ')
+    const el = await page.waitForSelector(fallback, { timeout: 3_000 }).catch(() => null)
+    if (el) return el
+  }
+
   throw new Error(`要素が見つかりません (${timeout}ms):\n  ${selectors.join('\n  ')}`)
+}
+
+/**
+ * Playwright の pointer-event interception チェックを回避するための JS クリック。
+ * 上位要素がポインターイベントを横取りする場合に .click() の代わりに使用する。
+ * evaluate にブラウザ側コードを文字列で渡して Node.js tsconfig の DOM 型エラーを回避。
+ */
+async function jsClick(el: import('playwright').ElementHandle): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (el as any).evaluate('node => node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }))')
+}
+
+/**
+ * input 要素を JS でフォーカス・全選択してから Playwright でタイプする。
+ * pointer interception を回避するため click({ clickCount: 3 }) の代わりに使用する。
+ */
+async function jsFocusAndType(el: import('playwright').ElementHandle, text: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (el as any).evaluate('node => { node.focus(); node.select(); }')
+  await el.type(text, { delay: 30 })
 }
 
 // ナビゲーション投稿ボタン（コンポーザーを開く）
@@ -279,8 +314,12 @@ const INLINE_COMPOSE = [
 
 // テキスト入力エリア（コンポーザーモーダル内）
 // 調査済み: data-lexical-editor="true" が確実
+// ダイアログ内を優先: モーダルが開いた後もホームのインライン入力欄が DOM に残っており
+// dialog スコープなしだと DOM 順でインライン欄が先にマッチしてしまうケースがある
 const TEXT_AREA = [
-  'div[data-lexical-editor="true"]',                          // ✓ 確認済み（最優先）
+  '[role="dialog"] div[data-lexical-editor="true"]',          // ✓ 最優先: ダイアログ内
+  'div[data-lexical-editor="true"]',                          // フォールバック: /compose ページ等
+  '[role="dialog"] [contenteditable="true"][role="textbox"]',
   '[contenteditable="true"][aria-placeholder*="今なにしてる"]',
   '[contenteditable="true"][role="textbox"]',
   'div[contenteditable="true"]',
@@ -328,7 +367,7 @@ export async function postThread(
 
       if (composeNavBtn) {
         await composeNavBtn.click()
-        await page.waitForTimeout(1000)
+        await page.waitForSelector('[contenteditable="true"]', { timeout: 8_000 }).catch(() => {})
       } else {
         // Lexical editor のインラインエリアをクリック → モーダルが開く
         const inlineArea = await page.waitForSelector(
@@ -338,8 +377,7 @@ export async function postThread(
 
         if (inlineArea) {
           await inlineArea.click()
-          // モーダルアニメーション完了を待機
-          await page.waitForTimeout(1200)
+          await page.waitForSelector('[contenteditable="true"]', { timeout: 8_000 }).catch(() => {})
         } else {
           await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
           await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
@@ -376,6 +414,21 @@ export async function postThread(
       await page.close().catch(() => {})
     }
   })
+}
+
+// ─── Proxy error detection ────────────────────────────────────────────────────
+
+/** プロキシ接続失敗を示すエラーメッセージかどうか判定する */
+function isProxyError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return (
+    msg.includes('err_tunnel_connection_failed') ||
+    msg.includes('err_proxy_connection_failed') ||
+    msg.includes('err_socks_connection_failed') ||
+    msg.includes('err_connection_timed_out') ||
+    msg.includes('err_connection_refused') ||
+    msg.includes('chrome-error://')
+  )
 }
 
 // ─── Schedule Post ────────────────────────────────────────────────────────────
@@ -426,8 +479,226 @@ async function resolveToLocalPath(urlOrPath: string, tmpPaths: string[]): Promis
 }
 
 /**
+ * scheduleThread のページ操作コア。
+ * withContext / withContextDirect どちらからも呼べるよう分離している。
+ */
+async function scheduleThreadCore(
+  page: Page,
+  content: string,
+  scheduledAt: Date,
+  resolvedMedia: string[],
+  ctxLabel: string  // ログ識別用 ('proxy' | 'direct')
+): Promise<PostResult> {
+  console.log(`[scheduleThread/${ctxLabel}] page.goto ${THREADS_URL}`)
+  try {
+    await page.goto(THREADS_URL, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (isProxyError(e)) throw new Error(`PROXY_ERROR: ${msg}`)
+    throw e
+  }
+
+  const currentUrl = page.url()
+  console.log(`[scheduleThread/${ctxLabel}] loaded url=${currentUrl}`)
+
+  // chrome-error:// はプロキシ/ネットワーク障害を示す
+  if (currentUrl.startsWith('chrome-error://')) {
+    throw new Error(`PROXY_ERROR: navigation failed (${currentUrl})`)
+  }
+
+  if (!isLoggedInUrl(currentUrl)) {
+    return { success: false, error: 'ログインが必要です' }
+  }
+
+  // ── Step 1: コンポーザーを開く ────────────────────────────────────────────
+  console.log(`[scheduleThread/${ctxLabel}] Step1: opening composer`)
+  const composeNavBtn = await page.waitForSelector(
+    COMPOSE_BTN.join(', '),
+    { timeout: 5_000 }
+  ).catch(() => null)
+
+  if (composeNavBtn) {
+    await composeNavBtn.click()
+    await page.waitForSelector('[contenteditable="true"]', { timeout: 8_000 }).catch(() => {})
+    console.log(`[scheduleThread/${ctxLabel}] Step1: compose btn clicked`)
+  } else {
+    const inlineArea = await page.waitForSelector(
+      INLINE_COMPOSE.join(', '),
+      { timeout: 12_000 }
+    ).catch(() => null)
+
+    if (inlineArea) {
+      const ariaLabel = await inlineArea.getAttribute('aria-label').catch(() => '')
+      console.log(`[scheduleThread/${ctxLabel}] Step1: inline area found (aria-label="${ariaLabel}"), clicking`)
+      await inlineArea.click()
+      await page.waitForSelector('[contenteditable="true"]', { timeout: 8_000 }).catch(() => {})
+      console.log(`[scheduleThread/${ctxLabel}] Step1: inline area clicked, waiting for modal`)
+    } else {
+      console.log(`[scheduleThread/${ctxLabel}] Step1: navigating to /compose`)
+      await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+    }
+  }
+
+  // ── Step 2: テキスト入力（動的スキャン） ──────────────────────────────────
+  console.log(`[scheduleThread/${ctxLabel}] Step2: scanning contenteditable elements`)
+
+  const ceElements = await page.evaluate(`
+    (() => {
+      return Array.from(document.querySelectorAll('[contenteditable]')).map((el, i) => ({
+        index: i,
+        tag: el.tagName,
+        contenteditable: el.getAttribute('contenteditable'),
+        role: el.getAttribute('role'),
+        ariaLabel: el.getAttribute('aria-label'),
+        ariaPlaceholder: el.getAttribute('aria-placeholder'),
+        dataLexical: el.getAttribute('data-lexical-editor'),
+        inDialog: !!el.closest('[role="dialog"]'),
+        visible: el.offsetParent !== null || el.getBoundingClientRect().width > 0,
+        text: (el.textContent || '').trim().slice(0, 30),
+      }))
+    })()
+  `) as Array<{
+    index: number; tag: string; contenteditable: string | null; role: string | null
+    ariaLabel: string | null; ariaPlaceholder: string | null; dataLexical: string | null
+    inDialog: boolean; visible: boolean; text: string
+  }>
+
+  console.log(`[scheduleThread/${ctxLabel}] Step2: contenteditable elements found:`, JSON.stringify(ceElements, null, 2))
+
+  const best =
+    ceElements.find(e => e.inDialog && e.dataLexical === 'true' && e.contenteditable === 'true') ??
+    ceElements.find(e => e.inDialog && e.contenteditable === 'true') ??
+    ceElements.find(e => e.visible && e.dataLexical === 'true' && e.contenteditable === 'true') ??
+    ceElements.find(e => e.visible && e.contenteditable === 'true')
+
+  if (!best) {
+    console.warn(`[scheduleThread/${ctxLabel}] Step2: dynamic scan found nothing, falling back to waitForAny`)
+    const textArea = await waitForAny(page, TEXT_AREA, 8_000)
+    await jsClick(textArea)
+    await page.waitForTimeout(100)
+    await page.keyboard.type(content, { delay: 20 })
+  } else {
+    console.log(`[scheduleThread/${ctxLabel}] Step2: using element index=${best.index} inDialog=${best.inDialog} lexical=${best.dataLexical}`)
+    const textArea = await page.evaluateHandle(
+      `document.querySelectorAll('[contenteditable]')[${best.index}]`
+    )
+    await (textArea as import('playwright').ElementHandle).click().catch(() => {})
+    await page.waitForTimeout(100)
+    await page.keyboard.type(content, { delay: 20 })
+  }
+  console.log(`[scheduleThread/${ctxLabel}] Step2: content typed`)
+
+  // ── Step 3: 画像添付 ────────────────────────────────────────────────────────
+  if (resolvedMedia.length > 0) {
+    console.log(`[scheduleThread/${ctxLabel}] Step3: attaching ${resolvedMedia.length} image(s)`)
+    for (const mediaPath of resolvedMedia) {
+      const fileInput = await page.$('input[type="file"]').catch(() => null)
+      if (fileInput) {
+        await fileInput.setInputFiles(mediaPath)
+        await page.waitForTimeout(500)
+      } else {
+        console.warn(`[scheduleThread/${ctxLabel}] Step3: file input not found, skipping image`)
+      }
+    }
+  }
+
+  // ── Step 4: 「もっと見る / More」をクリック → メニュー表示 ─────────────────
+  console.log(`[scheduleThread/${ctxLabel}] Step4: clicking More/もっと見る`)
+  const moreBtnClicked = await page.evaluate(`
+    (() => {
+      const dialog = document.querySelector('[role="dialog"]')
+      if (!dialog) return false
+      const svg = Array.from(dialog.querySelectorAll('svg[aria-label="もっと見る"], svg[aria-label="More"]'))[0]
+      if (!svg) return false
+      const btn = svg.closest('[role="button"]') || svg.parentElement
+      if (btn) { btn.click(); return true }
+      return false
+    })()
+  `)
+  if (!moreBtnClicked) {
+    return { success: false, error: '「もっと見る / More」ボタンが見つかりませんでした' }
+  }
+  await page.waitForSelector('[role="menuitem"]', { timeout: 3_000 }).catch(() => {})
+  console.log(`[scheduleThread/${ctxLabel}] Step4: More/もっと見る clicked`)
+
+  // ── Step 5: 「日時を指定 / Schedule」メニューアイテムをクリック ───────────
+  console.log(`[scheduleThread/${ctxLabel}] Step5: clicking 日時を指定/Schedule`)
+  const scheduleMenuItem = await page.waitForSelector(
+    '[role="menuitem"]:has-text("日時を指定"), [role="menuitem"]:has-text("Schedule")',
+    { timeout: 5_000 }
+  ).catch(() => null)
+  if (!scheduleMenuItem) {
+    return { success: false, error: '「日時を指定 / Schedule」メニューが見つかりませんでした' }
+  }
+  await scheduleMenuItem.click()
+  await page.waitForSelector('[role="grid"]', { timeout: 5_000 }).catch(() => {})
+  console.log(`[scheduleThread/${ctxLabel}] Step5: Schedule/日時を指定 clicked`)
+
+  // ── Step 6: カレンダーで日時を設定 ─────────────────────────────────────────
+  console.log(`[scheduleThread/${ctxLabel}] Step6: setting datetime`)
+  await setScheduleDateTime(page, scheduledAt)
+  console.log(`[scheduleThread/${ctxLabel}] Step6: datetime set`)
+
+  // ── Step 7: 「完了 / Done」ボタンをクリック ─────────────────────────────────
+  // カレンダーの完了ボタンは <button> 要素（div[role="button"] ではない）。
+  // [role="menu"] 内に限定してトースト通知の「完了」と混在しないようにする。
+  console.log(`[scheduleThread/${ctxLabel}] Step7: clicking 完了/Done`)
+  const doneBtn = await page.waitForSelector(
+    '[role="menu"] div[role="button"]:has-text("完了"), [role="menu"] div[role="button"]:has-text("Done")',
+    { timeout: 5_000 }
+  ).catch(() => null)
+  if (!doneBtn) {
+    return { success: false, error: '「完了 / Done」ボタンが見つかりませんでした（[role="menu"] 内）' }
+  }
+  await doneBtn.click({ force: true })
+  // カレンダーが閉じるまで待つ（最大5秒）
+  await page.waitForSelector('[role="grid"]', { state: 'hidden', timeout: 5_000 }).catch(() => {
+    console.warn(`[scheduleThread/${ctxLabel}] Step7: [role="grid"] still visible after 完了 click`)
+  })
+  await page.waitForTimeout(800)
+  console.log(`[scheduleThread/${ctxLabel}] Step7: 完了/Done clicked`)
+
+  // ── Step 8: 予約確定ボタンをクリック ─────────────────────────────────────
+  // スケジュール設定後のコンポーズモーダルでは「投稿」ボタンが「日時を指定」に変わる。
+  // 「日時を指定」ボタン（右下、通常の「投稿」と同じ位置）をクリックして予約確定する。
+  console.log(`[scheduleThread/${ctxLabel}] Step8: clicking schedule/post btn`)
+
+  const SCHEDULE_BTN = [
+    '[role="dialog"] div[role="button"]:has-text("日時を指定")',
+    '[role="dialog"] div[role="button"]:has-text("Schedule")',
+    '[role="dialog"] div[role="button"]:has-text("スケジュール")',
+    '[role="dialog"] div[role="button"]:has-text("予約投稿")',
+    '[role="dialog"] div[role="button"]:has-text("投稿する")',
+    '[role="dialog"] div[role="button"]:has-text("Post")',
+  ]
+  const postBtn = await page.waitForSelector(
+    SCHEDULE_BTN.join(', '),
+    { timeout: 10_000 }
+  ).catch(() => null)
+  if (!postBtn) {
+    const btnText = await page.evaluate(`
+      (() => Array.from(document.querySelectorAll('[role="button"]'))
+        .map(el => (el.innerText || '').trim()).filter(Boolean).join(' / ')
+      )()
+    `).catch(() => 'eval error')
+    console.error(`[scheduleThread/${ctxLabel}] Step8: schedule btn not found. All buttons: ${btnText}`)
+    return { success: false, error: `予約確定ボタンが見つかりませんでした。ボタン一覧: ${btnText}` }
+  }
+  const foundText = await postBtn.evaluate((el) => (el as any).innerText?.trim() ?? '').catch(() => '')
+  console.log(`[scheduleThread/${ctxLabel}] Step8: found btn text="${foundText}"`)
+  await page.waitForTimeout(500)
+  await postBtn.click({ force: true })
+  await page.waitForTimeout(3000)
+
+  console.log(`[scheduleThread/${ctxLabel}] SUCCESS`)
+  return { success: true }
+}
+
+/**
  * Threads の「予約投稿」機能を使って投稿を予約する。
  * scheduledAt は JST の Date オブジェクトで渡す。
+ * プロキシ接続失敗時はプロキシなし直接接続でリトライする。
  */
 export async function scheduleThread(
   accountId: number,
@@ -441,11 +712,6 @@ export async function scheduleThread(
     `proxy=${acct?.proxy_url ?? 'none'}`
   )
 
-  // 全体タイムアウト: 120秒
-  const timeoutPromise = new Promise<PostResult>((_, reject) =>
-    setTimeout(() => reject(new Error('タイムアウト: 予約処理が120秒を超えました。ネットワーク接続またはPlaywrightの状態を確認してください。')), 120_000)
-  )
-
   // 画像パスを事前解決（URL はダウンロード）
   const tmpPaths: string[] = []
   const resolvedMedia: string[] = []
@@ -455,154 +721,46 @@ export async function scheduleThread(
   }
   console.log(`[scheduleThread] resolvedMedia=${resolvedMedia.length} (requested=${mediaPaths.length})`)
 
-  const task = withContext(accountId, async (ctx) => {
-    const page = await ctx.newPage()
-    try {
-      console.log(`[scheduleThread] page.goto ${THREADS_URL}`)
-      await page.goto(THREADS_URL, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+  const cleanup = () => { for (const tmp of tmpPaths) fs.unlink(tmp, () => {}) }
 
-      const currentUrl = page.url()
-      console.log(`[scheduleThread] loaded url=${currentUrl}`)
-
-      if (!isLoggedInUrl(currentUrl)) {
-        return { success: false, error: 'ログインが必要です' }
-      }
-
-      // ── Step 1: コンポーザーを開く ──────────────────────────────────────────
-      console.log('[scheduleThread] Step1: opening composer')
-      const composeNavBtn = await page.waitForSelector(
-        COMPOSE_BTN.join(', '),
-        { timeout: 5_000 }
-      ).catch(() => null)
-
-      if (composeNavBtn) {
-        await composeNavBtn.click()
-        await page.waitForTimeout(1000)
-        console.log('[scheduleThread] Step1: compose btn clicked')
-      } else {
-        // Lexical editor のインラインエリアをクリック → モーダルが開く
-        const inlineArea = await page.waitForSelector(
-          INLINE_COMPOSE.join(', '),
-          { timeout: 12_000 }
-        ).catch(() => null)
-
-        if (inlineArea) {
-          const label = await inlineArea.getAttribute('aria-label').catch(() => '')
-          console.log(`[scheduleThread] Step1: inline area found (aria-label="${label}"), clicking`)
-          await inlineArea.click()
-          // モーダルアニメーション完了を待機
-          await page.waitForTimeout(1200)
-          console.log('[scheduleThread] Step1: inline area clicked, waiting for modal')
-        } else {
-          console.log('[scheduleThread] Step1: navigating to /compose')
-          await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
-          await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
-          await page.waitForTimeout(1000)
-        }
-      }
-
-      // ── Step 2: テキスト入力（高速モード） ───────────────────────────────────
-      console.log('[scheduleThread] Step2: typing content')
-      const textArea = await waitForAny(page, TEXT_AREA, 15_000)
-      await textArea.click()
-      await page.waitForTimeout(300)
-      // ユーザー起動の操作なので humanType ではなく高速入力を使用
-      await page.keyboard.type(content, { delay: 20 })
-      console.log('[scheduleThread] Step2: content typed')
-
-      // ── Step 3: 画像添付 ────────────────────────────────────────────────────
-      if (resolvedMedia.length > 0) {
-        console.log(`[scheduleThread] Step3: attaching ${resolvedMedia.length} image(s)`)
-        for (const mediaPath of resolvedMedia) {
-          const fileInput = await page.$('input[type="file"]').catch(() => null)
-          if (fileInput) {
-            await fileInput.setInputFiles(mediaPath)
-            await page.waitForTimeout(1500)
-            console.log(`[scheduleThread] Step3: attached ${mediaPath}`)
-          } else {
-            console.warn('[scheduleThread] Step3: file input not found, skipping image')
-          }
-        }
-      }
-
-      await page.waitForTimeout(400)
-
-      // ── Step 4: dialog内の「もっと見る」をクリック → メニュー表示 ─────────
-      console.log('[scheduleThread] Step4: clicking もっと見る in dialog')
-      const moreBtnClicked = await page.evaluate(`
-        (() => {
-          const dialog = document.querySelector('[role="dialog"]')
-          if (!dialog) return false
-          const svg = Array.from(dialog.querySelectorAll('svg[aria-label="もっと見る"]'))[0]
-          if (!svg) return false
-          const btn = svg.closest('[role="button"]') || svg.parentElement
-          if (btn) { btn.click(); return true }
-          return false
-        })()
-      `)
-      if (!moreBtnClicked) {
-        return { success: false, error: '「もっと見る」ボタンが見つかりませんでした' }
-      }
-      await page.waitForTimeout(1000)
-      console.log('[scheduleThread] Step4: もっと見る clicked')
-
-      // ── Step 5: 「日時を指定」メニューアイテムをクリック ─────────────────
-      console.log('[scheduleThread] Step5: clicking 日時を指定')
-      const scheduleMenuItem = await page.waitForSelector(
-        '[role="menuitem"]:has-text("日時を指定")',
-        { timeout: 5_000 }
-      ).catch(() => null)
-      if (!scheduleMenuItem) {
-        return { success: false, error: '「日時を指定」メニューが見つかりませんでした' }
-      }
-      await scheduleMenuItem.click()
-      await page.waitForTimeout(2000)
-      console.log('[scheduleThread] Step5: 日時を指定 clicked')
-
-      // ── Step 6: カレンダーで日時を設定 ───────────────────────────────────
-      console.log('[scheduleThread] Step6: setting datetime')
-      await setScheduleDateTime(page, scheduledAt)
-      console.log('[scheduleThread] Step6: datetime set')
-
-      // ── Step 7: 「完了」ボタンをクリック ─────────────────────────────────
-      console.log('[scheduleThread] Step7: clicking 完了')
-      const doneBtn = await page.waitForSelector(
-        'div[role="button"]:has-text("完了")',
-        { timeout: 5_000 }
-      ).catch(() => null)
-      if (!doneBtn) {
-        return { success: false, error: '「完了」ボタンが見つかりませんでした' }
-      }
-      await doneBtn.click()
-      await page.waitForTimeout(1500)
-      console.log('[scheduleThread] Step7: 完了 clicked')
-
-      // ── Step 8: 投稿ボタンをクリック ────────────────────────────────────
-      console.log('[scheduleThread] Step8: clicking 投稿')
-      const postBtn = await page.waitForSelector(
-        POST_BTN.join(', '),
-        { timeout: 10_000 }
-      ).catch(() => null)
-      if (!postBtn) {
-        return { success: false, error: '投稿ボタンが見つかりませんでした' }
-      }
-      await postBtn.click()
-      await page.waitForTimeout(3000)
-
-      console.log('[scheduleThread] SUCCESS')
-      return { success: true }
-    } finally {
-      await page.close().catch(() => {})
-    }
-  })
+  // 全体タイムアウト: 120秒
+  const makeTimeout = () => new Promise<PostResult>((_, reject) =>
+    setTimeout(() => reject(new Error('タイムアウト: 予約処理が120秒を超えました')), 120_000)
+  )
 
   try {
-    return await Promise.race([task, timeoutPromise])
-  } finally {
-    // ダウンロードした一時ファイルを削除
-    for (const tmp of tmpPaths) {
-      fs.unlink(tmp, () => {})
+    // ── 1st try: プロキシあり（通常）─────────────────────────────────────────
+    const task = withContext(accountId, async (ctx) => {
+      const page = await ctx.newPage()
+      try {
+        return await scheduleThreadCore(page, content, scheduledAt, resolvedMedia, 'proxy')
+      } finally {
+        await page.close().catch(() => {})
+      }
+    })
+
+    try {
+      return await Promise.race([task, makeTimeout()])
+    } catch (err) {
+      if (!isProxyError(err)) throw err
+
+      // ── 2nd try: プロキシなし直接接続（フォールバック）──────────────────────
+      console.warn(`[scheduleThread] proxy error detected, retrying without proxy: ${err instanceof Error ? err.message : err}`)
+      await closeContext(accountId)
+
+      const directTask = withContextDirect(accountId, async (ctx) => {
+        const page = await ctx.newPage()
+        try {
+          return await scheduleThreadCore(page, content, scheduledAt, resolvedMedia, 'direct')
+        } finally {
+          await page.close().catch(() => {})
+        }
+      })
+
+      return await Promise.race([directTask, makeTimeout()])
     }
+  } finally {
+    cleanup()
   }
 }
 
@@ -624,9 +782,11 @@ async function setScheduleDateTime(page: Page, dt: Date): Promise<void> {
   const targetMin   = dt.getMinutes()
 
   // カレンダーグリッドが表示されるまで待機
-  await page.waitForSelector('[role="grid"][aria-label="日付を選択"]', { timeout: 10_000 })
+  // 実際の aria-label="日付を選択"（日本語UI確認済み）、aria-label なしの場合も含む
+  await page.waitForSelector('[role="grid"]', { timeout: 8_000 })
 
-  // 現在表示中の月を読み取る（"2026年3月" 形式）
+  // 現在表示中の月を読み取る
+  // 日本語: "2026年3月" / 英語: "March 2026"
   const getDisplayedYearMonth = async (): Promise<{ year: number; month: number }> => {
     const text = await page.evaluate(`
       (() => {
@@ -634,8 +794,16 @@ async function setScheduleDateTime(page: Page, dt: Date): Promise<void> {
         return el ? el.textContent : ''
       })()
     `).catch(() => '') as string
-    const m = text.match(/(\d+)年(\d+)月/)
-    if (m) return { year: parseInt(m[1]), month: parseInt(m[2]) }
+    // 日本語形式: "2026年3月"
+    const jaMatch = text.match(/(\d+)年(\d+)月/)
+    if (jaMatch) return { year: parseInt(jaMatch[1]), month: parseInt(jaMatch[2]) }
+    // 英語形式: "March 2026" / "March, 2026"
+    const enMonths = ['January','February','March','April','May','June','July','August','September','October','November','December']
+    const enMatch = text.match(/([A-Za-z]+)[,\s]+(\d{4})/)
+    if (enMatch) {
+      const monthIdx = enMonths.findIndex(m => m.toLowerCase() === enMatch[1].toLowerCase())
+      if (monthIdx >= 0) return { year: parseInt(enMatch[2]), month: monthIdx + 1 }
+    }
     return { year: 0, month: 0 }
   }
 
@@ -646,23 +814,39 @@ async function setScheduleDateTime(page: Page, dt: Date): Promise<void> {
 
     const isBefore = year < targetYear || (year === targetYear && month < targetMonth)
     if (isBefore) {
-      const nextBtn = await page.$('button[aria-label="翌月"]').catch(() => null)
+      // 日本語: "翌月" / 英語: "Next month" / "Next Month"
+      const nextBtn = await page.$('button[aria-label="翌月"], button[aria-label="Next month"], button[aria-label="Next Month"]').catch(() => null)
       if (nextBtn) await nextBtn.click()
     } else {
-      const prevBtn = await page.$('button[aria-label="前月"]').catch(() => null)
+      // 日本語: "前月" / 英語: "Previous month" / "Previous Month"
+      const prevBtn = await page.$('button[aria-label="前月"], button[aria-label="Previous month"], button[aria-label="Previous Month"]').catch(() => null)
       if (prevBtn) await prevBtn.click()
     }
-    await page.waitForTimeout(400)
+    await page.waitForTimeout(200)
   }
 
   // 目的の日付セルをクリック
+  // gridcell の textContent は "Friday, March 27, 2026, selected27" のような形式なので
+  // disabled でないセルの中から目的の日付を探してクリック
+  // gridcell の textContent 形式:
+  //   英語: "Friday, March 27, 2026, selected27" / "Saturday, March 28, 2026"
+  //   日本語: "2026年3月27日金曜日、選択済み27" / "2026年3月28日土曜日28"
   const dayClicked = await page.evaluate(`
     (() => {
-      const cells = Array.from(document.querySelectorAll('[role="gridcell"]'))
-      const target = '${targetDay}'
+      const target = String(${targetDay})
+      // 正規表現: target が非数字の後に来る末尾一致（1桁日 vs 11,21日 の誤マッチを防ぐ）
+      const endRe = new RegExp('(\\\\D|^)' + target + '$')
+      const cells = Array.from(document.querySelectorAll('[role="gridcell"]:not([aria-disabled="true"])'))
       for (const cell of cells) {
+        // まず葉要素でテキストが target のみのものを探す（最も確実）
+        const spans = Array.from(cell.querySelectorAll('*'))
+        const numEl = spans.find(el => (el.textContent || '').trim() === target && !el.children.length)
+        if (numEl) { cell.click(); return true }
+        // フォールバック: textContent が正規表現で target で終わる
         const text = (cell.textContent || '').trim()
-        if (text === target) { cell.click(); return true }
+        if (text === target || endRe.test(text)) {
+          cell.click(); return true
+        }
       }
       return false
     })()
@@ -670,26 +854,39 @@ async function setScheduleDateTime(page: Page, dt: Date): Promise<void> {
   if (!dayClicked) {
     console.warn(`[setScheduleDateTime] day ${targetDay} not found in calendar`)
   }
-  await page.waitForTimeout(500)
+  await page.waitForTimeout(200)
 
   // 時刻入力
+  // fill() は Playwright が React に正しく onChange を発火させる最も確実な方法。
+  // type() は keydown/keyup を発火するが controlled input の state が更新されない場合がある。
+  // Tab で次フィールドに移動することで blur/change イベントを確実に発火させる。
+  const hhVal = String(targetHour).padStart(2, '0')
+  const mmVal = String(targetMin).padStart(2, '0')
+
   const hhInput = await page.$('input[placeholder="hh"]').catch(() => null)
   if (hhInput) {
-    await hhInput.click({ clickCount: 3 })
-    await hhInput.type(String(targetHour).padStart(2, '0'))
-    await page.waitForTimeout(200)
+    await hhInput.click({ force: true })
+    await hhInput.fill(hhVal)
+    await page.keyboard.press('Tab')
+    await page.waitForTimeout(100)
   } else {
     console.warn('[setScheduleDateTime] hh input not found')
   }
 
   const mmInput = await page.$('input[placeholder="mm"]').catch(() => null)
   if (mmInput) {
-    await mmInput.click({ clickCount: 3 })
-    await mmInput.type(String(targetMin).padStart(2, '0'))
-    await page.waitForTimeout(200)
+    await mmInput.click({ force: true })
+    await mmInput.fill(mmVal)
+    await page.keyboard.press('Tab')
+    await page.waitForTimeout(100)
   } else {
     console.warn('[setScheduleDateTime] mm input not found')
   }
+
+  // 入力値確認ログ
+  const hhActual = await page.$eval('input[placeholder="hh"]', (el: Element) => (el as any).value).catch(() => '?')
+  const mmActual = await page.$eval('input[placeholder="mm"]', (el: Element) => (el as any).value).catch(() => '?')
+  console.log(`[setScheduleDateTime] time input values: hh="${hhActual}" mm="${mmActual}" (expected ${hhVal}:${mmVal})`)
 }
 
 // ─── Like ─────────────────────────────────────────────────────────────────────

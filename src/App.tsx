@@ -203,7 +203,7 @@ export default function App() {
           onClearCookies={() => clearCookies(editTarget.id)}
           onResetSession={() => resetSession(editTarget.id)}
           onDelete={() => handleDeleteAccount(editTarget.id)}
-          onOpenBrowser={() => { setActiveAccountId(editTarget.id); setEditTarget(null) }}
+          onOpenBrowser={() => { setActiveAccountId(editTarget.id); setActiveTool(null); setEditTarget(null) }}
           onClose={() => setEditTarget(null)}
           onUseStock={(content, images) => {
             const accountId = editTarget.id

@@ -156,6 +156,17 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
 
   useEffect(() => {
     api.proxyPresets.list().then(setPresets).catch(() => {})
+    // プロキシテンプレートを初期値として読み込む
+    api.settings.getAll().then((s) => {
+      const tmplType = s.proxy_template_type as ProxyType | 'none' | undefined
+      if (tmplType && tmplType !== 'none') {
+        setProxyType(tmplType)
+        setHost(s.proxy_template_host ?? '')
+        setPort(s.proxy_template_port ?? '')
+        setUsername(s.proxy_template_username ?? '')
+        setPassword(s.proxy_template_password ?? '')
+      }
+    }).catch(() => {})
   }, [])
 
   const buildProxy = (): ProxyOptions | null => {

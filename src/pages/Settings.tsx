@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { api, ProxyPreset } from '../lib/ipc'
+import { api, ProxyPreset, MasterKeyRow } from '../lib/ipc'
 import { LicenseAdmin } from './LicenseAdmin'
 
 // 管理者パスワード（ハードコード）
@@ -522,6 +522,11 @@ export function Settings() {
         <ImageGroupsSection />
       </div>
 
+      {/* Proxy Template section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <ProxyTemplateSection />
+      </div>
+
       {/* Proxy Presets section */}
       <div className="pt-2 border-t border-zinc-800">
         <ProxyPresetsSection />
@@ -532,11 +537,161 @@ export function Settings() {
         <BotSection />
       </div>
 
+      {/* Master Key Admin section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <MasterKeyAdminSection />
+      </div>
+
       {/* License Admin section */}
       <div className="pt-2 border-t border-zinc-800">
         <LicenseAdminSection />
       </div>
 
+    </div>
+  )
+}
+
+// ── Proxy Template section ───────────────────────────────────────────────────
+
+type ProxyTypeAll = 'none' | 'http' | 'https' | 'socks5'
+
+function ProxyTemplateSection() {
+  const [type,     setType]     = useState<ProxyTypeAll>('none')
+  const [host,     setHost]     = useState('')
+  const [port,     setPort]     = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPw,   setShowPw]   = useState(false)
+  const [saving,   setSaving]   = useState(false)
+  const [savedMsg, setSavedMsg] = useState(false)
+
+  useEffect(() => {
+    api.settings.getAll().then((s) => {
+      setType((s.proxy_template_type as ProxyTypeAll) || 'none')
+      setHost(s.proxy_template_host ?? '')
+      setPort(s.proxy_template_port ?? '')
+      setUsername(s.proxy_template_username ?? '')
+      setPassword(s.proxy_template_password ?? '')
+    })
+  }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    await api.settings.setMany({
+      proxy_template_type:     type,
+      proxy_template_host:     host.trim(),
+      proxy_template_port:     port.trim(),
+      proxy_template_username: username.trim(),
+      proxy_template_password: password,
+    })
+    setSaving(false)
+    setSavedMsg(true)
+    setTimeout(() => setSavedMsg(false), 2000)
+  }
+
+  const handleClear = async () => {
+    setType('none'); setHost(''); setPort(''); setUsername(''); setPassword('')
+    await api.settings.setMany({
+      proxy_template_type: 'none', proxy_template_host: '',
+      proxy_template_port: '', proxy_template_username: '', proxy_template_password: '',
+    })
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-orange-600 flex items-center justify-center shrink-0 text-base">
+          🌐
+        </div>
+        <div>
+          <p className="text-white font-semibold text-sm">プロキシテンプレート</p>
+          <p className="text-zinc-500 text-xs">アカウント追加時にプロキシ設定の初期値として使用される</p>
+        </div>
+      </div>
+
+      <div className="space-y-3 bg-zinc-800 rounded-xl p-4 border border-zinc-700">
+        {/* Type selector */}
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-2">種別</label>
+          <div className="grid grid-cols-4 gap-1.5">
+            {(['none', 'http', 'https', 'socks5'] as ProxyTypeAll[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setType(t)}
+                className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                  type === t
+                    ? 'bg-orange-600 text-white'
+                    : 'bg-zinc-700 text-zinc-400 hover:bg-zinc-600 hover:text-white'
+                }`}
+              >
+                {t === 'none' ? 'なし' : t.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {type !== 'none' && (
+          <>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <label className="text-zinc-500 text-xs block mb-1">ホスト</label>
+                <input
+                  type="text" value={host} onChange={(e) => setHost(e.target.value)}
+                  placeholder="proxy.example.com"
+                  className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-orange-500"
+                />
+              </div>
+              <div className="w-24">
+                <label className="text-zinc-500 text-xs block mb-1">ポート</label>
+                <input
+                  type="number" value={port} onChange={(e) => setPort(e.target.value)}
+                  placeholder="8080"
+                  className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-orange-500"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-zinc-500 text-xs block mb-1">ユーザー名 <span className="text-zinc-600">(任意)</span></label>
+              <input
+                type="text" value={username} onChange={(e) => setUsername(e.target.value)}
+                className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div>
+              <label className="text-zinc-500 text-xs block mb-1">パスワード <span className="text-zinc-600">(任意)</span></label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'} value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500 pr-14"
+                />
+                <button
+                  type="button" onClick={() => setShowPw(!showPw)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-400 hover:text-white"
+                >{showPw ? '隠す' : '表示'}</button>
+              </div>
+            </div>
+            {host && port && (
+              <p className="text-xs text-orange-400 font-mono bg-orange-500/10 border border-orange-500/20 px-3 py-1.5 rounded-lg">
+                {type}://{host}:{port}
+              </p>
+            )}
+          </>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={handleClear}
+            className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-400 text-xs rounded-lg transition-colors"
+          >クリア</button>
+          <button
+            onClick={handleSave}
+            disabled={saving || (type !== 'none' && (!host.trim() || !port.trim()))}
+            className="flex-1 py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+          >{saving ? '保存中...' : 'テンプレートを保存'}</button>
+          {savedMsg && <span className="text-emerald-400 text-xs self-center">✓ 保存しました</span>}
+        </div>
+      </div>
     </div>
   )
 }
@@ -1085,6 +1240,252 @@ function LicenseAdminSection() {
         </form>
       ) : (
         <LicenseAdmin />
+      )}
+    </div>
+  )
+}
+
+// ── Master Key Admin ──────────────────────────────────────────────────────────
+
+function generateMasterKey(): string {
+  const seg = () =>
+    Array.from(crypto.getRandomValues(new Uint8Array(3)))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase()
+  return `MK-${seg()}-${seg()}-${seg()}`
+}
+
+function MasterKeyAdmin() {
+  const [keys,    setKeys]    = useState<MasterKeyRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState<string | null>(null)
+
+  const [newKey,     setNewKey]     = useState('')
+  const [newExpires, setNewExpires] = useState('')
+  const [newMemo,    setNewMemo]    = useState('')
+  const [adding,     setAdding]     = useState(false)
+  const [addError,   setAddError]   = useState<string | null>(null)
+
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+
+  const fmtDate = (dt: string | null) => {
+    if (!dt) return '無期限'
+    try {
+      return new Date(dt).toLocaleString('ja-JP', {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      })
+    } catch { return dt }
+  }
+  const isExpired = (dt: string | null) => !!dt && new Date(dt) <= new Date()
+
+  const load = async () => {
+    setLoading(true); setError(null)
+    const r = await api.masterKey.list()
+    if (!r.success) { setError(r.error ?? '取得に失敗しました') }
+    else { setKeys(r.data ?? []) }
+    setLoading(false)
+  }
+  useEffect(() => { load() }, [])
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newKey.trim()) return
+    setAdding(true); setAddError(null)
+    const r = await api.masterKey.create({
+      key: newKey.trim(), is_active: true,
+      expires_at: newExpires ? new Date(newExpires).toISOString() : null,
+      memo: newMemo.trim() || null,
+    })
+    if (!r.success) { setAddError(r.error ?? '追加に失敗しました') }
+    else { setNewKey(''); setNewExpires(''); setNewMemo(''); await load() }
+    setAdding(false)
+  }
+
+  const handleToggle = async (row: MasterKeyRow) => {
+    const newVal = !row.is_active
+    setKeys((prev) => prev.map((r) => r.key === row.key ? { ...r, is_active: newVal } : r))
+    const r = await api.masterKey.update({ key: row.key, is_active: newVal })
+    if (!r.success) {
+      setKeys((prev) => prev.map((r2) => r2.key === row.key ? { ...r2, is_active: row.is_active } : r2))
+      alert(r.error)
+    }
+  }
+
+  const handleDelete = async (key: string) => {
+    const r = await api.masterKey.delete(key)
+    if (!r.success) { alert(r.error); return }
+    setKeys((prev) => prev.filter((r2) => r2.key !== key))
+    setDeleteConfirm(null)
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 新規追加 */}
+      <form onSubmit={handleAdd} className="p-4 bg-zinc-800/60 border border-zinc-700/50 rounded-xl space-y-2">
+        <p className="text-zinc-300 text-xs font-semibold mb-1">新規キー追加</p>
+        <div className="flex gap-2">
+          <input
+            type="text" value={newKey}
+            onChange={(e) => setNewKey(e.target.value)}
+            placeholder="MK-XXXXXX-XXXXXX-XXXXXX"
+            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500 font-mono"
+          />
+          <button
+            type="button" onClick={() => setNewKey(generateMasterKey())}
+            className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >自動生成</button>
+        </div>
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label className="text-zinc-500 text-[11px] block mb-1">有効期限（空白=無期限）</label>
+            <input
+              type="datetime-local" value={newExpires}
+              onChange={(e) => setNewExpires(e.target.value)}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="text-zinc-500 text-[11px] block mb-1">メモ</label>
+            <input
+              type="text" value={newMemo}
+              onChange={(e) => setNewMemo(e.target.value)}
+              placeholder="用途など"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+        </div>
+        {addError && <p className="text-red-400 text-xs">{addError}</p>}
+        <button
+          type="submit" disabled={adding || !newKey.trim()}
+          className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+        >{adding ? '追加中...' : 'キーを追加'}</button>
+      </form>
+
+      {/* 一覧 */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-zinc-400 text-xs font-semibold">
+            キー一覧
+            {!loading && <span className="text-zinc-600 ml-1">({keys.length}件)</span>}
+          </p>
+          <button onClick={load} disabled={loading}
+            className="text-zinc-500 hover:text-zinc-300 text-[11px] transition-colors">
+            {loading ? '読込中...' : '↻ 再取得'}
+          </button>
+        </div>
+        {error && (
+          <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs mb-3">{error}</div>
+        )}
+        {!loading && keys.length === 0 && !error && (
+          <p className="text-zinc-600 text-xs text-center py-6">キーがありません</p>
+        )}
+        <div className="space-y-1.5">
+          {keys.map((row) => {
+            const expired = isExpired(row.expires_at)
+            return (
+              <div key={row.key} className={[
+                'flex items-center gap-3 p-3 rounded-xl border transition-colors',
+                row.is_active && !expired ? 'bg-zinc-800 border-zinc-700' : 'bg-zinc-900 border-zinc-800 opacity-60',
+              ].join(' ')}>
+                <span className={['w-2 h-2 rounded-full shrink-0',
+                  row.is_active && !expired ? 'bg-indigo-400' : expired ? 'bg-amber-500' : 'bg-zinc-600',
+                ].join(' ')} />
+                <div className="flex-1 min-w-0">
+                  <code className="text-[11px] font-mono text-zinc-300 block truncate">{row.key}</code>
+                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                    <span className={`text-[10px] ${expired ? 'text-amber-400' : 'text-zinc-500'}`}>
+                      {expired ? '⚠ 期限切れ: ' : '期限: '}{fmtDate(row.expires_at)}
+                    </span>
+                    {row.memo && <span className="text-zinc-500 text-[10px]">— {row.memo}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className={`text-[10px] font-semibold w-6 text-right ${row.is_active ? 'text-indigo-400' : 'text-zinc-600'}`}>
+                    {row.is_active ? 'ON' : 'OFF'}
+                  </span>
+                  <button
+                    type="button" onClick={() => handleToggle(row)}
+                    className={['relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent transition-colors cursor-pointer',
+                      row.is_active ? 'bg-indigo-600' : 'bg-zinc-600',
+                    ].join(' ')}
+                  >
+                    <span className={['pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-md transition-transform',
+                      row.is_active ? 'translate-x-4' : 'translate-x-0',
+                    ].join(' ')} />
+                  </button>
+                </div>
+                {deleteConfirm === row.key ? (
+                  <div className="flex gap-1 shrink-0">
+                    <button onClick={() => handleDelete(row.key)}
+                      className="px-2 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs rounded-lg transition-colors">確認</button>
+                    <button onClick={() => setDeleteConfirm(null)}
+                      className="px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors">✕</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setDeleteConfirm(row.key)}
+                    className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-red-400 text-xs rounded transition-colors shrink-0">✕</button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MasterKeyAdminSection() {
+  const [unlocked, setUnlocked] = useState(false)
+  const [pw,       setPw]       = useState('')
+  const [pwError,  setPwError]  = useState(false)
+
+  const handleUnlock = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (pw === ADMIN_PASSWORD) { setUnlocked(true); setPwError(false) }
+    else { setPwError(true); setPw('') }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center shrink-0 text-base">
+          🗝️
+        </div>
+        <div>
+          <p className="text-white font-semibold text-sm">マスターキー管理</p>
+          <p className="text-zinc-500 text-xs">予約投稿タブのアクセスキーを管理（管理者専用）</p>
+        </div>
+        {unlocked && (
+          <button onClick={() => setUnlocked(false)}
+            className="ml-auto text-zinc-500 hover:text-zinc-300 text-xs transition-colors">
+            🔒 ロック
+          </button>
+        )}
+      </div>
+
+      {!unlocked ? (
+        <form onSubmit={handleUnlock} className="space-y-2">
+          <div className="flex gap-2">
+            <input
+              type="password" value={pw}
+              onChange={(e) => { setPw(e.target.value); setPwError(false) }}
+              placeholder="管理者パスワード"
+              autoComplete="off"
+              className={['flex-1 bg-zinc-800 border rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-indigo-500 transition-colors',
+                pwError ? 'border-red-500' : 'border-zinc-700',
+              ].join(' ')}
+            />
+            <button type="submit"
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-colors">
+              解除
+            </button>
+          </div>
+          {pwError && <p className="text-red-400 text-xs">パスワードが違います</p>}
+        </form>
+      ) : (
+        <MasterKeyAdmin />
       )}
     </div>
   )

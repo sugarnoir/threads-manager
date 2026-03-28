@@ -20,6 +20,7 @@ import { registerTemplateHandlers } from './ipc/templates'
 import { registerLicenseAdminHandlers } from './ipc/license-admin'
 import { registerAutopostHandlers } from './ipc/autopost'
 import { registerProxyPresetHandlers } from './ipc/proxy-presets'
+import { registerMasterKeyHandlers } from './ipc/master-key'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 
@@ -63,6 +64,7 @@ app.whenReady().then(() => {
   registerLicenseAdminHandlers()
   registerAutopostHandlers()
   registerProxyPresetHandlers()
+  registerMasterKeyHandlers()
   registerGroupHandlers()
   registerResearchHandlers()
   registerStockHandlers()

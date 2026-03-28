@@ -166,9 +166,9 @@ export function registerAccountHandlers(): void {
           console.log(`[accounts:update-proxy] Electron session proxy cleared (direct://)`)
         }
 
-        // 3. 開いている WebContentsView をリロードして新プロキシを適用
+        // 3. WebContentsView を再初期化（プロキシ認証リスナーを新設定で再作成）
         try {
-          getViewManager().reload(data.id)
+          getViewManager().reinitView(data.id)
         } catch { /* ビューが開いていない場合は無視 */ }
       } catch { /* セッションが存在しない場合は無視 */ }
 

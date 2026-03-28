@@ -46,6 +46,26 @@ interface LicenseRow {
   expires_at: string | null
 }
 
+export async function checkMasterKeyOnline(key: string): Promise<LicenseCheckResult> {
+  try {
+    const { data, error } = await supabase
+      .from('master_keys')
+      .select('key, is_active, expires_at')
+      .eq('key', key)
+      .maybeSingle()
+    if (error) return { valid: false, reason: 'network_error' }
+    if (!data)  return { valid: false, reason: 'not_found' }
+    const row = data as LicenseRow
+    if (!row.is_active) return { valid: false, reason: 'inactive' }
+    if (row.expires_at && new Date(row.expires_at) <= new Date()) {
+      return { valid: false, reason: 'expired' }
+    }
+    return { valid: true }
+  } catch {
+    return { valid: false, reason: 'network_error' }
+  }
+}
+
 export async function checkLicenseOnline(key: string): Promise<LicenseCheckResult> {
   try {
     console.log('[License] checking key:', key)

@@ -190,6 +190,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     logout: () => ipcRenderer.invoke('auth:logout'),
   },
 
+  // Master Key (予約投稿タブ認証)
+  masterKey: {
+    check:  () => ipcRenderer.invoke('master-key:check'),
+    verify: (key: string) => ipcRenderer.invoke('master-key:verify', key),
+    list:   () => ipcRenderer.invoke('master-key:list'),
+    create: (row: { key: string; is_active: boolean; expires_at: string | null; memo: string | null }) =>
+      ipcRenderer.invoke('master-key:create', row),
+    update: (data: { key: string; is_active?: boolean; expires_at?: string | null; memo?: string | null }) =>
+      ipcRenderer.invoke('master-key:update', data),
+    delete: (key: string) => ipcRenderer.invoke('master-key:delete', key),
+  },
+
   // Autopost
   autopost: {
     get:       (accountId: number) => ipcRenderer.invoke('autopost:get', accountId),

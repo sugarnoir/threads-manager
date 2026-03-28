@@ -216,6 +216,42 @@ export async function closeAllContexts(): Promise<void> {
 }
 
 /**
+ * プロキシなし一時コンテキストでタスクを実行する（プロキシ接続失敗時のフォールバック用）。
+ * プールに追加しない。タスク完了後にコンテキストを自動クローズする。
+ */
+export async function withContextDirect<T>(
+  accountId: number,
+  task: (ctx: BrowserContext) => Promise<T>
+): Promise<T> {
+  const account = getAccountById(accountId)
+  if (!account) throw new Error(`Account ${accountId} not found`)
+
+  fs.mkdirSync(account.session_dir, { recursive: true })
+  const fp = loadOrCreateFingerprint(accountId)
+
+  console.log(`[withContextDirect] account=${accountId} launching WITHOUT proxy (direct fallback)`)
+
+  const ctx = await chromium.launchPersistentContext(account.session_dir, {
+    args: BASE_LAUNCH_OPTIONS.args,
+    headless: true,
+    userAgent: fp.userAgent,
+    locale: fp.language,
+    timezoneId: fp.timezone,
+    viewport: { width: fp.screenWidth, height: fp.screenHeight },
+    // proxy なし
+  })
+
+  await ctx.addInitScript(buildOverrideScript(fp))
+  await syncElectronCookiesToContext(ctx, accountId)
+
+  try {
+    return await task(ctx)
+  } finally {
+    await ctx.close().catch(() => {})
+  }
+}
+
+/**
  * ログイン専用ブラウザ（プールに入れない一時的な context）。
  */
 export async function openLoginBrowser(

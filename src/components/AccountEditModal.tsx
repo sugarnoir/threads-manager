@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { User, Shield, FileText, Bookmark, Settings, Fingerprint } from 'lucide-react'
 import { Account, PostStock, FingerprintData, api } from '../lib/ipc'
+import { MasterKeyGate } from './MasterKeyGate'
 
 interface Props {
   account: Account
@@ -113,6 +114,21 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
   const [selectedHours, setSelectedHours]   = useState<number | null>(null)
   const [scheduledDate, setScheduledDate]   = useState<Date | null>(null)  // ±30分ランダム済み
   const [scheduling, setScheduling]         = useState(false)
+
+  // マスターキー認証ゲート
+  const [showMasterKeyGate, setShowMasterKeyGate] = useState(false)
+  const [pendingStock, setPendingStock]            = useState<PostStock | null>(null)
+
+  const openScheduleWithAuth = async (stock: PostStock) => {
+    const r = await api.masterKey.check()
+    if (r.authenticated) {
+      setSelectedHours(null)
+      setScheduleTarget(stock)
+    } else {
+      setPendingStock(stock)
+      setShowMasterKeyGate(true)
+    }
+  }
 
   const showToast = (msg: string, ok: boolean) => {
     setToast({ msg, ok })
@@ -345,10 +361,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
                   </button>
                 )}
                 <button
-                  onClick={() => {
-                    setSelectedHours(null)
-                    setScheduleTarget(s)
-                  }}
+                  onClick={() => openScheduleWithAuth(s)}
                   className="px-2.5 py-1 bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-semibold rounded-lg transition-colors"
                 >
                   予約投稿
@@ -378,6 +391,21 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
           onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2}
           onSave={handleSave} onCancel={cancelEdit}
           saving={saving} error={error}
+        />
+      )}
+
+      {/* マスターキー認証ゲート */}
+      {showMasterKeyGate && (
+        <MasterKeyGate
+          onAuth={() => {
+            setShowMasterKeyGate(false)
+            if (pendingStock) {
+              setSelectedHours(null)
+              setScheduleTarget(pendingStock)
+              setPendingStock(null)
+            }
+          }}
+          onCancel={() => { setShowMasterKeyGate(false); setPendingStock(null) }}
         />
       )}
 
@@ -717,6 +745,20 @@ export function AccountEditModal({
   const [password, setPassword]   = useState(account.proxy_password ?? '')
   const [showPassword, setShowPassword] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
+  const [templateLoaded, setTemplateLoaded] = useState(false)
+
+  const loadProxyTemplate = async () => {
+    const all = await api.settings.getAll()
+    const type = all['proxy_template_type'] as ProxyType | undefined
+    if (!type || type === 'none') return
+    setProxyType(type)
+    setHost(all['proxy_template_host'] ?? '')
+    setPort(all['proxy_template_port'] ?? '')
+    setUsername(all['proxy_template_username'] ?? '')
+    setPassword(all['proxy_template_password'] ?? '')
+    setTemplateLoaded(true)
+    setTimeout(() => setTemplateLoaded(false), 2000)
+  }
 
   // Memo state
   const [memo, setMemo] = useState(account.memo ?? '')
@@ -936,6 +978,16 @@ export function AccountEditModal({
           {/* ── Proxy tab ── */}
           {tab === 'proxy' && (
             <>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-zinc-400 text-xs font-medium">プロキシ設定</span>
+                <button
+                  type="button"
+                  onClick={loadProxyTemplate}
+                  className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-lg text-xs transition-colors"
+                >
+                  {templateLoaded ? '✓ 読み込み完了' : 'テンプレート読み込み'}
+                </button>
+              </div>
               <div>
                 <label className="text-zinc-400 text-xs font-medium block mb-2">種別</label>
                 <div className="grid grid-cols-4 gap-1.5">

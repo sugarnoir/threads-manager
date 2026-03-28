@@ -2,7 +2,7 @@ import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage } 
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
 import { getContextCookiesIfOpen } from '../playwright/browser-manager'
 import { getSetting, setSetting } from '../db/repositories/settings'
-import { getAccountById } from '../db/repositories/accounts'
+import { getAccountById, updateAccountStatus } from '../db/repositories/accounts'
 
 const THREADS_URL = 'https://www.threads.com'
 const LOGIN_URL   = `${THREADS_URL}/login`
@@ -312,15 +312,43 @@ export class ViewManager {
     view.webContents.on('did-navigate', (_event, url) => {
       this.notify()
       const entry = this.views.get(accountId)
+
       if (entry && this.isLoginUrl(url) && !entry.restoringSession) {
+        // ログインページへ遷移: Cookie バックアップから自動復元を試みる
         entry.restoringSession = true
         this.ensureSessionCookies(accountId, sess).then((restored) => {
           if (entry) entry.restoringSession = false
-          // このビューがまだ存在する場合のみリダイレクト
           if (restored && this.views.has(accountId) && !view.webContents.isDestroyed()) {
             view.webContents.loadURL(THREADS_URL)
           }
         }).catch(() => { if (entry) entry.restoringSession = false })
+
+      } else if (entry && !this.isLoginUrl(url) && (url.includes('threads.com') || url.includes('threads.net'))) {
+        // ログインページ以外の threads.com へ遷移 = ログイン成功
+        // Cookie を確認してセッションが存在すれば DB を active に更新
+        sess.cookies.get({}).then((cookies) => {
+          const hasSession = cookies.some(
+            (c) => c.name === 'sessionid' && c.value.length > 0 &&
+              (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
+          )
+          if (!hasSession) return
+          try { updateAccountStatus(accountId, 'active') } catch { /* DB error */ }
+          // Cookie を DB にバックアップ（セッション切れ復元に使用）
+          const rawCookies = cookies
+            .filter((c) => c.value && c.domain)
+            .map((c) => ({
+              name:           c.name,
+              value:          c.value,
+              domain:         c.domain,
+              path:           c.path,
+              secure:         c.secure,
+              httpOnly:       c.httpOnly,
+              expirationDate: c.expirationDate,
+              sameSite:       c.sameSite,
+            }))
+          this.backupCookiesToDb(accountId, rawCookies)
+          console.log(`[did-navigate] account=${accountId} logged in via WebContentsView → status=active`)
+        }).catch(() => {})
       }
     })
     view.webContents.on('did-navigate-in-page', () => this.notify())
@@ -608,29 +636,30 @@ export class ViewManager {
       existing.view.setBounds(existBounds)
       console.log(`[showView] getBounds after set=`, existing.view.getBounds())
 
-      // ── 白画面対策 ──────────────────────────────────────────────────────────
-      // 1) URL が about:blank (ページ未ロード) の場合: loaded フラグをリセットして
-      //    _bgInitView を再キューイング → Cookie/Proxy セットアップ込みで再ロード
-      // 2) URL は有るが threads.com でない (ロード失敗等) の場合: threads.com をリロード
-      // 3) 正常ロード済みの場合: GPU レンダリング失敗に備えて nudgeRepaint
+      // setBounds 直後に即時 invalidate — offscreen から戻ったときのGPUサーフェス再生成を促す
+      try { existing.view.webContents.invalidate() } catch {}
+
+      // ── URL 状態による分岐 ────────────────────────────────────────────────
+      // 1) URL が about:blank (ページ未ロード): loaded フラグをリセットして _bgInitView を再実行
+      // 2) threads.com 以外のURLで停止 (ロード失敗等): threads.com をリロード
+      // 3) 正常ロード済み or ロード中: nudgeRepaint で GPU 再描画を強制
       const currentUrl = existing.view.webContents.getURL()
       const isBlank     = !currentUrl || currentUrl === 'about:blank'
       const isLoading   = existing.view.webContents.isLoading()
       const isOnThreads = currentUrl?.includes('threads.com') && !currentUrl.includes('/login')
 
       if (isBlank && !isLoading) {
-        // ページ未ロード: _bgInitView を再実行（Cookie/Proxy セットアップ込み）
         console.log(`[showView] account=${accountId} blank page — re-queuing _bgInitView`)
         existing.loaded = false
         this.showQueue = this.showQueue
           .then(() => this._bgInitView(accountId))
           .catch(() => {})
       } else if (!isBlank && !isOnThreads && !isLoading) {
-        // threads.com 以外のURLで停止: 直接 threads.com をリロード
         console.log(`[showView] account=${accountId} not on threads (url="${currentUrl}") — reloading`)
         existing.view.webContents.loadURL(THREADS_URL)
       } else {
-        // 正常ロード済み: GPU コンポジターの再描画を強制
+        // ロード中 or 正常表示中: GPU コンポジターの再描画を強制
+        // ロード中でも nudge することでロード完了後の黒画面を予防する
         this.nudgeRepaint(accountId)
       }
 
@@ -684,12 +713,22 @@ export class ViewManager {
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
     console.log(`[_bgInitView] loadURL account=${accountId} bounds=`, entry.view.getBounds())
     entry.view.webContents.loadURL(THREADS_URL)
-    // macOS vibrancy 環境でロード後に黒くなる問題の対策:
-    // did-finish-load 後に setBounds を ±1px 微調整して GPU コンポジターの再描画を強制する
+
+    // dom-ready: ページ構造が確定した直後に1回目の nudge
+    // (did-finish-load より早く発火するため黒い初期フレームを早期解消)
+    entry.view.webContents.once('dom-ready', () => {
+      console.log(`[_bgInitView] dom-ready account=${accountId}`)
+      this.nudgeRepaint(accountId)
+    })
+
+    // did-finish-load: 全リソース読み込み完了後に2回目の nudge
     entry.view.webContents.once('did-finish-load', () => {
       console.log(`[_bgInitView] did-finish-load account=${accountId}`)
       this.nudgeRepaint(accountId)
+      // 読み込み完了から 600ms 後にもう一度 nudge (遅延レンダリング対策)
+      setTimeout(() => this.nudgeRepaint(accountId), 600)
     })
+
     entry.view.webContents.once('did-fail-load', (_e, errCode, errDesc, failedUrl) => {
       console.log(`[_bgInitView] did-fail-load account=${accountId} errCode=${errCode} errDesc=${errDesc} url=${failedUrl}`)
       // -3 は USER_ABORTED (ページ遷移による中断) なので無視する
@@ -708,12 +747,16 @@ export class ViewManager {
   }
 
   /**
-   * macOS の vibrancy ウィンドウ上で WebContentsView が黒くなる問題の対策。
-   * GPU コンポジターに再描画を強制するため bounds を ±1px 微調整する。
+   * macOS vibrancy ウィンドウ上で WebContentsView が黒くなる問題の根本対策。
    *
-   * target を先にキャプチャし、setTimeout 内では target.width に戻すことで
+   * 3段階で GPU コンポジターを強制的に再描画させる:
+   *   1. webContents.invalidate() でレンダラーに直接再描画を要求
+   *   2. setBackgroundColor トグルで Chromium コンポジターのサーフェスを更新
+   *   3. setBounds ±1px bouncing で GPU コンポジターレイヤーを再合成
+   *
+   * target を先にキャプチャし、setTimeout 内では target の値に戻すことで
    * updateBounds が割り込んでも正しい値に復元できる。
-   * moveOffscreen で画面外にある間は nudge 不要（GPU サーフェスは生きている）。
+   * moveOffscreen で画面外にある間は nudge 不要（x < 0 で早期リターン）。
    */
   private nudgeRepaint(accountId: number): void {
     const e = this.views.get(accountId)
@@ -723,23 +766,50 @@ export class ViewManager {
     // 画面外（moveOffscreen）なら nudge 不要
     if (target.x < 0) return
 
-    // 1回目の nudge: 幅を ±1px して GPU コンポジターの再描画を強制する
+    // ─── Phase 1 (即時): invalidate + 背景色トグル ───────────────────────────
+    // webContents.invalidate() はレンダラープロセスに「全領域を再描画せよ」と伝える。
+    // setBackgroundColor トグルは Chromium の CALayer/コンポジターサーフェスを更新し
+    // macOS vibrancy 特有の黒画面を解消する。
+    try { e.view.webContents.invalidate() } catch {}
+    try {
+      e.view.setBackgroundColor('#fffffe')   // わずかにオフホワイト → GPU サーフェス再生成を誘発
+      setTimeout(() => {
+        const ex = this.views.get(accountId)
+        if (ex && !ex.view.webContents.isDestroyed()) {
+          ex.view.setBackgroundColor('#ffffff')
+        }
+      }, 80)
+    } catch {}
+
+    // ─── Phase 1b (200ms): JS リフロー — 白画面対策 ──────────────────────────
+    // GPU サーフェスは存在するが描画内容がコンポジットされない白画面に対して、
+    // ページ側で reflow を強制することでブラウザのペイント処理を再トリガーする。
+    setTimeout(() => {
+      const ex = this.views.get(accountId)
+      if (!ex || ex.view.webContents.isDestroyed()) return
+      ex.view.webContents.executeJavaScript(
+        'try{document.body.getBoundingClientRect();window.dispatchEvent(new Event("resize"))}catch{}'
+      ).catch(() => {})
+    }, 200)
+
+    // ─── Phase 2 (0ms / 50ms): 幅 ±1px で GPU コンポジターレイヤーを再合成 ──
     e.view.setBounds({ ...target, width: target.width + 1 })
     setTimeout(() => {
       const e2 = this.views.get(accountId)
       if (!e2 || e2.view.webContents.isDestroyed()) return
       const cur = e2.view.getBounds()
-      // bounce 中に moveOffscreen が呼ばれた場合は復元しない
       if (cur.x < 0) return
       e2.view.setBounds({ ...cur, width: target.width })
+      try { e2.view.webContents.invalidate() } catch {}
     }, 50)
 
-    // 2回目の nudge: 遅延後に高さも変化させて頑固な GPU 白画面を解消する
+    // ─── Phase 3 (400ms / 450ms): 高さ ±1px で頑固な黒画面を解消 ────────────
     setTimeout(() => {
       const e3 = this.views.get(accountId)
       if (!e3 || e3.view.webContents.isDestroyed()) return
       const b = e3.view.getBounds()
       if (b.x < 0 || b.width <= 0 || b.height <= 0) return
+      try { e3.view.webContents.invalidate() } catch {}
       e3.view.setBounds({ ...b, height: b.height + 1 })
       setTimeout(() => {
         const e4 = this.views.get(accountId)
@@ -747,8 +817,27 @@ export class ViewManager {
         const b4 = e4.view.getBounds()
         if (b4.x < 0) return
         e4.view.setBounds({ ...b4, height: target.height })
+        try { e4.view.webContents.invalidate() } catch {}
       }, 50)
     }, 400)
+
+    // ─── Phase 4 (1200ms): 最終フォールバック invalidate ────────────────────
+    // 上記3フェーズで解消しなかった場合のバックストップ
+    setTimeout(() => {
+      const e5 = this.views.get(accountId)
+      if (!e5 || e5.view.webContents.isDestroyed()) return
+      const b5 = e5.view.getBounds()
+      if (b5.x < 0 || b5.width <= 0) return
+      try { e5.view.webContents.invalidate() } catch {}
+      e5.view.setBounds({ ...b5, width: b5.width + 1 })
+      setTimeout(() => {
+        const e6 = this.views.get(accountId)
+        if (!e6 || e6.view.webContents.isDestroyed()) return
+        const b6 = e6.view.getBounds()
+        if (b6.x < 0) return
+        e6.view.setBounds({ ...b6, width: target.width })
+      }, 50)
+    }, 1200)
   }
 
   /**
@@ -770,12 +859,13 @@ export class ViewManager {
     this.notify()
   }
 
-  /** リサイズ時に bounds を更新する。 */
+  /** リサイズ時に bounds を更新する。リサイズ後の黒画面を防ぐため invalidate も呼ぶ。 */
   updateBounds(accountId: number, y: number, height: number): void {
     if (this.activeAccountId !== accountId) return
     const entry = this.views.get(accountId)
     if (entry && !entry.view.webContents.isDestroyed()) {
       entry.view.setBounds(this.calcBounds(y, height))
+      try { entry.view.webContents.invalidate() } catch {}
     }
   }
 
@@ -799,6 +889,32 @@ export class ViewManager {
   reload(accountId: number): void {
     const entry = this.views.get(accountId)
     if (entry && !entry.view.webContents.isDestroyed()) entry.view.webContents.reload()
+  }
+
+  /**
+   * ビューを破棄して再作成する（プロキシ設定変更後に呼ぶ）。
+   * login イベントリスナーは makeView 時にスナップショットされるため、
+   * reload() では新しいプロキシ認証情報が反映されない。
+   * アクティブなビューの場合はそのまま同じ位置に再表示する。
+   */
+  reinitView(accountId: number): void {
+    const entry = this.views.get(accountId)
+    if (!entry) return
+
+    const isActive = this.activeAccountId === accountId
+    let savedBounds: Electron.Rectangle | null = null
+    if (isActive && !entry.view.webContents.isDestroyed()) {
+      const b = entry.view.getBounds()
+      if (b.width > 0 && b.height > 0) savedBounds = b
+    }
+
+    this.destroyView(accountId)
+
+    if (isActive && savedBounds) {
+      this.showView(accountId, savedBounds.y, savedBounds.height)
+    }
+
+    this.notify()
   }
 
   getViewInfos(): ViewInfo[] {
