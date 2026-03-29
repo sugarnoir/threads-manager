@@ -16,7 +16,7 @@ interface Props {
   onOpenTool: (tool: ToolType) => void
 }
 
-export type ToolType = 'compose' | 'scheduler' | 'engagement' | 'history' | 'settings' | 'status' | 'research' | 'templates' | 'proxy' | 'image-list'
+export type ToolType = 'compose' | 'scheduler' | 'engagement' | 'history' | 'auto-register' | 'settings' | 'status' | 'research' | 'templates' | 'proxy' | 'image-list'
 
 interface GroupEditState {
   accountId: number
@@ -105,18 +105,20 @@ function IconCheck() {
 
 const BOTTOM_TOOLS: { id: ToolType; label: string; icon: JSX.Element }[] = [
   {
-    id: 'history',
-    label: '履歴',
+    id: 'auto-register',
+    label: 'secret',
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="12 8 12 12 14 14" />
-        <path d="M3.05 11a9 9 0 1 1 .5 4m-.5 5v-5h5" />
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <line x1="19" y1="8" x2="19" y2="14" />
+        <line x1="22" y1="11" x2="16" y2="11" />
       </svg>
     ),
   },
   {
     id: 'scheduler',
-    label: '予約投稿',
+    label: 'secret',
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
@@ -175,12 +177,36 @@ export function Sidebar({
 
   // ── CSV インポート ────────────────────────────────────────────────────────
   const csvInputRef = useRef<HTMLInputElement>(null)
-  const [csvImporting, setCsvImporting] = useState(false)
-  const [csvToast, setCsvToast]         = useState<{ msg: string; ok: boolean } | null>(null)
+  const [csvImporting,   setCsvImporting]   = useState(false)
+  const [csvToast,       setCsvToast]       = useState<{ msg: string; ok: boolean } | null>(null)
+  const [csvPanelOpen,   setCsvPanelOpen]   = useState(false)
+  const [csvGroupSel,    setCsvGroupSel]    = useState<string>('__all__')
+  const [csvNewGrpName,  setCsvNewGrpName]  = useState('')
+  // handleSidebarCsvFile は onChange コールバックのため ref 経由でグループ選択を受け渡す
+  const csvGroupRef = useRef<string>('__all__')
 
   const showCsvToast = (msg: string, ok: boolean) => {
     setCsvToast({ msg, ok })
     setTimeout(() => setCsvToast(null), 5000)
+  }
+
+  const handleCsvModalConfirm = async () => {
+    let sel = csvGroupSel
+    if (sel === '__new__') {
+      const name = csvNewGrpName.trim()
+      if (name) {
+        const r = await api.groups.create(name)
+        if (r.success) { setGroups(prev => [...prev, r.group]); sel = name }
+        else sel = '__all__'
+      } else {
+        sel = '__all__'
+      }
+    }
+    csvGroupRef.current = sel
+    setCsvPanelOpen(false)
+    setCsvGroupSel('__all__')
+    setCsvNewGrpName('')
+    csvInputRef.current?.click()
   }
 
   const handleSidebarCsvFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -190,8 +216,6 @@ export function Sidebar({
     setCsvImporting(true)
     try {
       const text = await file.text()
-      // 列 = アカウント番号（1列目→アカウント1番, 2列目→アカウント2番…）
-      // 行 = 各アカウントのストック（最大50行）
       const parseRow = (line: string): string[] => {
         const cols: string[] = []
         let cur = '', inQ = false
@@ -207,18 +231,48 @@ export function Sidebar({
       const matrix = text.split(/\r?\n/).filter(l => l.trim()).map(parseRow)
       if (matrix.length === 0) { showCsvToast('空のCSVです', false); return }
 
-      const numCols = Math.max(...matrix.map(r => r.length))
       const payload: Array<{ account_id: number; content: string; image_url: null; image_url_2: null }> = []
       let skippedCols = 0
 
-      for (let col = 0; col < numCols; col++) {
-        const account = accounts[col]
-        if (!account) { skippedCols++; continue }
+      // 1行目の全セルが既存グループ名と一致する場合はグループヘッダーモード
+      const groupSet = new Set(groups.map(g => g.name))
+      const firstRow = matrix[0]
+      const hasGroupHeaders =
+        firstRow.some(cell => cell.trim() && groupSet.has(cell.trim())) &&
+        firstRow.every(cell => !cell.trim() || groupSet.has(cell.trim()))
 
-        for (let row = 0; row < matrix.length; row++) {
-          const content = matrix[row][col]?.trim() ?? ''
-          if (!content) continue
-          payload.push({ account_id: account.id, content, image_url: null, image_url_2: null })
+      if (hasGroupHeaders) {
+        // グループヘッダーモード: 列ヘッダー = グループ名 → そのグループの全アカウントに追加
+        for (let col = 0; col < firstRow.length; col++) {
+          const grpName = firstRow[col]?.trim()
+          if (!grpName || !groupSet.has(grpName)) { skippedCols++; continue }
+          const grpAccounts = accounts.filter(a => a.group_name === grpName)
+          if (!grpAccounts.length) { skippedCols++; continue }
+          for (let row = 1; row < matrix.length; row++) {
+            const content = matrix[row][col]?.trim() ?? ''
+            if (!content) continue
+            for (const acct of grpAccounts) {
+              payload.push({ account_id: acct.id, content, image_url: null, image_url_2: null })
+            }
+          }
+        }
+      } else {
+        // インデックスモード: モーダルで選択したグループでアカウントを絞り込み
+        const grp = csvGroupRef.current
+        const targetAccounts =
+          grp === '__all__'  ? accounts :
+          grp === '__none__' ? accounts.filter(a => !a.group_name) :
+                               accounts.filter(a => a.group_name === grp)
+
+        const numCols = Math.max(...matrix.map(r => r.length))
+        for (let col = 0; col < numCols; col++) {
+          const account = targetAccounts[col]
+          if (!account) { skippedCols++; continue }
+          for (let row = 0; row < matrix.length; row++) {
+            const content = matrix[row][col]?.trim() ?? ''
+            if (!content) continue
+            payload.push({ account_id: account.id, content, image_url: null, image_url_2: null })
+          }
         }
       }
 
@@ -289,6 +343,7 @@ export function Sidebar({
   }
 
   const draggingIdRef = useRef<number | null>(null)
+  const [draggingId, setDraggingId] = useState<number | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
 
   useEffect(() => {
@@ -323,12 +378,14 @@ export function Sidebar({
 
   const handleDragStart = (e: React.DragEvent, accountId: number) => {
     draggingIdRef.current = accountId
+    setDraggingId(accountId)
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', String(accountId))
   }
 
   const handleDragEnd = () => {
     draggingIdRef.current = null
+    setDraggingId(null)
     setDropTarget(null)
   }
 
@@ -358,6 +415,8 @@ export function Sidebar({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     const dragId = draggingIdRef.current
+    draggingIdRef.current = null
+    setDraggingId(null)  // Reset before state updates to prevent stuck opacity-40
     if (dragId === null || dropTarget === null) {
       setDropTarget(null)
       return
@@ -417,6 +476,7 @@ export function Sidebar({
     dropTarget?.kind === 'group-header' && dropTarget.groupName === groupName
 
   return (
+    <>
     <aside
       className="w-60 flex flex-col bg-zinc-950 border-r border-zinc-800/60 shrink-0 select-none"
       onDragLeave={handleDragLeave}
@@ -560,7 +620,7 @@ export function Sidebar({
 
               {(grouped[groupKey] ?? []).map((account) => {
                 const isActive   = activeAccountId === account.id
-                const isDragging = draggingIdRef.current === account.id
+                const isDragging = draggingId === account.id
 
                 return (
                   <div key={account.id}>
@@ -677,6 +737,52 @@ export function Sidebar({
         )}
       </div>
 
+      {/* ── CSV インポート インラインパネル ── */}
+      {csvPanelOpen && (
+        <div className="mx-2 mb-2 shrink-0 rounded-xl border border-zinc-700 bg-zinc-900 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-white text-xs font-semibold">CSVインポート</span>
+            <button
+              onClick={() => { setCsvPanelOpen(false); setCsvGroupSel('__all__'); setCsvNewGrpName('') }}
+              className="text-zinc-500 hover:text-white text-sm leading-none"
+            >✕</button>
+          </div>
+          <p className="text-zinc-600 text-[10px] mb-2 leading-tight">
+            1行目がグループ名の場合は自動判定
+          </p>
+          <label className="block text-zinc-500 text-[10px] mb-1">対象グループ</label>
+          <select
+            value={csvGroupSel}
+            onChange={e => { setCsvGroupSel(e.target.value); setCsvNewGrpName('') }}
+            className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+          >
+            <option value="__all__">全アカウント（インデックス順）</option>
+            <option value="__none__">グループなし（未分類）</option>
+            {groups.map(g => (
+              <option key={g.name} value={g.name}>{g.name}（{accounts.filter(a => a.group_name === g.name).length}件）</option>
+            ))}
+            <option value="__new__">＋ 新規グループを作成</option>
+          </select>
+          {csvGroupSel === '__new__' && (
+            <input
+              autoFocus
+              value={csvNewGrpName}
+              onChange={e => setCsvNewGrpName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCsvModalConfirm() }}
+              placeholder="グループ名を入力..."
+              className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
+            />
+          )}
+          <button
+            onClick={handleCsvModalConfirm}
+            disabled={csvImporting || (csvGroupSel === '__new__' && !csvNewGrpName.trim())}
+            className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+          >
+            {csvImporting ? '読込中...' : 'ファイルを選択'}
+          </button>
+        </div>
+      )}
+
       {/* ── Compact bottom tools (カード型) ── */}
       <div className="px-2 pt-2 border-t border-zinc-800/60 shrink-0">
         {/* CSV インポートトースト */}
@@ -716,11 +822,11 @@ export function Sidebar({
             onChange={handleSidebarCsvFile}
           />
           <button
-            onClick={() => csvInputRef.current?.click()}
+            onClick={() => { setCsvGroupSel('__all__'); setCsvNewGrpName(''); setCsvPanelOpen(v => !v) }}
             disabled={csvImporting}
             title="CSVインポート"
-            style={{ background: '#2a2a2a', borderRadius: '8px' }}
-            className="flex-1 flex flex-col items-center gap-1.5 py-2.5 transition-colors text-center text-zinc-400 hover:text-zinc-200 disabled:opacity-50"
+            style={{ background: csvPanelOpen ? undefined : '#2a2a2a', borderRadius: '8px' }}
+            className={`flex-1 flex flex-col items-center gap-1.5 py-2.5 transition-colors text-center disabled:opacity-50 ${csvPanelOpen ? 'bg-blue-600/25 text-blue-400' : 'text-zinc-400 hover:text-zinc-200'}`}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -783,10 +889,12 @@ export function Sidebar({
         <span className="text-zinc-700 text-[10px]">v1.0.0</span>
       </div>
 
+    </aside>
+
       {/* ── Group edit modal ── */}
       {groupEdit && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
           onClick={() => setGroupEdit(null)}
         >
           <div
@@ -823,6 +931,6 @@ export function Sidebar({
           </div>
         </div>
       )}
-    </aside>
+    </>
   )
 }

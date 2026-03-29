@@ -3,7 +3,7 @@ import { Composer } from '../pages/Composer'
 import { Scheduler } from '../pages/Scheduler'
 import { Engagement } from '../pages/Engagement'
 import { History } from '../pages/History'
-import { Settings, ProxyPresetsSection, ImageGroupsSection } from '../pages/Settings'
+import { Settings, ProxyPresetsSection, ImageGroupsSection, AutoRegisterSection } from '../pages/Settings'
 import { StatusCheck } from '../pages/StatusCheck'
 import { Research } from '../pages/Research'
 import { Templates } from '../pages/Templates'
@@ -17,22 +17,24 @@ interface Props {
   onClose: () => void
   onCheckOne: (id: number) => Promise<{ status: string; message?: string }>
   onCheckAll: (onProgress: (data: { type: string; accountId?: number; status?: string; message?: string; index?: number; total?: number }) => void) => Promise<void>
+  onAccountAdded?: () => void
 }
 
 const LABELS: Record<ToolType, string> = {
-  compose:      '✏️ 投稿',
-  scheduler:    '🕐 スケジュール',
-  engagement:   '❤️ いいね/RT',
-  history:      '📋 履歴',
-  settings:     '⚙️ 設定',
-  proxy:        '🔗 プロキシ管理',
-  'image-list': '🖼 画像グループ管理',
-  status:       '🔍 ステータス確認',
-  research:     '🔎 リサーチ',
-  templates:    '📝 テンプレート',
+  compose:         '✏️ 投稿',
+  scheduler:       '🔒 secret',
+  engagement:      '❤️ いいね/RT',
+  history:         '📋 履歴',
+  'auto-register': '🔒 secret',
+  settings:        '⚙️ 設定',
+  proxy:           '🔗 プロキシ管理',
+  'image-list':    '🖼 画像グループ管理',
+  status:          '🔍 ステータス確認',
+  research:        '🔎 リサーチ',
+  templates:       '📝 テンプレート',
 }
 
-export function ToolPanel({ tool, accounts, selectedAccountId, composerInitialContent, onClose, onCheckOne, onCheckAll }: Props) {
+export function ToolPanel({ tool, accounts, selectedAccountId, composerInitialContent, onClose, onCheckOne, onCheckAll, onAccountAdded }: Props) {
   return (
     <div className="absolute inset-0 z-40 flex flex-col bg-zinc-950">
       {/* Header */}
@@ -52,12 +54,13 @@ export function ToolPanel({ tool, accounts, selectedAccountId, composerInitialCo
         {tool === 'compose' && (
           <Composer accounts={accounts} selectedAccountId={selectedAccountId} initialContent={composerInitialContent} />
         )}
-        {tool === 'scheduler' && <Scheduler accounts={accounts} />}
+        {tool === 'scheduler' && <Scheduler accounts={accounts} onClose={onClose} />}
         {tool === 'engagement' && <Engagement accounts={accounts} />}
         {tool === 'history' && (
           <History accounts={accounts} selectedAccountId={selectedAccountId} />
         )}
-        {tool === 'settings' && <Settings />}
+        {tool === 'settings' && <Settings onAccountAdded={onAccountAdded} />}
+        {tool === 'auto-register' && <AutoRegisterSection onAccountAdded={onAccountAdded} onClose={onClose} />}
         {tool === 'status' && (
           <StatusCheck
             accounts={accounts}

@@ -40,6 +40,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     checkAll: () => ipcRenderer.invoke('accounts:check-all'),
     delete: (id: number) => ipcRenderer.invoke('accounts:delete', id),
     fingerprint: (id: number) => ipcRenderer.invoke('accounts:fingerprint', id),
+    autoRegister: (data: {
+      name: string; email: string; password: string
+      proxy_url?: string | null; proxy_username?: string | null; proxy_password?: string | null
+    }) => ipcRenderer.invoke('accounts:auto-register', data),
   },
 
   // Posts

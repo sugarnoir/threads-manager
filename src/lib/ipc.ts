@@ -240,6 +240,7 @@ declare global {
         checkAll: () => Promise<{ success: boolean }>
         delete: (id: number) => Promise<{ success: boolean }>
         fingerprint: (id: number) => Promise<FingerprintData | null>
+        autoRegister: (data: { name: string; email: string; password: string; proxy_url?: string | null; proxy_username?: string | null; proxy_password?: string | null }) => Promise<{ success: boolean; account?: Account; error?: string }>
       }
       posts: {
         list: (accountId: number) => Promise<Post[]>

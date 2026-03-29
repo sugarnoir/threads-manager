@@ -1,4 +1,5 @@
 import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage } from 'electron'
+import { toRomaji } from 'wanakana'
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
 import { getContextCookiesIfOpen } from '../playwright/browser-manager'
 import { getSetting, setSetting } from '../db/repositories/settings'
@@ -570,7 +571,18 @@ export class ViewManager {
         if (pollInterval) clearInterval(pollInterval)
 
         // Cookie はすでに取得済み → メインプロセスから Instagram API を直接叩く
-        const { username, displayName } = await fetchProfileFromInstagram(allCookies)
+        // 新規登録直後は ds_user_id が sessionid より遅れてセットされる場合があるため
+        // username が取得できるまで最大 5 秒リトライする（ポップアップ破棄後もセッションから取得）
+        const tempSess = session.fromPartition(partition)
+        let { username, displayName } = await fetchProfileFromInstagram(allCookies)
+        if (username === 'unknown') {
+          for (let i = 0; i < 5; i++) {
+            await new Promise(r => setTimeout(r, 1000))
+            const fresh = await tempSess.cookies.get({}).catch(() => allCookies)
+            const res = await fetchProfileFromInstagram(fresh)
+            if (res.username !== 'unknown') { username = res.username; displayName = res.displayName; break }
+          }
+        }
 
         if (!popup.isDestroyed()) popup.close()
         resolve({ username, displayName })
@@ -582,10 +594,238 @@ export class ViewManager {
     })
   }
 
+  async autoRegisterAccount(
+    opts: {
+      name: string
+      email: string
+      password: string
+      proxyUrl?: string | null
+      proxyUsername?: string | null
+      proxyPassword?: string | null
+    },
+    onStatus: (e: { type: string; detail?: string }) => void,
+  ): Promise<{ username: string; displayName: string | null; tempKey: string }> {
+    const SIGNUP_URL = 'https://www.instagram.com/accounts/emailsignup/'
+    const tempKey   = `temp-${Date.now()}`
+    const partition = `persist:login-${tempKey}`
+    const sess      = session.fromPartition(partition)
+
+    if (opts.proxyUrl) {
+      await sess.setProxy({ proxyRules: opts.proxyUrl }).catch(() => {})
+    }
+
+    // Generate a Latin-only username
+    // ひらがな/カタカナはローマ字変換してから不要文字を除去
+    const romaji = toRomaji(opts.name)
+    const base   = romaji.toLowerCase().replace(/[^a-z]/g, '').slice(0, 12) || 'user'
+    const digits = String(Math.floor(Math.random() * 900000) + 100000)  // 6桁
+    const letter = String.fromCharCode(97 + Math.floor(Math.random() * 26)) // a-z 1文字
+    const username = base + digits + letter  // 例: yuki123456a
+
+    const mainBounds = this.mainWindow.getBounds()
+    const popupW = 860, popupH = 700
+    const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
+    const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
+
+    const popup = new BrowserWindow({
+      width: popupW, height: popupH, x, y,
+      parent: this.mainWindow,
+      modal: false,
+      title: 'Threadsアカウント作成',
+      titleBarStyle: 'default',
+      webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
+    })
+
+    if (opts.proxyUsername) {
+      popup.webContents.on('login', (event, _d, authInfo, callback) => {
+        if (authInfo.isProxy) { event.preventDefault(); callback(opts.proxyUsername!, opts.proxyPassword ?? '') }
+      })
+    }
+
+    popup.loadURL(SIGNUP_URL)
+    popup.focus()
+
+    let formFilled = false
+
+    // ランダムな成人生年月日を生成（1985〜1999年）
+    const bYear  = 1985 + Math.floor(Math.random() * 15)
+    const bMonth = 1    + Math.floor(Math.random() * 12)
+    const bDay   = 1    + Math.floor(Math.random() * 28)
+
+    const tryFillForm = async () => {
+      if (popup.isDestroyed() || formFilled) return
+      // ページ描画完了まで待機
+      await new Promise(r => setTimeout(r, 2000))
+      if (popup.isDestroyed()) return
+      try {
+        // ── 実際のInstagramフォーム構造（2024年確認済み）──
+        // input[type="text"]       : [0]=メアド/電話, [1]=名前
+        // input[type="password"]   : パスワード
+        // input[type="search"]     : ユーザーネーム (aria-label="ユーザーネーム")
+        // div[role="combobox"]     : [0]=年, [1]=月, [2]=日 (aria-label="年/月/日を選択")
+        const result = await popup.webContents.executeJavaScript(`
+          (async function() {
+            function rand(min, max) {
+              return Math.floor(Math.random() * (max - min + 1)) + min;
+            }
+            function wait(ms) {
+              return new Promise(r => setTimeout(r, ms));
+            }
+            async function clickAndFill(el, val) {
+              if (!el) return false;
+              el.click();
+              await wait(rand(100, 300));
+              el.focus();
+              try {
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(el, val);
+              } catch(e) { el.value = val; }
+              el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }
+            async function clickComboAndSelect(ariaLabel, matchText) {
+              const combo = document.querySelector('div[role="combobox"][aria-label="' + ariaLabel + '"]');
+              if (!combo) return false;
+              combo.click();
+              await wait(rand(600, 900));
+              const opts = Array.from(document.querySelectorAll('[role="option"]'))
+                .filter(el => el.offsetParent !== null);
+              const target = opts.find(el => el.textContent.trim() === matchText);
+              if (target) { target.click(); await wait(rand(300, 500)); return true; }
+              return false;
+            }
+
+            const textInputs  = document.querySelectorAll('input[type="text"]');
+            const pwInput     = document.querySelector('input[type="password"]');
+            const searchInput = document.querySelector('input[type="search"]');
+
+            if (!textInputs[0] || !pwInput) return { ok: false, reason: 'form_not_ready' };
+
+            await clickAndFill(textInputs[0], ${JSON.stringify(opts.email)});
+            await wait(rand(100, 300));
+            await clickAndFill(pwInput, ${JSON.stringify(opts.password)});
+            await wait(rand(100, 300));
+            if (textInputs[1]) await clickAndFill(textInputs[1], ${JSON.stringify(opts.name)});
+            await wait(rand(100, 300));
+            if (searchInput)   await clickAndFill(searchInput, ${JSON.stringify(username)});
+            await wait(rand(200, 400));
+
+            // 生年月日
+            await clickComboAndSelect('年を選択', ${JSON.stringify(String(bYear) + '年')});
+            await clickComboAndSelect('月を選択', ${JSON.stringify(String(bMonth) + '月')});
+            await clickComboAndSelect('日を選択', ${JSON.stringify(String(bDay) + '日')});
+
+            await wait(rand(400, 700));
+            const submitBtn = document.querySelector('button[type="submit"]');
+            if (submitBtn) submitBtn.click();
+
+            return {
+              ok: true,
+              email: !!textInputs[0],
+              name:  !!(textInputs[1]),
+              pw:    !!pwInput,
+              user:  !!searchInput,
+            };
+          })()
+        `)
+        if (result?.ok) {
+          formFilled = true
+          onStatus({ type: 'form_filled',    detail: opts.email })
+          onStatus({ type: 'form_submitted', detail: opts.email })
+        } else {
+          console.log('[autoRegister] tryFillForm result:', result)
+        }
+      } catch (e) {
+        console.error('[autoRegister] tryFillForm error:', e)
+      }
+    }
+
+    popup.webContents.on('did-finish-load', () => tryFillForm())
+
+    let codeStepNotified = false
+    let codeCheckInterval: ReturnType<typeof setInterval> | null = null
+
+    codeCheckInterval = setInterval(async () => {
+      if (popup.isDestroyed() || codeStepNotified) {
+        if (codeCheckInterval) clearInterval(codeCheckInterval)
+        return
+      }
+      try {
+        const hasCodeInput = await popup.webContents.executeJavaScript(`
+          !!(document.querySelector('input[name="email_confirmation_code"]') ||
+             document.querySelector('input[autocomplete="one-time-code"]') ||
+             document.querySelector('input[inputmode="numeric"][maxlength="6"]') ||
+             (document.body && (document.body.innerText.includes('確認コード') || document.body.innerText.includes('Confirm your email'))))
+        `).catch(() => false)
+        if (hasCodeInput && !codeStepNotified) {
+          codeStepNotified = true
+          if (codeCheckInterval) clearInterval(codeCheckInterval)
+          onStatus({ type: 'waiting_code', detail: opts.email })
+        }
+      } catch { /* ignore */ }
+    }, 2000)
+
+    return new Promise((resolve, reject) => {
+      let done = false
+      let pollInterval: ReturnType<typeof setInterval> | null = null
+
+      const cleanup = () => {
+        clearTimeout(timer)
+        if (pollInterval)      clearInterval(pollInterval)
+        if (codeCheckInterval) clearInterval(codeCheckInterval)
+        if (!popup.isDestroyed()) popup.close()
+      }
+
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true; cleanup()
+        reject(new Error('登録タイムアウト (15分)'))
+      }, 15 * 60 * 1000)
+
+      popup.on('closed', () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        if (pollInterval)      clearInterval(pollInterval)
+        if (codeCheckInterval) clearInterval(codeCheckInterval)
+        reject(new Error('ブラウザが閉じられました'))
+      })
+
+      const checkCookies = async () => {
+        if (done) return
+        try {
+          if (popup.isDestroyed()) return
+          const allCookies = await popup.webContents.session.cookies.get({})
+          if (done) return
+          const hasSession = allCookies.some(
+            c => c.name === 'sessionid' && c.value.length > 0 &&
+              (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
+          )
+          if (!hasSession) return
+          done = true; cleanup()
+          resolve({ username, displayName: opts.name, tempKey })
+        } catch { /* ignore */ }
+      }
+
+      pollInterval = setInterval(checkCookies, 1500)
+      popup.webContents.on('did-navigate',         () => checkCookies())
+      popup.webContents.on('did-navigate-in-page', () => checkCookies())
+    })
+  }
+
   async migrateLoginSession(tempKey: string, accountId: number): Promise<void> {
     const tempSession = session.fromPartition(`persist:login-${tempKey}`)
     const permSession = session.fromPartition(`persist:account-${accountId}`)
     const cookies = await tempSession.cookies.get({})
+
+    // DBからプロキシ情報を読み取って永続セッションに即時適用する。
+    // _bgInitView でも設定するが、アカウント追加直後に showView が呼ばれた場合に
+    // プロキシなしで loadURL が走るのを防ぐためここでも必ず設定する。
+    const acct = getAccountById(accountId)
+    if (acct?.proxy_url) {
+      await permSession.setProxy({ proxyRules: acct.proxy_url }).catch(() => {})
+    }
 
     const yearFromNow = Math.floor(Date.now() / 1000) + 365 * 24 * 3600
 
@@ -711,39 +951,75 @@ export class ViewManager {
     } catch (err) { console.error(`[_bgInitView] setProxy error account=${accountId}:`, err) }
 
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
-    console.log(`[_bgInitView] loadURL account=${accountId} bounds=`, entry.view.getBounds())
-    entry.view.webContents.loadURL(THREADS_URL)
 
-    // dom-ready: ページ構造が確定した直後に1回目の nudge
-    // (did-finish-load より早く発火するため黒い初期フレームを早期解消)
+    // ── リトライ付きロード ───────────────────────────────────────────────────
+    // プロキシ接続は初回タイムアウトすることがあるため最大 MAX_RETRIES 回リトライする。
+    // プロキシエラー (-130〜-175) は 2 秒後、その他は 5 秒後にリトライ。
+    const MAX_RETRIES = 3
+    let retryCount = 0
+    let loadSucceeded = false
+
+    const attemptLoad = () => {
+      const e = this.views.get(accountId)
+      if (!e || e.view.webContents.isDestroyed()) return
+      console.log(`[_bgInitView] loadURL attempt=${retryCount} account=${accountId}`)
+      e.view.webContents.loadURL(THREADS_URL)
+    }
+
+    // dom-ready / did-finish-load に成功フラグを立てて nudge する（一度だけ）
     entry.view.webContents.once('dom-ready', () => {
+      loadSucceeded = true
       console.log(`[_bgInitView] dom-ready account=${accountId}`)
       this.nudgeRepaint(accountId)
     })
-
-    // did-finish-load: 全リソース読み込み完了後に2回目の nudge
     entry.view.webContents.once('did-finish-load', () => {
+      loadSucceeded = true
       console.log(`[_bgInitView] did-finish-load account=${accountId}`)
       this.nudgeRepaint(accountId)
-      // 読み込み完了から 600ms 後にもう一度 nudge (遅延レンダリング対策)
       setTimeout(() => this.nudgeRepaint(accountId), 600)
     })
 
-    entry.view.webContents.once('did-fail-load', (_e, errCode, errDesc, failedUrl) => {
+    // did-fail-load: リトライ処理（再帰的に登録）
+    const onFailLoad = (_e: Electron.Event, errCode: number, errDesc: string, failedUrl: string) => {
       console.log(`[_bgInitView] did-fail-load account=${accountId} errCode=${errCode} errDesc=${errDesc} url=${failedUrl}`)
-      // -3 は USER_ABORTED (ページ遷移による中断) なので無視する
+      // -3 = USER_ABORTED (SPA ナビゲーションによる中断) → 無視
       if (errCode === -3) return
-      // ロード失敗時: 5秒後にリトライ（プロキシ接続失敗など一時的なエラーへの対処）
+      if (retryCount >= MAX_RETRIES) {
+        console.log(`[_bgInitView] max retries reached account=${accountId}`)
+        return
+      }
+      retryCount++
+      // プロキシ関連エラー (-130〜-175): 認証待ちも含め 2 秒後にリトライ
+      // その他のネットワークエラー: 5 秒後にリトライ
+      const isProxyErr = errCode >= -175 && errCode <= -130
+      const delay = isProxyErr ? 2_000 : 5_000
+      console.log(`[_bgInitView] scheduling retry #${retryCount} in ${delay}ms (isProxy=${isProxyErr}) account=${accountId}`)
       setTimeout(() => {
         const e = this.views.get(accountId)
-        if (!e || e.view.webContents.isDestroyed()) return
+        if (!e || e.view.webContents.isDestroyed() || loadSucceeded) return
         const url = e.view.webContents.getURL()
-        if (!url || url === 'about:blank') {
-          console.log(`[_bgInitView] retrying loadURL after did-fail-load for account=${accountId}`)
-          e.view.webContents.loadURL(THREADS_URL)
+        if (!url || url === 'about:blank' || url.startsWith('chrome-error://')) {
+          e.view.webContents.once('did-fail-load', onFailLoad)
+          attemptLoad()
         }
-      }, 5_000)
-    })
+      }, delay)
+    }
+    entry.view.webContents.once('did-fail-load', onFailLoad)
+
+    // ── blank watchdog ───────────────────────────────────────────────────────
+    // プロキシ認証待ち等で about:blank のまま止まるケースに備え、
+    // 12 秒後も blank なら強制リトライ（カウンタは消費しない）。
+    setTimeout(() => {
+      const e = this.views.get(accountId)
+      if (!e || e.view.webContents.isDestroyed() || loadSucceeded) return
+      const url = e.view.webContents.getURL()
+      if (!url || url === 'about:blank') {
+        console.log(`[_bgInitView] blank watchdog firing for account=${accountId}, reloading`)
+        e.view.webContents.loadURL(THREADS_URL)
+      }
+    }, 12_000)
+
+    attemptLoad()
   }
 
   /**

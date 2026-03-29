@@ -83,7 +83,7 @@ function LicenseKeyScreen({ onLogin }: { onLogin: () => void }) {
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { accounts, loading, addAccount, registerAccount, deleteAccount, checkStatus, checkAllAccounts, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, resetSession, reorderAccounts } =
+  const { accounts, loading, refresh, addAccount, registerAccount, deleteAccount, checkStatus, checkAllAccounts, updateProxy, updateDisplayName, updateGroup, updateMemo, updateSpeedPreset, clearCookies, resetSession, reorderAccounts } =
     useAccounts()
 
   const [activeAccountId, setActiveAccountId] = useState<number | null>(null)
@@ -183,6 +183,7 @@ export default function App() {
             onClose={() => setActiveTool(null)}
             onCheckOne={checkStatus}
             onCheckAll={checkAllAccounts}
+            onAccountAdded={refresh}
           />
         )}
       </div>

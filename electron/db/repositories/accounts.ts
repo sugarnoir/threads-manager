@@ -36,10 +36,12 @@ export function createAccount(data: {
   proxy_password?: string
 }): Account {
   const db = getDb()
+  const maxRow = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM accounts').get() as { m: number }
+  const nextOrder = maxRow.m + 1000
   const result = db
     .prepare(
-      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       data.username,
@@ -48,6 +50,7 @@ export function createAccount(data: {
       data.proxy_url ?? null,
       data.proxy_username ?? null,
       data.proxy_password ?? null,
+      nextOrder,
     )
   return getAccountById(result.lastInsertRowid as number)!
 }

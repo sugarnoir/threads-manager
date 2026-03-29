@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { api, ProxyPreset, MasterKeyRow } from '../lib/ipc'
 import { LicenseAdmin } from './LicenseAdmin'
+import { MasterKeyGate } from '../components/MasterKeyGate'
 
 // 管理者パスワード（ハードコード）
 const ADMIN_PASSWORD = 'TM-ADMIN-2025'
@@ -308,7 +309,7 @@ const NOTIFY_OPTIONS: { key: NotifyKey; label: string; desc: string }[] = [
   { key: 'automation_failed', label: '自動化エラー',     desc: '投稿・いいね・RPなどの自動化に失敗した時' },
 ]
 
-export function Settings() {
+export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {}) {
   const [webhookUrl, setWebhookUrl]   = useState('')
   const [enabled, setEnabled]         = useState(true)
   const [eventFlags, setEventFlags]   = useState<Record<NotifyKey, boolean>>({
@@ -549,6 +550,289 @@ export function Settings() {
 
     </div>
   )
+}
+
+// ── Auto Register section ─────────────────────────────────────────────────────
+
+function AutoRegisterSectionInner({ onAccountAdded }: { onAccountAdded?: () => void }) {
+  const [nameStocks,  setNameStocks]  = useState('')  // one name per line
+  const [icloudEmail, setIcloudEmail] = useState('')
+  const [password,    setPassword]    = useState('')
+  const [showPw,      setShowPw]      = useState(false)
+  const [saving,      setSaving]      = useState(false)
+  const [savedMsg,    setSavedMsg]    = useState(false)
+  const [running,     setRunning]     = useState(false)
+  const [status,      setStatus]      = useState<string | null>(null)
+  const [statusType,  setStatusType]  = useState<'info' | 'success' | 'error' | 'waiting'>('info')
+
+  // Proxy state
+  const [proxyType,     setProxyType]     = useState<'none' | 'http' | 'https' | 'socks5'>('none')
+  const [proxyHost,     setProxyHost]     = useState('')
+  const [proxyPort,     setProxyPort]     = useState('')
+  const [proxyUser,     setProxyUser]     = useState('')
+  const [proxyPass,     setProxyPass]     = useState('')
+  const [showProxyPw,   setShowProxyPw]   = useState(false)
+  const [showProxy,     setShowProxy]     = useState(false)
+  const [templateLoaded, setTemplateLoaded] = useState(false)
+
+  const loadProxyTemplate = async () => {
+    const all = await api.settings.getAll()
+    const type = all['proxy_template_type'] as 'none' | 'http' | 'https' | 'socks5' | undefined
+    if (!type || type === 'none') return
+    setProxyType(type)
+    setProxyHost(all['proxy_template_host'] ?? '')
+    setProxyPort(all['proxy_template_port'] ?? '')
+    setProxyUser(all['proxy_template_username'] ?? '')
+    setProxyPass(all['proxy_template_password'] ?? '')
+    setShowProxy(true)
+    setTemplateLoaded(true)
+    setTimeout(() => setTemplateLoaded(false), 2000)
+  }
+
+  useEffect(() => {
+    api.settings.getAll().then((all) => {
+      setNameStocks(all['register_name_stocks'] ?? '')
+      setIcloudEmail(all['register_icloud_email'] ?? '')
+      setPassword(all['register_password'] ?? '')
+    })
+  }, [])
+
+  // Listen for status events from backend
+  useEffect(() => {
+    const off = api.on('accounts:auto-register-status', (e: unknown) => {
+      const ev = e as { type: string; detail?: string }
+      if (ev.type === 'form_filled')    { setStatus('フォーム入力完了'); setStatusType('info') }
+      if (ev.type === 'form_submitted') { setStatus('フォーム送信完了'); setStatusType('info') }
+      if (ev.type === 'waiting_code')   { setStatus(`メール確認コードをブラウザに入力してください\n${ev.detail ?? ''}`.trim()); setStatusType('waiting') }
+      if (ev.type === 'completed')      { setStatus('アカウント作成完了！'); setStatusType('success'); setRunning(false) }
+      if (ev.type === 'error')          { setStatus(`エラー: ${ev.detail ?? '不明'}`); setStatusType('error'); setRunning(false) }
+    })
+    return off
+  }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    await api.settings.setMany({
+      register_name_stocks:  nameStocks.trim(),
+      register_icloud_email: icloudEmail.trim(),
+      register_password:     password,
+    })
+    setSaving(false)
+    setSavedMsg(true)
+    setTimeout(() => setSavedMsg(false), 2000)
+  }
+
+  const handleCreate = async () => {
+    const lines  = nameStocks.split('\n').map(l => l.trim()).filter(Boolean)
+    const email  = icloudEmail.trim()
+    const pw     = password
+
+    if (!lines.length) { setStatus('名前ストックを1件以上登録してください'); setStatusType('error'); return }
+    if (!email)        { setStatus('iCloudメアドを入力してください'); setStatusType('error'); return }
+    if (!pw)           { setStatus('パスワードを入力してください'); setStatusType('error'); return }
+
+    // Random name
+    const name = lines[Math.floor(Math.random() * lines.length)]
+
+    // Generate email: aaa@icloud.com → aaa+abc123@icloud.com
+    const [localPart, domain] = email.includes('@') ? email.split('@') : [email, 'icloud.com']
+    const suffixLen = 4 + Math.floor(Math.random() * 9) // 4〜12文字
+    const suffix = Array.from({ length: suffixLen }, () =>
+      String.fromCharCode(97 + Math.floor(Math.random() * 26))
+    ).join('')
+    const generatedEmail = `${localPart}+${suffix}@${domain}`
+
+    setRunning(true)
+    setStatus(`ブラウザを開いています...\n名前: ${name}\nメール: ${generatedEmail}`)
+    setStatusType('info')
+
+    const proxyUrl = proxyType !== 'none' && proxyHost && proxyPort
+      ? `${proxyType}://${proxyHost}:${proxyPort}`
+      : null
+
+    const result = await api.accounts.autoRegister({
+      name, email: generatedEmail, password: pw,
+      proxy_url:      proxyUrl,
+      proxy_username: proxyUrl ? (proxyUser || null) : null,
+      proxy_password: proxyUrl ? (proxyPass || null) : null,
+    })
+    if (result.success) {
+      onAccountAdded?.()
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-zinc-700 flex items-center justify-center shrink-0 text-base">👤</div>
+        <div>
+          <p className="text-white font-semibold text-sm">半自動アカウント作成</p>
+          <p className="text-zinc-500 text-xs">Instagramアカウントを半自動で作成してTMに追加</p>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {/* Name stocks */}
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">名前ストック <span className="text-zinc-600">（1行に1つ）</span></label>
+          <textarea
+            value={nameStocks}
+            onChange={(e) => setNameStocks(e.target.value)}
+            rows={4}
+            placeholder={"田中太郎\n佐藤花子\nTaro Yamada"}
+            className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none font-mono"
+          />
+        </div>
+
+        {/* iCloud email */}
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">iCloudメアド</label>
+          <input
+            type="email"
+            value={icloudEmail}
+            onChange={(e) => setIcloudEmail(e.target.value)}
+            placeholder="yourname@icloud.com"
+            className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        {/* Password */}
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">固定パスワード</label>
+          <div className="relative">
+            <input
+              type={showPw ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="登録に使うパスワード"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+            />
+            <button type="button" onClick={() => setShowPw(!showPw)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-400 hover:text-white">
+              {showPw ? '隠す' : '表示'}
+            </button>
+          </div>
+        </div>
+
+        {/* Proxy settings */}
+        <div className="border border-zinc-700 rounded-xl overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowProxy(!showProxy)}
+            className="w-full flex items-center justify-between px-3 py-2.5 bg-zinc-800 hover:bg-zinc-750 text-sm text-zinc-300 transition-colors"
+          >
+            <span className="font-medium">プロキシ設定 {proxyType !== 'none' && proxyHost ? <span className="text-blue-400 text-xs ml-1">({proxyType}://{proxyHost}:{proxyPort})</span> : ''}</span>
+            <span className="text-zinc-500 text-xs">{showProxy ? '▲' : '▼'}</span>
+          </button>
+          {showProxy && (
+            <div className="p-3 space-y-2 bg-zinc-800/50">
+              {/* Template load button */}
+              <button
+                type="button"
+                onClick={loadProxyTemplate}
+                className="text-xs px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors"
+              >
+                {templateLoaded ? '✓ 読み込み完了' : 'テンプレートから読み込み'}
+              </button>
+              {/* Type selector */}
+              <div className="grid grid-cols-4 gap-1">
+                {(['none', 'http', 'https', 'socks5'] as const).map((t) => (
+                  <button key={t} type="button" onClick={() => setProxyType(t)}
+                    className={`py-1.5 rounded-lg text-xs font-semibold transition-colors ${proxyType === t ? 'bg-blue-600 text-white' : 'bg-zinc-700 text-zinc-400 hover:bg-zinc-600'}`}>
+                    {t === 'none' ? 'なし' : t.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              {proxyType !== 'none' && (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input type="text" value={proxyHost} onChange={(e) => setProxyHost(e.target.value)}
+                      placeholder="proxy.example.com"
+                      className="flex-1 bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500" />
+                    <input type="number" value={proxyPort} onChange={(e) => setProxyPort(e.target.value)}
+                      placeholder="8080"
+                      className="w-20 bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500" />
+                  </div>
+                  <input type="text" value={proxyUser} onChange={(e) => setProxyUser(e.target.value)}
+                    placeholder="ユーザー名（任意）"
+                    className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500" />
+                  <div className="relative">
+                    <input type={showProxyPw ? 'text' : 'password'} value={proxyPass} onChange={(e) => setProxyPass(e.target.value)}
+                      placeholder="パスワード（任意）"
+                      className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500" />
+                    <button type="button" onClick={() => setShowProxyPw(!showProxyPw)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-zinc-400 hover:text-white">
+                      {showProxyPw ? '隠す' : '表示'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Status */}
+        {status && (
+          <div className={`px-3 py-2 rounded-xl text-xs whitespace-pre-wrap border ${
+            statusType === 'success' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' :
+            statusType === 'error'   ? 'bg-red-500/10 border-red-500/30 text-red-400' :
+            statusType === 'waiting' ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' :
+                                       'bg-blue-500/10 border-blue-500/30 text-blue-300'
+          }`}>
+            {statusType === 'waiting' && <span className="mr-1">⏳</span>}
+            {statusType === 'success' && <span className="mr-1">✅</span>}
+            {statusType === 'error'   && <span className="mr-1">❌</span>}
+            {statusType === 'info'    && <span className="mr-1">ℹ️</span>}
+            {status}
+          </div>
+        )}
+
+        {/* Buttons */}
+        <div className="flex gap-2">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex-1 py-2 bg-zinc-700 hover:bg-zinc-600 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-50"
+          >
+            {saving ? '保存中...' : savedMsg ? '✓ 保存' : '設定を保存'}
+          </button>
+          <button
+            onClick={handleCreate}
+            disabled={running}
+            className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2"
+          >
+            {running ? (
+              <><span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />作成中...</>
+            ) : 'アカウント作成'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function AutoRegisterSection({ onAccountAdded, onClose }: { onAccountAdded?: () => void; onClose?: () => void } = {}) {
+  const [authState, setAuthState] = useState<'loading' | 'ok' | 'required'>('loading')
+
+  useEffect(() => {
+    api.masterKey.check().then((r) => {
+      setAuthState(r.authenticated ? 'ok' : 'required')
+    }).catch(() => setAuthState('required'))
+  }, [])
+
+  if (authState === 'loading') {
+    return (
+      <div className="h-full flex items-center justify-center text-zinc-400 text-sm">
+        読み込み中...
+      </div>
+    )
+  }
+
+  if (authState === 'required') {
+    return <MasterKeyGate onAuth={() => setAuthState('ok')} onCancel={onClose} />
+  }
+
+  return <AutoRegisterSectionInner onAccountAdded={onAccountAdded} />
 }
 
 // ── Proxy Template section ───────────────────────────────────────────────────

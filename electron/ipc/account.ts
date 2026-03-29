@@ -351,6 +351,48 @@ export function registerAccountHandlers(): void {
 
   // ── ネイティブコンテキストメニュー ──────────────────────────────────────────
   // WebContentsView より前面に表示するため Electron ネイティブメニューを使用
+  ipcMain.handle('accounts:auto-register', async (event, data: {
+    name: string
+    email: string
+    password: string
+    proxy_url?: string | null
+    proxy_username?: string | null
+    proxy_password?: string | null
+  }) => {
+    const onStatus = (e: { type: string; detail?: string }) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('accounts:auto-register-status', e)
+      }
+    }
+    try {
+      const { username, displayName, tempKey } = await getViewManager().autoRegisterAccount(
+        {
+          name: data.name, email: data.email, password: data.password,
+          proxyUrl: data.proxy_url, proxyUsername: data.proxy_username, proxyPassword: data.proxy_password,
+        },
+        onStatus,
+      )
+      const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
+      const account = createAccount({
+        username,
+        display_name: displayName ?? undefined,
+        session_dir: sessionDir,
+        proxy_url:      data.proxy_url      ?? undefined,
+        proxy_username: data.proxy_username ?? undefined,
+        proxy_password: data.proxy_password ?? undefined,
+      })
+      createAndSaveFingerprint(account.id)
+      updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
+      await getViewManager().migrateLoginSession(tempKey, account.id)
+      onStatus({ type: 'completed' })
+      return { success: true, account: { ...account, status: 'active' } }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      onStatus({ type: 'error', detail: msg })
+      return { success: false, error: msg }
+    }
+  })
+
   ipcMain.handle('accounts:context-menu', (event, accountId: number) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return

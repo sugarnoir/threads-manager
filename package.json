@@ -1,6 +1,6 @@
 {
   "name": "threads-manager",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Threads multi-account manager for Mac",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -24,7 +24,8 @@
     "lucide-react": "^0.577.0",
     "playwright": "^1.43.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "wanakana": "^5.3.1"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",

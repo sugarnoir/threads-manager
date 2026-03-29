@@ -5,6 +5,7 @@ import { MasterKeyGate } from '../components/MasterKeyGate'
 
 interface Props {
   accounts: Account[]
+  onClose?: () => void
 }
 
 // ── Autopost tab ──────────────────────────────────────────────────────────────
@@ -792,7 +793,7 @@ function SchedulerInner({ accounts }: Props) {
   )
 }
 
-export function Scheduler({ accounts }: Props) {
+export function Scheduler({ accounts, onClose }: Props) {
   const [authState, setAuthState] = useState<'loading' | 'ok' | 'required'>('loading')
 
   useEffect(() => {
@@ -810,7 +811,7 @@ export function Scheduler({ accounts }: Props) {
   }
 
   if (authState === 'required') {
-    return <MasterKeyGate onAuth={() => setAuthState('ok')} />
+    return <MasterKeyGate onAuth={() => setAuthState('ok')} onCancel={onClose} />
   }
 
   return <SchedulerInner accounts={accounts} />
