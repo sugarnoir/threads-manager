@@ -18,6 +18,7 @@ const loginStatusColors: Record<Account['status'], string> = {
   needs_login: 'bg-amber-400',
   frozen:      'bg-red-500',
   error:       'bg-red-400',
+  challenge:   'bg-yellow-400',
 }
 const loginStatusLabels: Record<Account['status'], string> = {
   active:      'ログイン中',
@@ -25,6 +26,7 @@ const loginStatusLabels: Record<Account['status'], string> = {
   needs_login: '要ログイン',
   frozen:      '凍結',
   error:       'エラー',
+  challenge:   '要確認',
 }
 
 function proxyLabel(account: Account): string | null {

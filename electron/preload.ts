@@ -28,6 +28,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:update-memo', data),
     updateSpeedPreset: (data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) =>
       ipcRenderer.invoke('accounts:update-speed-preset', data),
+    updateUserAgent: (data: { id: number; user_agent: string | null }) =>
+      ipcRenderer.invoke('accounts:update-user-agent', data),
+    loginInstagram: (id: number) =>
+      ipcRenderer.invoke('accounts:login-instagram', id),
+    bulkLoginInstagram: (data: { group_name: string | null }) =>
+      ipcRenderer.invoke('accounts:bulk-login-instagram', data),
     clearCookies: (id: number) =>
       ipcRenderer.invoke('accounts:clear-cookies', id),
     resetSession: (id: number) =>
@@ -103,6 +109,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     reload: (accountId: number)  => ipcRenderer.invoke('browserView:reload', accountId),
     openCompose: (accountId: number, content: string, images?: string[]) =>
       ipcRenderer.invoke('browserView:open-compose', accountId, content, images ?? []),
+    enableCapture: (accountId: number) =>
+      ipcRenderer.invoke('browserView:enableCapture', accountId),
+    getCaptured: () =>
+      ipcRenderer.invoke('browserView:getCaptured'),
+    clearCaptured: () =>
+      ipcRenderer.invoke('browserView:clearCaptured'),
+    getFollowerCandidates: () =>
+      ipcRenderer.invoke('browserView:getFollowerCandidates'),
+    changeProfilePic: (accountId: number, imagePath: string) =>
+      ipcRenderer.invoke('browserView:changeProfilePic', accountId, imagePath),
   },
 
   // Settings
@@ -132,6 +148,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     create: (name: string) => ipcRenderer.invoke('groups:create', name),
     rename: (data: { oldName: string; newName: string }) => ipcRenderer.invoke('groups:rename', data),
     delete: (name: string) => ipcRenderer.invoke('groups:delete', name),
+    reorder: (updates: { id: number; sort_order: number }[]) => ipcRenderer.invoke('groups:reorder', updates),
   },
 
   // Research
@@ -155,10 +172,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('stocks:create', data),
     update: (data: { id: number; title?: string | null; content: string; image_url?: string | null }) =>
       ipcRenderer.invoke('stocks:update', data),
-    delete: (id: number) => ipcRenderer.invoke('stocks:delete', id),
+    delete:           (id: number)       => ipcRenderer.invoke('stocks:delete', id),
+    deleteAll:        (accountId: number) => ipcRenderer.invoke('stocks:deleteAll', accountId),
+    deleteAllByGroup: (groupKey: string)  => ipcRenderer.invoke('stocks:deleteAllByGroup', groupKey),
     importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) =>
       ipcRenderer.invoke('stocks:import-csv', rows),
     randomizeImages: (accountId: number) => ipcRenderer.invoke('stocks:randomize-images', accountId),
+    updateAllTopics: (data: { account_id: number; topic: string | null }) =>
+      ipcRenderer.invoke('stocks:updateAllTopics', data),
     schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null }) =>
       ipcRenderer.invoke('stocks:schedule-post', data),
   },
@@ -184,7 +205,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('license:create', row),
     update: (data: { key: string; is_active?: boolean; expires_at?: string | null; memo?: string | null }) =>
       ipcRenderer.invoke('license:update', data),
-    delete: (key: string) => ipcRenderer.invoke('license:delete', key),
+    delete:   (key: string) => ipcRenderer.invoke('license:delete', key),
+    resetMac: (key: string) => ipcRenderer.invoke('license:reset-mac', key),
   },
 
   // Auth
@@ -212,13 +234,72 @@ contextBridge.exposeInMainWorld('electronAPI', {
     save:      (data: {
       account_id:    number
       enabled:       boolean
-      mode:          'stock' | 'rewrite'
+      mode:          'stock' | 'rewrite' | 'random'
+      use_api:       boolean
       min_interval:  number
       max_interval:  number
       rewrite_texts: string[]
     }) => ipcRenderer.invoke('autopost:save', data),
     resetNext: (accountId: number) => ipcRenderer.invoke('autopost:reset-next', accountId),
+    setNextAt: (data: { account_id: number; next_at: string }) => ipcRenderer.invoke('autopost:set-next-at', data),
   },
+
+  // API Post (non-browser immediate post)
+  apiPost: {
+    send: (data: { account_id: number; content: string; image_urls?: (string | null)[] }) =>
+      ipcRenderer.invoke('apiPost:send', data),
+  },
+
+  // Auto Engagement (API-based auto like / follow)
+  autoEngagement: {
+    get:       (accountId: number, action: 'like' | 'follow') =>
+      ipcRenderer.invoke('autoEngagement:get', accountId, action),
+    save:      (data: {
+      account_id:       number
+      action:           'like' | 'follow'
+      target_usernames: string
+      enabled:          boolean
+      min_interval:     number
+      max_interval:     number
+    }) => ipcRenderer.invoke('autoEngagement:save', data),
+    resetNext: (accountId: number, action: 'like' | 'follow') =>
+      ipcRenderer.invoke('autoEngagement:reset-next', accountId, action),
+  },
+
+  // Auto Reply
+  autoReply: {
+    get:       (groupName: string) => ipcRenderer.invoke('autoReply:get', groupName),
+    save:      (data: {
+      group_name:     string
+      enabled:        boolean
+      check_interval: number
+      reply_texts:    string[]
+    }) => ipcRenderer.invoke('autoReply:save', data),
+    history:   (groupName: string) => ipcRenderer.invoke('autoReply:history', groupName),
+    checkNow:  (groupName: string) => ipcRenderer.invoke('autoReply:checkNow', groupName),
+    templates: {
+      list:   () => ipcRenderer.invoke('autoReply:templates:list'),
+      save:   (name: string, replyTexts: string[]) => ipcRenderer.invoke('autoReply:templates:save', name, replyTexts),
+      delete: (id: number) => ipcRenderer.invoke('autoReply:templates:delete', id),
+    },
+  },
+
+  // Follow Queue (競合フォロワー自動フォロー)
+  followQueue: {
+    enqueue:          (accountId: number) => ipcRenderer.invoke('followQueue:enqueue', accountId),
+    fetchAndEnqueue:  (accountId: number, targetUsername: string, maxCount?: number) =>
+      ipcRenderer.invoke('followQueue:fetchAndEnqueue', accountId, targetUsername, maxCount ?? 2000),
+    stats:            (accountId: number) => ipcRenderer.invoke('followQueue:stats', accountId),
+    clearPending:     (accountId: number) => ipcRenderer.invoke('followQueue:clearPending', accountId),
+  },
+
+  // Dialog
+  dialog: {
+    openFile: () => ipcRenderer.invoke('dialog:open-file') as Promise<{ name: string; data: number[] } | null>,
+  },
+
+  // Debug
+  debugLog: (msg: string) => ipcRenderer.invoke('debug:log', msg),
 
   // Events
   on: (channel: string, callback: (...args: unknown[]) => void) => {

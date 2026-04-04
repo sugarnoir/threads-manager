@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { api, Schedule, Account, AutopostConfig, PostStock } from '../lib/ipc'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { api, Schedule, Account, AutopostConfig, AutoEngagementConfig, PostStock, FollowQueueStats, AutoReplyConfig, AutoReplyRecord, AutoReplyTemplate } from '../lib/ipc'
 import { StatusBadge } from '../components/StatusBadge'
 import { MasterKeyGate } from '../components/MasterKeyGate'
 
@@ -15,21 +15,98 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
   const [config, setConfig] = useState<AutopostConfig | null>(null)
   const [form, setForm] = useState({
     enabled:       false,
-    mode:          'stock' as 'stock' | 'rewrite',
-    min_interval:  60,
-    max_interval:  120,
-    rewrite_texts: [] as string[],
+    mode:          'stock' as 'stock' | 'rewrite' | 'random',
+    use_api:       false,
+    min_interval:  180,
+    max_interval:  240,
   })
-  const [newText, setNewText]     = useState('')
   const [saving, setSaving]       = useState(false)
   const [resetting, setResetting] = useState(false)
   const [hasApiKey, setHasApiKey] = useState(false)
+
+  // グループ一括設定
+  const [groups, setGroups] = useState<{ name: string }[]>([])
+  const [bulkGroup, setBulkGroup] = useState<string>('__all__')
+  const [bulkForm, setBulkForm] = useState({
+    enabled:      true,
+    mode:         'stock' as 'stock' | 'rewrite' | 'random',
+    use_api:      false,
+    min_interval: 180,
+    max_interval: 240,
+  })
+  const [bulkApplying, setBulkApplying] = useState(false)
+  const [bulkResult, setBulkResult] = useState<string | null>(null)
+
+  // Immediate API post state
+  const [stocks, setStocks]               = useState<PostStock[]>([])
+  const [stockSelectMode, setStockSelectMode] = useState<'random' | 'index'>('random')
+  const [stockIndex, setStockIndex]       = useState(1)
+  const [posting, setPosting]             = useState(false)
+  const [postResult, setPostResult]       = useState<{ success: boolean; error?: string } | null>(null)
 
   useEffect(() => {
     api.settings.getAll().then((s) => {
       setHasApiKey(!!s.anthropic_api_key?.trim())
     })
+    api.groups.list().then((gs) => setGroups(gs))
   }, [])
+
+  const handleBulkApply = async () => {
+    if (bulkForm.min_interval > bulkForm.max_interval) {
+      alert('最小間隔は最大間隔以下にしてください')
+      return
+    }
+    const targets = bulkGroup === '__all__'
+      ? accounts
+      : accounts.filter((a) => a.group_name === bulkGroup)
+    if (targets.length === 0) {
+      alert('対象アカウントがありません')
+      return
+    }
+    if (!confirm(`${targets.length}件のアカウントに一括適用しますか？`)) return
+    setBulkApplying(true)
+    setBulkResult(null)
+    let ok = 0, ng = 0
+
+    // 各アカウントの設定を保存
+    for (const a of targets) {
+      try {
+        await api.autopost.save({
+          account_id:    a.id,
+          enabled:       bulkForm.enabled,
+          mode:          bulkForm.mode,
+          use_api:       bulkForm.use_api,
+          min_interval:  bulkForm.min_interval,
+          max_interval:  bulkForm.max_interval,
+          rewrite_texts: [],
+        })
+        ok++
+      } catch { ng++ }
+    }
+
+    // 有効化時：次回投稿時間を均等分散させる
+    // stagger = max_interval / アカウント数（最低1分）
+    if (bulkForm.enabled && targets.length > 1) {
+      const staggerMin = Math.max(1, Math.floor(bulkForm.max_interval / targets.length))
+      const now = Date.now()
+      for (let i = 0; i < targets.length; i++) {
+        const offsetMs  = i * staggerMin * 60 * 1000
+        const nextAt    = new Date(now + offsetMs).toISOString().replace('T', ' ').slice(0, 19)
+        try {
+          await api.autopost.setNextAt({ account_id: targets[i].id, next_at: nextAt })
+        } catch { /* ignore */ }
+      }
+    }
+
+    setBulkApplying(false)
+    const staggerMin = bulkForm.enabled && targets.length > 1
+      ? Math.max(1, Math.floor(bulkForm.max_interval / targets.length))
+      : 0
+    const staggerMsg = staggerMin > 0 ? `（${staggerMin}分ずつ分散）` : ''
+    setBulkResult(`完了: ${ok}件成功${ng > 0 ? ` / ${ng}件失敗` : ''}${staggerMsg}`)
+    // 現在表示中のアカウントの設定を再読み込み
+    if (selectedAccountId) loadConfig(selectedAccountId)
+  }
 
   const loadConfig = useCallback(async (accountId: number) => {
     const cfg = await api.autopost.get(accountId)
@@ -38,19 +115,23 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
       setForm({
         enabled:       cfg.enabled,
         mode:          cfg.mode,
+        use_api:       cfg.use_api,
         min_interval:  cfg.min_interval,
         max_interval:  cfg.max_interval,
-        rewrite_texts: cfg.rewrite_texts,
       })
     } else {
       setForm({
         enabled:       false,
         mode:          'stock',
-        min_interval:  60,
-        max_interval:  120,
-        rewrite_texts: [],
+        use_api:       false,
+        min_interval:  180,
+        max_interval:  240,
       })
     }
+    // Load stocks for immediate post
+    const result = await api.stocks.list(accountId)
+    setStocks(result.success ? result.data : [])
+    setPostResult(null)
   }, [])
 
   useEffect(() => {
@@ -79,9 +160,10 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
       account_id:    selectedAccountId,
       enabled:       form.enabled,
       mode:          form.mode,
+      use_api:       form.use_api,
       min_interval:  form.min_interval,
       max_interval:  form.max_interval,
-      rewrite_texts: form.rewrite_texts,
+      rewrite_texts: [],
     })
     setConfig(saved)
     setSaving(false)
@@ -95,22 +177,183 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
     setResetting(false)
   }
 
-  const handleAddText = () => {
-    const t = newText.trim()
-    if (!t) return
-    setForm((f) => ({ ...f, rewrite_texts: [...f.rewrite_texts, t] }))
-    setNewText('')
+  const handleApiPostNow = async () => {
+    if (!selectedAccountId || stocks.length === 0) return
+    setPosting(true)
+    setPostResult(null)
+
+    let stock: PostStock
+    if (stockSelectMode === 'random') {
+      stock = stocks[Math.floor(Math.random() * stocks.length)]
+    } else {
+      const idx = Math.min(Math.max(stockIndex - 1, 0), stocks.length - 1)
+      stock = stocks[idx]
+    }
+
+    const result = await api.apiPost.send({
+      account_id: selectedAccountId,
+      content:    stock.content,
+      image_urls: [stock.image_url, stock.image_url_2],
+      topic:      stock.topic ?? undefined,
+    })
+    setPosting(false)
+    setPostResult(result)
   }
 
-  const handleRemoveText = (idx: number) => {
-    setForm((f) => ({
-      ...f,
-      rewrite_texts: f.rewrite_texts.filter((_, i) => i !== idx),
-    }))
-  }
+  const BULK_PRESETS = [
+    { label: '低頻度',   min: 180, max: 240 },
+    { label: '標準',     min: 120, max: 180 },
+    { label: '高頻度',   min: 90,  max: 150 },
+    { label: '1日3投稿', min: 440, max: 520 },
+    { label: '1日4投稿', min: 330, max: 390 },
+    { label: '1日5投稿', min: 260, max: 310 },
+  ]
 
   return (
     <div className="space-y-4">
+      {/* グループ一括設定 */}
+      <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 space-y-3">
+        <p className="text-xs font-semibold text-indigo-700">グループ一括設定</p>
+
+        {/* グループ選択 */}
+        <select
+          value={bulkGroup}
+          onChange={(e) => setBulkGroup(e.target.value)}
+          className="w-full border border-indigo-200 rounded-lg p-2 text-sm bg-white"
+        >
+          <option value="__all__">全アカウント（{accounts.length}件）</option>
+          {groups.map((g) => {
+            const cnt = accounts.filter((a) => a.group_name === g.name).length
+            return <option key={g.name} value={g.name}>{g.name}（{cnt}件）</option>
+          })}
+        </select>
+
+        {/* 投稿方法 */}
+        <div>
+          <p className="text-xs text-indigo-600 mb-1">投稿方法</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setBulkForm((f) => ({ ...f, use_api: false }))}
+              className={`flex-1 py-1.5 rounded-lg text-xs border transition-colors ${
+                !bulkForm.use_api ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'
+              }`}
+            >ブラウザ</button>
+            <button
+              onClick={() => setBulkForm((f) => ({ ...f, use_api: true }))}
+              className={`flex-1 py-1.5 rounded-lg text-xs border transition-colors ${
+                bulkForm.use_api ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-200'
+              }`}
+            >API（非公式）</button>
+          </div>
+        </div>
+
+        {/* 投稿モード */}
+        <div>
+          <p className="text-xs text-indigo-600 mb-1">投稿モード</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setBulkForm((f) => ({ ...f, mode: 'stock' }))}
+              className={`flex-1 py-1.5 rounded-lg text-xs border transition-colors ${
+                bulkForm.mode === 'stock' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'
+              }`}
+            >ストック順</button>
+            <button
+              onClick={() => setBulkForm((f) => ({ ...f, mode: 'random' }))}
+              className={`flex-1 py-1.5 rounded-lg text-xs border transition-colors ${
+                bulkForm.mode === 'random' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'
+              }`}
+            >ランダム</button>
+            <button
+              onClick={() => hasApiKey && setBulkForm((f) => ({ ...f, mode: 'rewrite' }))}
+              disabled={!hasApiKey}
+              className={`flex-1 py-1.5 rounded-lg text-xs border transition-colors ${
+                !hasApiKey ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                : bulkForm.mode === 'rewrite' ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-white text-gray-600 border-gray-200'
+              }`}
+            >AIリライト</button>
+          </div>
+        </div>
+
+        {/* 自動投稿 ON/OFF */}
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-indigo-600">自動投稿</span>
+          <button
+            onClick={() => setBulkForm((f) => ({ ...f, enabled: !f.enabled }))}
+            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+              bulkForm.enabled ? 'bg-blue-600' : 'bg-gray-300'
+            }`}
+          >
+            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+              bulkForm.enabled ? 'translate-x-5' : 'translate-x-0.5'
+            }`} />
+          </button>
+        </div>
+
+        {/* 投稿間隔 */}
+        <div>
+          <p className="text-xs text-indigo-600 mb-1">投稿間隔（分）</p>
+          {[BULK_PRESETS.slice(0, 3), BULK_PRESETS.slice(3)].map((row, ri) => (
+            <div key={ri} className="flex gap-1.5 mb-1">
+              {row.map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  onClick={() => setBulkForm((f) => ({ ...f, min_interval: p.min, max_interval: p.max }))}
+                  className={`flex-1 text-xs py-1 rounded border transition-colors ${
+                    bulkForm.min_interval === p.min && bulkForm.max_interval === p.max
+                      ? 'bg-indigo-500 text-white border-indigo-500'
+                      : 'bg-white text-gray-600 border-gray-200 hover:border-indigo-300'
+                  }`}
+                >
+                  {p.label}
+                  <span className="block text-[10px] opacity-70">{p.min}〜{p.max}分</span>
+                </button>
+              ))}
+            </div>
+          ))}
+          <div className="flex items-center gap-2">
+            <div className="flex-1">
+              <label className="text-xs text-gray-400">最小</label>
+              <input
+                type="number" min={1}
+                value={bulkForm.min_interval}
+                onChange={(e) => setBulkForm((f) => ({ ...f, min_interval: Number(e.target.value) }))}
+                className="w-full border border-gray-200 rounded-lg p-1.5 text-sm"
+              />
+            </div>
+            <span className="text-gray-400 mt-4">〜</span>
+            <div className="flex-1">
+              <label className="text-xs text-gray-400">最大</label>
+              <input
+                type="number" min={1}
+                value={bulkForm.max_interval}
+                onChange={(e) => setBulkForm((f) => ({ ...f, max_interval: Number(e.target.value) }))}
+                className="w-full border border-gray-200 rounded-lg p-1.5 text-sm"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 適用ボタン */}
+        <button
+          onClick={handleBulkApply}
+          disabled={bulkApplying}
+          className="w-full py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+        >
+          {bulkApplying
+            ? '適用中...'
+            : `このグループに一括適用（${
+                bulkGroup === '__all__'
+                  ? accounts.length
+                  : accounts.filter((a) => a.group_name === bulkGroup).length
+              }件）`}
+        </button>
+        {bulkResult && (
+          <p className="text-xs text-indigo-700 text-center">{bulkResult}</p>
+        )}
+      </div>
+
       {/* アカウント選択 */}
       <select
         value={selectedAccountId ?? ''}
@@ -148,6 +391,38 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
             </button>
           </div>
 
+          {/* 投稿方法 */}
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-gray-600">投稿方法</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setForm((f) => ({ ...f, use_api: false }))}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                  !form.use_api
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                ブラウザ
+              </button>
+              <button
+                onClick={() => setForm((f) => ({ ...f, use_api: true }))}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                  form.use_api
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-400'
+                }`}
+              >
+                API（非公式）
+              </button>
+            </div>
+            {form.use_api && (
+              <p className="text-xs text-emerald-600">
+                ブラウザなしで直接APIから投稿します（高速・低負荷）
+              </p>
+            )}
+          </div>
+
           {/* 投稿モード */}
           <div className="space-y-1">
             <p className="text-xs font-medium text-gray-600">投稿モード</p>
@@ -161,6 +436,16 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
                 }`}
               >
                 ストック順
+              </button>
+              <button
+                onClick={() => setForm((f) => ({ ...f, mode: 'random' }))}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                  form.mode === 'random'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                ランダム
               </button>
               <button
                 onClick={() => hasApiKey && setForm((f) => ({ ...f, mode: 'rewrite' }))}
@@ -190,6 +475,36 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
           {/* 投稿間隔 */}
           <div className="space-y-1">
             <p className="text-xs font-medium text-gray-600">投稿間隔（分）</p>
+            {[
+              [
+                { label: '低頻度',   min: 180, max: 240 },
+                { label: '標準',     min: 120, max: 180 },
+                { label: '高頻度',   min: 90,  max: 150 },
+              ],
+              [
+                { label: '1日3投稿', min: 440, max: 520 },
+                { label: '1日4投稿', min: 330, max: 390 },
+                { label: '1日5投稿', min: 260, max: 310 },
+              ],
+            ].map((row, ri) => (
+              <div key={ri} className="flex gap-1.5 mb-1">
+                {row.map((p) => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, min_interval: p.min, max_interval: p.max }))}
+                    className={`flex-1 text-xs py-1 rounded border transition-colors ${
+                      form.min_interval === p.min && form.max_interval === p.max
+                        ? 'bg-blue-500 text-white border-blue-500'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-600'
+                    }`}
+                  >
+                    {p.label}
+                    <span className="block text-[10px] opacity-70">{p.min}〜{p.max}分</span>
+                  </button>
+                ))}
+              </div>
+            ))}
             <div className="flex items-center gap-2">
               <div className="flex-1">
                 <label className="text-xs text-gray-400">最小</label>
@@ -219,49 +534,16 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
             </div>
           </div>
 
-          {/* AIリライト: ソーステキスト */}
+          {/* AIリライト: ストック件数表示 */}
           {form.mode === 'rewrite' && (
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-gray-600">
-                ソーステキスト（リライト元）
+            <div className="bg-blue-50 rounded-lg p-2.5">
+              <p className="text-xs text-blue-700">
+                ストックのテキストを順番に取り出し、AIでリライトして投稿します。
               </p>
-              {form.rewrite_texts.length === 0 ? (
-                <p className="text-xs text-gray-400">テキストを追加してください</p>
-              ) : (
-                <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                  {form.rewrite_texts.map((t, i) => (
-                    <div
-                      key={i}
-                      className="flex items-start gap-2 bg-gray-50 rounded-lg p-2"
-                    >
-                      <span className="text-xs text-gray-400 shrink-0 mt-0.5">
-                        {i + 1}.
-                      </span>
-                      <p className="text-xs text-gray-700 flex-1 line-clamp-2">{t}</p>
-                      <button
-                        onClick={() => handleRemoveText(i)}
-                        className="text-xs text-red-400 hover:text-red-600 shrink-0"
-                      >
-                        削除
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <textarea
-                value={newText}
-                onChange={(e) => setNewText(e.target.value)}
-                placeholder="リサーチした投稿テキストを貼り付け..."
-                rows={3}
-                className="w-full border border-gray-200 rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
-              />
-              <button
-                onClick={handleAddText}
-                disabled={!newText.trim()}
-                className="w-full py-1.5 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 disabled:opacity-40"
-              >
-                テキストを追加
-              </button>
+              <p className="text-xs text-blue-500 mt-1">
+                ストック件数: <span className="font-medium">{stocks.length} 件</span>
+                {stocks.length === 0 && '（先にストックを登録してください）'}
+              </p>
             </div>
           )}
 
@@ -294,6 +576,68 @@ function AutopostTab({ accounts }: { accounts: Account[] }) {
           >
             {saving ? '保存中...' : '設定を保存'}
           </button>
+        </div>
+      )}
+
+      {/* 今すぐAPI投稿 */}
+      {selectedAccountId && stocks.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-medium text-gray-700">今すぐAPI投稿</p>
+          <p className="text-xs text-gray-500">ストックから選んでAPI経由で即時投稿します（ブラウザ不要）</p>
+
+          {/* ストック選択モード */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => setStockSelectMode('random')}
+              className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                stockSelectMode === 'random'
+                  ? 'bg-gray-700 text-white border-gray-700'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+              }`}
+            >
+              ランダム
+            </button>
+            <button
+              onClick={() => setStockSelectMode('index')}
+              className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors ${
+                stockSelectMode === 'index'
+                  ? 'bg-gray-700 text-white border-gray-700'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+              }`}
+            >
+              番号指定
+            </button>
+          </div>
+
+          {stockSelectMode === 'index' && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-500 whitespace-nowrap">
+                ストック番号（1〜{stocks.length}）
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={stocks.length}
+                value={stockIndex}
+                onChange={(e) => setStockIndex(Number(e.target.value))}
+                className="w-20 border border-gray-200 rounded-lg p-1.5 text-sm text-center"
+              />
+            </div>
+          )}
+
+          <button
+            onClick={handleApiPostNow}
+            disabled={posting}
+            className="w-full py-2 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 disabled:opacity-40 font-medium"
+          >
+            {posting ? '投稿中...' : 'API投稿'}
+          </button>
+
+          {postResult && (
+            <p className={`text-xs font-medium ${postResult.success ? 'text-emerald-600' : 'text-red-500'}`}>
+              {postResult.success ? '✓ 投稿成功' : `✗ ${postResult.error ?? '投稿失敗'}`}
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -748,15 +1092,675 @@ function AutoDmTab() {
   )
 }
 
+// ── Auto Engagement tab ───────────────────────────────────────────────────────
+
+function AutoEngagementConfigCard({
+  title,
+  description,
+  action,
+  accountId,
+}: {
+  title: string
+  description: string
+  action: 'like' | 'follow'
+  accountId: number
+}) {
+  const [config, setConfig] = useState<AutoEngagementConfig | null>(null)
+  const [form, setForm] = useState({
+    target_usernames: '',
+    enabled:          false,
+    min_interval:     30,
+    max_interval:     60,
+  })
+  const [saving, setSaving]       = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [queueStats, setQueueStats]       = useState<FollowQueueStats | null>(null)
+  const [competitorName, setCompetitorName] = useState('')
+  const [fetching, setFetching]           = useState(false)
+  const [fetchProgress, setFetchProgress] = useState<number | null>(null)
+  const [fetchMsg, setFetchMsg]           = useState<{ type: 'ok' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    api.autoEngagement.get(accountId, action).then((cfg) => {
+      setConfig(cfg)
+      if (cfg) {
+        setForm({
+          target_usernames: cfg.target_usernames,
+          enabled:          cfg.enabled,
+          min_interval:     cfg.min_interval,
+          max_interval:     cfg.max_interval,
+        })
+      }
+    })
+  }, [accountId, action])
+
+  useEffect(() => {
+    const unsub = api.on('autoEngagement:executed', (data: unknown) => {
+      const d = data as { account_id: number; action: string; next_at: string }
+      if (d.account_id === accountId && d.action === action) {
+        setConfig((prev) => prev ? { ...prev, next_at: d.next_at } : prev)
+        if (action === 'follow') {
+          api.followQueue.stats(accountId).then(setQueueStats)
+        }
+      }
+    })
+    return unsub
+  }, [accountId, action])
+
+  // follow アクション時のみキュー統計を取得
+  useEffect(() => {
+    if (action !== 'follow') return
+    api.followQueue.stats(accountId).then(setQueueStats)
+  }, [accountId, action])
+
+  // fetchAndEnqueue 中の進捗イベントを受信
+  useEffect(() => {
+    if (action !== 'follow') return
+    const unsub = api.on('followQueue:fetchProgress', (data: unknown) => {
+      const d = data as { fetched: number }
+      setFetchProgress(d.fetched)
+    })
+    return unsub
+  }, [action])
+
+  const handleSave = async () => {
+    if (form.min_interval > form.max_interval) {
+      alert('最小間隔は最大間隔以下にしてください')
+      return
+    }
+    setSaving(true)
+    const saved = await api.autoEngagement.save({
+      account_id:       accountId,
+      action,
+      target_usernames: form.target_usernames,
+      enabled:          form.enabled,
+      min_interval:     form.min_interval,
+      max_interval:     form.max_interval,
+    })
+    setConfig(saved)
+    setSaving(false)
+  }
+
+  const handleResetNext = async () => {
+    setResetting(true)
+    await api.autoEngagement.resetNext(accountId, action)
+    setConfig((prev) => prev ? { ...prev, next_at: null } : prev)
+    setResetting(false)
+  }
+
+  const handleFetchAndEnqueue = async () => {
+    if (!competitorName.trim()) return
+    setFetching(true)
+    setFetchProgress(0)
+    setFetchMsg(null)
+    const result = await api.followQueue.fetchAndEnqueue(accountId, competitorName)
+    setFetching(false)
+    setFetchProgress(null)
+    if (result.error && result.added === 0) {
+      setFetchMsg({ type: 'error', text: result.error })
+    } else {
+      setFetchMsg({ type: 'ok', text: `${result.added} 件をキューに追加しました（取得 ${result.total} 件）` })
+    }
+    const stats = await api.followQueue.stats(accountId)
+    setQueueStats(stats)
+  }
+
+  const handleClearQueue = async () => {
+    if (!confirm('未処理のキューをクリアしますか？')) return
+    await api.followQueue.clearPending(accountId)
+    setFetchMsg(null)
+    const stats = await api.followQueue.stats(accountId)
+    setQueueStats(stats)
+  }
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-4">
+      <div>
+        <p className="text-sm font-semibold text-gray-800">{title}</p>
+        <p className="text-xs text-gray-400 mt-0.5">{description}</p>
+      </div>
+
+      {/* 有効/無効 */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-gray-600">有効</span>
+        <button
+          onClick={() => setForm((f) => ({ ...f, enabled: !f.enabled }))}
+          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+            form.enabled ? 'bg-blue-600' : 'bg-gray-300'
+          }`}
+        >
+          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+            form.enabled ? 'translate-x-6' : 'translate-x-1'
+          }`} />
+        </button>
+      </div>
+
+      {/* ターゲットユーザー名 */}
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-gray-600">
+          {action === 'like' ? 'ターゲットユーザー名（1名）' : 'フォロー対象ユーザー名（1行1名）'}
+        </label>
+        {action === 'like' ? (
+          <input
+            type="text"
+            value={form.target_usernames}
+            onChange={(e) => setForm((f) => ({ ...f, target_usernames: e.target.value.trim() }))}
+            placeholder="@username（@不要）"
+            className="w-full border border-gray-200 rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+        ) : (
+          <textarea
+            value={form.target_usernames}
+            onChange={(e) => setForm((f) => ({ ...f, target_usernames: e.target.value }))}
+            rows={4}
+            placeholder={"username1\nusername2\nusername3\n（@不要、1行1名）"}
+            className="w-full border border-gray-200 rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+        )}
+      </div>
+
+      {/* 実行間隔 */}
+      <div className="space-y-1">
+        <p className="text-xs font-medium text-gray-600">実行間隔（分）</p>
+        <div className="flex items-center gap-2">
+          <div className="flex-1">
+            <label className="text-xs text-gray-400">最小</label>
+            <input
+              type="number" min={1}
+              value={form.min_interval}
+              onChange={(e) => setForm((f) => ({ ...f, min_interval: Number(e.target.value) }))}
+              className="w-full border border-gray-200 rounded-lg p-1.5 text-sm"
+            />
+          </div>
+          <span className="text-gray-400 mt-4">〜</span>
+          <div className="flex-1">
+            <label className="text-xs text-gray-400">最大</label>
+            <input
+              type="number" min={1}
+              value={form.max_interval}
+              onChange={(e) => setForm((f) => ({ ...f, max_interval: Number(e.target.value) }))}
+              className="w-full border border-gray-200 rounded-lg p-1.5 text-sm"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 次回実行 */}
+      {config && (
+        <div className="flex items-center justify-between bg-gray-50 rounded-lg p-2.5">
+          <div>
+            <p className="text-xs text-gray-500">次回実行</p>
+            <p className="text-sm font-medium text-gray-700">
+              {config.next_at
+                ? new Date(config.next_at).toLocaleString('ja-JP')
+                : '有効化後すぐ実行'}
+            </p>
+          </div>
+          <button
+            onClick={handleResetNext}
+            disabled={resetting}
+            className="text-xs text-blue-500 hover:text-blue-700 disabled:opacity-40"
+          >
+            今すぐ
+          </button>
+        </div>
+      )}
+
+      {action === 'follow' && config && config.follow_idx > 0 && (
+        <p className="text-xs text-gray-400">
+          フォロー済み: {config.follow_idx} / {form.target_usernames.split('\n').filter(s => s.trim()).length} 名
+        </p>
+      )}
+
+      {/* ── 競合フォロワーキュー（follow アクションのみ） ── */}
+      {action === 'follow' && (
+        <div className="border border-blue-100 bg-blue-50 rounded-lg p-3 space-y-3">
+          <p className="text-xs font-semibold text-blue-700">競合フォロワーキュー</p>
+
+          {/* キュー統計 */}
+          {queueStats && (
+            <div className="flex gap-3 text-xs">
+              <span className="text-orange-500 font-medium">待機中 {queueStats.pending}</span>
+              <span className="text-green-600 font-medium">完了 {queueStats.done}</span>
+              {queueStats.failed > 0 && (
+                <span className="text-red-400 font-medium">失敗 {queueStats.failed}</span>
+              )}
+            </div>
+          )}
+
+          {/* 競合アカウント名入力 */}
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500">競合アカウント名（@不要）</label>
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={competitorName}
+                onChange={(e) => setCompetitorName(e.target.value.replace(/^@/, ''))}
+                onKeyDown={(e) => e.key === 'Enter' && !fetching && handleFetchAndEnqueue()}
+                placeholder="例: someaccount"
+                disabled={fetching}
+                className="flex-1 border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
+              />
+              <button
+                onClick={handleFetchAndEnqueue}
+                disabled={fetching || !competitorName.trim()}
+                className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-40 whitespace-nowrap"
+              >
+                {fetching ? '取得中...' : '取得'}
+              </button>
+            </div>
+          </div>
+
+          {/* 進捗表示 */}
+          {fetching && fetchProgress !== null && (
+            <p className="text-xs text-blue-500 animate-pulse">
+              取得中... {fetchProgress} 件
+            </p>
+          )}
+
+          {/* 結果メッセージ */}
+          {fetchMsg && (
+            <p className={`text-xs ${fetchMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+              {fetchMsg.text}
+            </p>
+          )}
+
+          {/* クリアボタン */}
+          {queueStats && queueStats.pending > 0 && (
+            <button
+              onClick={handleClearQueue}
+              className="w-full py-1 bg-gray-100 text-gray-500 rounded-lg text-xs hover:bg-gray-200"
+            >
+              待機中キューをクリア
+            </button>
+          )}
+        </div>
+      )}
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40"
+      >
+        {saving ? '保存中...' : '設定を保存'}
+      </button>
+    </div>
+  )
+}
+
+function AutoEngagementTab({ accounts }: { accounts: Account[] }) {
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
+
+  return (
+    <div className="space-y-4">
+      <select
+        value={selectedAccountId ?? ''}
+        onChange={(e) => setSelectedAccountId(Number(e.target.value) || null)}
+        className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+      >
+        <option value="">アカウントを選択</option>
+        {accounts.map((a) => (
+          <option key={a.id} value={a.id}>@{a.username}</option>
+        ))}
+      </select>
+
+      {selectedAccountId && (
+        <>
+          <AutoEngagementConfigCard
+            key={`like-${selectedAccountId}`}
+            title="自動いいね"
+            description="指定ユーザーの最新投稿に間隔ごとに1件ずついいねします"
+            action="like"
+            accountId={selectedAccountId}
+          />
+          <AutoEngagementConfigCard
+            key={`follow-${selectedAccountId}`}
+            title="自動フォロー"
+            description="リストのユーザーを順番にフォローします（間隔ごとに1名）"
+            action="follow"
+            accountId={selectedAccountId}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── Auto Reply tab ─────────────────────────────────────────────────────────────
+
+function CheckNowButton({ groupName, onDone, disabled }: { groupName: string; onDone: () => void; disabled: boolean }) {
+  const [running, setRunning] = useState(false)
+  const handleClick = async () => {
+    setRunning(true)
+    await api.autoReply.checkNow(groupName)
+    setTimeout(() => { onDone(); setRunning(false) }, 3000)
+  }
+  return (
+    <button
+      onClick={handleClick}
+      disabled={disabled || running}
+      className="text-xs text-emerald-600 border border-emerald-300 rounded px-2.5 py-1 hover:bg-emerald-50 disabled:opacity-40"
+    >
+      {running ? 'チェック中...' : '今すぐチェック'}
+    </button>
+  )
+}
+
+function AutoReplyTab({ accounts }: { accounts: Account[] }) {
+  const [groups, setGroups]         = useState<{ name: string }[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>('')
+  const [form, setForm] = useState({
+    enabled:        false,
+    check_interval: 5,
+    reply_texts:    [] as string[],
+  })
+  const [config, setConfig]     = useState<AutoReplyConfig | null>(null)
+  const [saving, setSaving]     = useState(false)
+  const [newText, setNewText]   = useState('')
+  const [history, setHistory]   = useState<AutoReplyRecord[]>([])
+  const [templates, setTemplates] = useState<AutoReplyTemplate[]>([])
+  const [tmplName, setTmplName] = useState('')
+  const [savingTmpl, setSavingTmpl] = useState(false)
+  const csvInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    api.groups.list().then(setGroups)
+    api.autoReply.templates.list().then(setTemplates)
+  }, [])
+
+  const loadConfig = async (groupName: string) => {
+    const cfg = await api.autoReply.get(groupName)
+    setConfig(cfg)
+    if (cfg) {
+      setForm({ enabled: cfg.enabled, check_interval: cfg.check_interval, reply_texts: cfg.reply_texts })
+    } else {
+      setForm({ enabled: false, check_interval: 5, reply_texts: [] })
+    }
+    const hist = await api.autoReply.history(groupName)
+    setHistory(hist)
+  }
+
+  useEffect(() => {
+    if (selectedGroup) loadConfig(selectedGroup)
+  }, [selectedGroup])
+
+  const handleSave = async () => {
+    if (!selectedGroup) return
+    setSaving(true)
+    const saved = await api.autoReply.save({
+      group_name:     selectedGroup,
+      enabled:        form.enabled,
+      check_interval: form.check_interval,
+      reply_texts:    form.reply_texts,
+    })
+    setConfig(saved)
+    setSaving(false)
+  }
+
+  const handleAddText = () => {
+    const t = newText.trim()
+    if (!t) return
+    setForm(f => ({ ...f, reply_texts: [...f.reply_texts, t] }))
+    setNewText('')
+  }
+
+  const handleRemoveText = (idx: number) => {
+    setForm(f => ({ ...f, reply_texts: f.reply_texts.filter((_, i) => i !== idx) }))
+  }
+
+  const handleCsvImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0)
+      setForm(f => {
+        const existing = new Set(f.reply_texts)
+        const merged = [...f.reply_texts, ...lines.filter(l => !existing.has(l))]
+        return { ...f, reply_texts: merged }
+      })
+    }
+    reader.readAsText(file, 'utf-8')
+    e.target.value = ''
+  }
+
+  const handleSaveTemplate = async () => {
+    if (!tmplName.trim() || form.reply_texts.length === 0) return
+    setSavingTmpl(true)
+    const saved = await api.autoReply.templates.save(tmplName.trim(), form.reply_texts)
+    setTemplates(prev => {
+      const idx = prev.findIndex(t => t.id === saved.id)
+      return idx >= 0 ? prev.map((t, i) => i === idx ? saved : t) : [saved, ...prev]
+    })
+    setTmplName('')
+    setSavingTmpl(false)
+  }
+
+  const handleLoadTemplate = (tmpl: AutoReplyTemplate) => {
+    setForm(f => ({ ...f, reply_texts: tmpl.reply_texts }))
+  }
+
+  const handleDeleteTemplate = async (id: number) => {
+    await api.autoReply.templates.delete(id)
+    setTemplates(prev => prev.filter(t => t.id !== id))
+  }
+
+  const statusLabel = (s: AutoReplyRecord['status']) => {
+    if (s === 'replied') return <span className="text-green-600 text-xs">返信済</span>
+    if (s === 'skipped') return <span className="text-amber-500 text-xs">スキップ</span>
+    return <span className="text-gray-400 text-xs">待機中</span>
+  }
+
+  const groupAccounts = accounts.filter(a => a.group_name === selectedGroup)
+
+  return (
+    <div className="space-y-4">
+      {/* グループ選択 */}
+      <select
+        value={selectedGroup}
+        onChange={e => setSelectedGroup(e.target.value)}
+        className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+      >
+        <option value="">グループを選択</option>
+        {groups.map(g => (
+          <option key={g.name} value={g.name}>{g.name}</option>
+        ))}
+      </select>
+
+      {selectedGroup && (
+        <>
+          {/* アカウント一覧（表示のみ） */}
+          {groupAccounts.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {groupAccounts.map(a => (
+                <span key={a.id} className="text-xs bg-gray-100 text-gray-600 rounded px-1.5 py-0.5">@{a.username}</span>
+              ))}
+            </div>
+          )}
+
+          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-4">
+
+            {/* 有効/無効 */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-gray-600">有効</span>
+              <button
+                onClick={() => setForm(f => ({ ...f, enabled: !f.enabled }))}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${form.enabled ? 'bg-blue-600' : 'bg-gray-300'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${form.enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
+            {/* チェック頻度 */}
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-gray-600">チェック間隔（分）</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={1}
+                  value={form.check_interval}
+                  onChange={e => setForm(f => ({ ...f, check_interval: Number(e.target.value) }))}
+                  className="w-24 border border-gray-200 rounded-lg p-1.5 text-sm"
+                />
+                <span className="text-xs text-gray-400">分ごとにリプをチェック</span>
+              </div>
+            </div>
+
+            {/* 返信テキストリスト */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-gray-600">
+                  返信テキスト（ランダム選択）
+                  {form.reply_texts.length > 0 && (
+                    <span className="ml-1.5 text-gray-400 font-normal">{form.reply_texts.length}件</span>
+                  )}
+                </p>
+                <button
+                  onClick={() => csvInputRef.current?.click()}
+                  className="text-xs text-green-600 border border-green-300 rounded px-2 py-0.5 hover:bg-green-50"
+                >
+                  CSVインポート
+                </button>
+                <input
+                  ref={csvInputRef}
+                  type="file"
+                  accept=".csv,.txt"
+                  className="hidden"
+                  onChange={handleCsvImport}
+                />
+              </div>
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-0.5">
+                {form.reply_texts.map((t, i) => (
+                  <div key={i} className="flex items-start gap-2 bg-gray-50 rounded-lg px-2 py-1.5">
+                    <span className="flex-1 text-xs text-gray-700 break-all">{t}</span>
+                    <button onClick={() => handleRemoveText(i)} className="text-gray-400 hover:text-red-500 text-xs shrink-0 mt-0.5">✕</button>
+                  </div>
+                ))}
+                {form.reply_texts.length === 0 && <p className="text-xs text-gray-400">テキストがありません</p>}
+              </div>
+              <div className="flex gap-1.5">
+                <textarea
+                  value={newText}
+                  onChange={e => setNewText(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAddText() } }}
+                  placeholder="返信テキストを入力（Enterで追加）"
+                  rows={2}
+                  className="flex-1 border border-gray-200 rounded-lg p-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+                <button
+                  onClick={handleAddText}
+                  disabled={!newText.trim()}
+                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-40 self-start"
+                >
+                  追加
+                </button>
+              </div>
+            </div>
+
+            {/* テンプレート */}
+            <div className="space-y-2 border-t border-gray-100 pt-3">
+              <p className="text-xs font-medium text-gray-600">テンプレート</p>
+              {/* 保存 */}
+              <div className="flex gap-1.5">
+                <input
+                  value={tmplName}
+                  onChange={e => setTmplName(e.target.value)}
+                  placeholder="テンプレート名"
+                  className="flex-1 border border-gray-200 rounded-lg p-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                />
+                <button
+                  onClick={handleSaveTemplate}
+                  disabled={savingTmpl || !tmplName.trim() || form.reply_texts.length === 0}
+                  className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs hover:bg-indigo-700 disabled:opacity-40"
+                >
+                  現在のテキストを保存
+                </button>
+              </div>
+              {/* テンプレート一覧 */}
+              {templates.length > 0 && (
+                <div className="space-y-1">
+                  {templates.map(tmpl => (
+                    <div key={tmpl.id} className="flex items-center justify-between bg-indigo-50 rounded-lg px-2 py-1.5">
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-indigo-700 truncate">{tmpl.name}</p>
+                        <p className="text-xs text-gray-400">{tmpl.reply_texts.length}件のテキスト</p>
+                      </div>
+                      <div className="flex gap-1 shrink-0 ml-2">
+                        <button
+                          onClick={() => handleLoadTemplate(tmpl)}
+                          className="text-xs text-indigo-600 hover:text-indigo-800 px-1.5 py-0.5 rounded border border-indigo-200 hover:bg-indigo-100"
+                        >
+                          読込
+                        </button>
+                        <button
+                          onClick={() => handleDeleteTemplate(tmpl.id)}
+                          className="text-xs text-gray-400 hover:text-red-500"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {templates.length === 0 && <p className="text-xs text-gray-400">保存済みテンプレートなし</p>}
+            </div>
+
+            {/* 最終チェック + 今すぐチェック */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-400">
+                {config?.last_checked_at
+                  ? `最終チェック: ${new Date(config.last_checked_at).toLocaleString('ja-JP')}`
+                  : '未チェック'}
+              </p>
+              <CheckNowButton groupName={selectedGroup} onDone={() => loadConfig(selectedGroup)} disabled={!config} />
+            </div>
+
+            {/* 保存ボタン */}
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40"
+            >
+              {saving ? '保存中...' : '設定を保存'}
+            </button>
+          </div>
+
+          {/* 返信履歴 */}
+          {history.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-gray-600">返信履歴（最新100件）</p>
+              <div className="space-y-1.5">
+                {history.map(r => (
+                  <div key={r.id} className="bg-white border border-gray-100 rounded-lg px-3 py-2 space-y-0.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-gray-700">@{r.reply_username ?? '不明'}</span>
+                      {statusLabel(r.status)}
+                    </div>
+                    {r.reply_text && <p className="text-xs text-gray-500 truncate">{r.reply_text}</p>}
+                    <p className="text-xs text-gray-300">{new Date(r.created_at).toLocaleString('ja-JP')}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 // ── Main Scheduler page ───────────────────────────────────────────────────────
 
 function SchedulerInner({ accounts }: Props) {
-  const [tab, setTab] = useState<'schedule' | 'autopost' | 'autodm'>('schedule')
+  const [tab, setTab] = useState<'schedule' | 'autopost' | 'engagement' | 'autoreply' | 'autodm'>('schedule')
 
   const TAB_LABELS: Record<typeof tab, string> = {
-    schedule: 'スケジュール',
-    autopost: '自動投稿',
-    autodm:   '自動DM',
+    schedule:   'スケジュール',
+    autopost:   '自動投稿',
+    engagement: '自動ENG',
+    autoreply:  '自動返信',
+    autodm:     '自動DM',
   }
 
   return (
@@ -764,12 +1768,12 @@ function SchedulerInner({ accounts }: Props) {
       <h2 className="text-lg font-bold text-gray-800">スケジュール投稿</h2>
 
       {/* タブ */}
-      <div className="flex border-b border-gray-200">
-        {(['schedule', 'autopost', 'autodm'] as const).map((t) => (
+      <div className="flex border-b border-gray-200 overflow-x-auto">
+        {(['schedule', 'autopost', 'engagement', 'autoreply', 'autodm'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               tab === t
                 ? 'border-blue-600 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -785,6 +1789,10 @@ function SchedulerInner({ accounts }: Props) {
           <ScheduleTab accounts={accounts} />
         ) : tab === 'autopost' ? (
           <AutopostTab accounts={accounts} />
+        ) : tab === 'engagement' ? (
+          <AutoEngagementTab accounts={accounts} />
+        ) : tab === 'autoreply' ? (
+          <AutoReplyTab accounts={accounts} />
         ) : (
           <AutoDmTab />
         )}

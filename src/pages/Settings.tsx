@@ -326,12 +326,19 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
   const [showAccountNumbers, setShowAccountNumbers] = useState(
     () => localStorage.getItem('showAccountNumbers') === 'true'
   )
+  const [followerCountAutoFetch, setFollowerCountAutoFetch] = useState(false)
 
   const handleToggleAccountNumbers = () => {
     const next = !showAccountNumbers
     setShowAccountNumbers(next)
     localStorage.setItem('showAccountNumbers', String(next))
     window.dispatchEvent(new Event('showAccountNumbersChanged'))
+  }
+
+  const handleToggleFollowerCountAutoFetch = async () => {
+    const next = !followerCountAutoFetch
+    setFollowerCountAutoFetch(next)
+    await api.settings.set('follower_count_auto_fetch', String(next))
   }
 
   // Load settings
@@ -344,6 +351,7 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
         login_failed:      s.discord_notify_login_failed      !== 'false',
         automation_failed: s.discord_notify_automation_failed !== 'false',
       })
+      setFollowerCountAutoFetch(s.follower_count_auto_fetch === 'true')
     })
   }, [])
 
@@ -391,16 +399,31 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
           </div>
         </div>
 
-        <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl">
-          <div>
-            <p className="text-white text-sm font-medium">アカウント番号表示</p>
-            <p className="text-zinc-500 text-xs mt-0.5">サイドバーの各アカウントに連番（1, 2, 3…）を表示</p>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl">
+            <div>
+              <p className="text-white text-sm font-medium">アカウント番号表示</p>
+              <p className="text-zinc-500 text-xs mt-0.5">サイドバーの各アカウントに連番（1, 2, 3…）を表示</p>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <span className={`text-xs font-semibold w-6 text-right transition-colors ${showAccountNumbers ? 'text-blue-400' : 'text-zinc-500'}`}>
+                {showAccountNumbers ? 'ON' : 'OFF'}
+              </span>
+              <Toggle checked={showAccountNumbers} onChange={handleToggleAccountNumbers} size="md" />
+            </div>
           </div>
-          <div className="flex items-center gap-2.5 shrink-0">
-            <span className={`text-xs font-semibold w-6 text-right transition-colors ${showAccountNumbers ? 'text-blue-400' : 'text-zinc-500'}`}>
-              {showAccountNumbers ? 'ON' : 'OFF'}
-            </span>
-            <Toggle checked={showAccountNumbers} onChange={handleToggleAccountNumbers} size="md" />
+
+          <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl">
+            <div>
+              <p className="text-white text-sm font-medium">フォロワー数自動取得</p>
+              <p className="text-zinc-500 text-xs mt-0.5">起動時と6時間ごとにフォロワー数を自動取得してサイドバーに表示</p>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <span className={`text-xs font-semibold w-6 text-right transition-colors ${followerCountAutoFetch ? 'text-blue-400' : 'text-zinc-500'}`}>
+                {followerCountAutoFetch ? 'ON' : 'OFF'}
+              </span>
+              <Toggle checked={followerCountAutoFetch} onChange={handleToggleFollowerCountAutoFetch} size="md" />
+            </div>
           </div>
         </div>
       </div>
@@ -523,6 +546,18 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
         <ImageGroupsSection />
       </div>
 
+      {/* Profile Icon Auto-change section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <h2 className="text-white font-semibold mb-3">プロフィールアイコン自動変更</h2>
+        <ProfileIconSection />
+      </div>
+
+      {/* Stock Bulk Delete section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <h2 className="text-white font-semibold mb-3">ストック一括削除</h2>
+        <StockBulkDeleteSection />
+      </div>
+
       {/* Proxy Template section */}
       <div className="pt-2 border-t border-zinc-800">
         <ProxyTemplateSection />
@@ -555,15 +590,19 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
 // ── Auto Register section ─────────────────────────────────────────────────────
 
 function AutoRegisterSectionInner({ onAccountAdded }: { onAccountAdded?: () => void }) {
-  const [nameStocks,  setNameStocks]  = useState('')  // one name per line
-  const [icloudEmail, setIcloudEmail] = useState('')
-  const [password,    setPassword]    = useState('')
-  const [showPw,      setShowPw]      = useState(false)
-  const [saving,      setSaving]      = useState(false)
-  const [savedMsg,    setSavedMsg]    = useState(false)
-  const [running,     setRunning]     = useState(false)
-  const [status,      setStatus]      = useState<string | null>(null)
-  const [statusType,  setStatusType]  = useState<'info' | 'success' | 'error' | 'waiting'>('info')
+  const [nameStocks,       setNameStocks]       = useState('')  // one name per line
+  const [icloudEmail,      setIcloudEmail]      = useState('')
+  const [password,         setPassword]         = useState('')
+  const [showPw,           setShowPw]           = useState(false)
+  const [saving,           setSaving]           = useState(false)
+  const [savedMsg,         setSavedMsg]         = useState(false)
+  const [running,          setRunning]          = useState(false)
+  const [status,           setStatus]           = useState<string | null>(null)
+  const [statusType,       setStatusType]       = useState<'info' | 'success' | 'error' | 'waiting'>('info')
+  const [emailTemplates,   setEmailTemplates]   = useState<string[]>([])
+  const [showEmailDD,      setShowEmailDD]      = useState(false)
+  const [newEmailInput,    setNewEmailInput]    = useState('')
+  const emailDDRef = useRef<HTMLDivElement>(null)
 
   // Proxy state
   const [proxyType,     setProxyType]     = useState<'none' | 'http' | 'https' | 'socks5'>('none')
@@ -594,8 +633,40 @@ function AutoRegisterSectionInner({ onAccountAdded }: { onAccountAdded?: () => v
       setNameStocks(all['register_name_stocks'] ?? '')
       setIcloudEmail(all['register_icloud_email'] ?? '')
       setPassword(all['register_password'] ?? '')
+      try {
+        const list = JSON.parse(all['register_icloud_emails'] ?? '[]')
+        if (Array.isArray(list)) setEmailTemplates(list)
+      } catch { /* ignore */ }
     })
   }, [])
+
+  // ドロップダウン外クリックで閉じる
+  useEffect(() => {
+    if (!showEmailDD) return
+    const handler = (e: MouseEvent) => {
+      if (emailDDRef.current && !emailDDRef.current.contains(e.target as Node)) {
+        setShowEmailDD(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showEmailDD])
+
+  const saveEmailTemplates = async (list: string[]) => {
+    setEmailTemplates(list)
+    await api.settings.set('register_icloud_emails', JSON.stringify(list))
+  }
+
+  const handleAddEmailTemplate = async () => {
+    const v = newEmailInput.trim()
+    if (!v || emailTemplates.includes(v)) return
+    await saveEmailTemplates([...emailTemplates, v])
+    setNewEmailInput('')
+  }
+
+  const handleRemoveEmailTemplate = async (email: string) => {
+    await saveEmailTemplates(emailTemplates.filter(e => e !== email))
+  }
 
   // Listen for status events from backend
   useEffect(() => {
@@ -687,13 +758,71 @@ function AutoRegisterSectionInner({ onAccountAdded }: { onAccountAdded?: () => v
         {/* iCloud email */}
         <div>
           <label className="text-zinc-400 text-xs font-medium block mb-1">iCloudメアド</label>
-          <input
-            type="email"
-            value={icloudEmail}
-            onChange={(e) => setIcloudEmail(e.target.value)}
-            placeholder="yourname@icloud.com"
-            className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
-          />
+          <div className="flex gap-2">
+            <input
+              type="email"
+              value={icloudEmail}
+              onChange={(e) => setIcloudEmail(e.target.value)}
+              placeholder="yourname@icloud.com"
+              className="flex-1 bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+            />
+            <div className="relative" ref={emailDDRef}>
+              <button
+                type="button"
+                onClick={() => setShowEmailDD(v => !v)}
+                className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-xl border border-zinc-600 whitespace-nowrap"
+              >
+                テンプレ ▾
+              </button>
+              {showEmailDD && (
+                <div className="absolute right-0 top-full mt-1 w-72 bg-zinc-800 border border-zinc-700 rounded-xl shadow-xl z-50 overflow-hidden">
+                  {/* メアド一覧 */}
+                  <div className="max-h-48 overflow-y-auto">
+                    {emailTemplates.length === 0 ? (
+                      <p className="text-zinc-500 text-xs px-3 py-3 text-center">テンプレなし</p>
+                    ) : (
+                      emailTemplates.map((email) => (
+                        <div key={email} className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-700 group">
+                          <button
+                            type="button"
+                            onClick={() => { setIcloudEmail(email); setShowEmailDD(false) }}
+                            className="flex-1 text-left text-sm text-zinc-200 truncate"
+                          >
+                            {email}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveEmailTemplate(email)}
+                            className="text-zinc-600 hover:text-red-400 text-xs px-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  {/* 追加欄 */}
+                  <div className="border-t border-zinc-700 px-2 py-2 flex gap-1">
+                    <input
+                      type="email"
+                      value={newEmailInput}
+                      onChange={(e) => setNewEmailInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddEmailTemplate() } }}
+                      placeholder="追加するメアド"
+                      className="flex-1 bg-zinc-900 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddEmailTemplate}
+                      className="px-2 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg"
+                    >
+                      追加
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Password */}
@@ -1454,6 +1583,351 @@ export function ImageGroupsSection() {
           )
         })}
       </div>
+    </div>
+  )
+}
+
+// ── Profile Icon Auto-change section ────────────────────────────────────────
+
+export function StockBulkDeleteSection() {
+  const [accounts, setAccounts] = useState<import('../lib/ipc').Account[]>([])
+  const [groups,   setGroups]   = useState<import('../lib/ipc').Group[]>([])
+  const [groupKey, setGroupKey] = useState<string>('__all__')
+  const [running,  setRunning]  = useState(false)
+  const [message,  setMessage]  = useState<{ text: string; ok: boolean } | null>(null)
+
+  useEffect(() => {
+    api.accounts.list().then(setAccounts)
+    api.groups.list().then(setGroups)
+  }, [])
+
+  const targetCount = groupKey === '__all__'
+    ? accounts.length
+    : groupKey === '__none__'
+    ? accounts.filter(a => !a.group_name).length
+    : accounts.filter(a => a.group_name === groupKey).length
+
+  const handleDeleteAll = async () => {
+    const label = groupKey === '__all__' ? '全アカウント'
+      : groupKey === '__none__' ? 'グループなし'
+      : `グループ「${groupKey}」`
+    if (!confirm(`${label}（${targetCount}件）の全ストックを削除しますか？\nこの操作は取り消せません。`)) return
+    setRunning(true)
+    setMessage(null)
+    try {
+      const res = await api.stocks.deleteAllByGroup(groupKey)
+      if (res.success) {
+        setMessage({ text: `${res.deleted}件のストックを削除しました`, ok: true })
+      } else {
+        setMessage({ text: `エラー: ${res.error}`, ok: false })
+      }
+    } catch (err) {
+      setMessage({ text: `エラー: ${err instanceof Error ? err.message : String(err)}`, ok: false })
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* グループ選択 */}
+      <div>
+        <label className="text-zinc-400 text-xs font-medium block mb-1">対象グループ</label>
+        <select
+          value={groupKey}
+          onChange={(e) => { setGroupKey(e.target.value); setMessage(null) }}
+          className="w-full px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-red-500 rounded-lg text-white text-sm outline-none transition-colors"
+        >
+          <option value="__all__">全アカウント（{accounts.length}件）</option>
+          {groups.map((g) => {
+            const count = accounts.filter(a => a.group_name === g.name).length
+            return <option key={g.name} value={g.name}>{g.name}（{count}件）</option>
+          })}
+          {accounts.some(a => !a.group_name) && (
+            <option value="__none__">グループなし（{accounts.filter(a => !a.group_name).length}件）</option>
+          )}
+        </select>
+      </div>
+
+      <button
+        onClick={handleDeleteAll}
+        disabled={running || targetCount === 0}
+        className="w-full py-2 bg-red-700 hover:bg-red-600 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+      >
+        {running ? '削除中...' : `このグループの全ストックを削除（${targetCount}件対象）`}
+      </button>
+
+      {message && (
+        <p className={`text-xs px-3 py-2 rounded-lg ${message.ok ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'}`}>
+          {message.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
+export function ProfileIconSection() {
+  const [accounts, setAccounts]   = useState<import('../lib/ipc').Account[]>([])
+  const [groups, setGroups]       = useState<import('../lib/ipc').Group[]>([])
+  const [iconGroup, setIconGroup] = useState<string[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>('__all__')
+  const [running, setRunning]     = useState(false)
+  const [results, setResults]     = useState<{ username: string; success: boolean; error?: string }[]>([])
+  const fileRef    = useRef<HTMLInputElement>(null)
+
+  // ── フォルダ一括変更 ─────────────────────────────────────────────────────
+  const [folderPath,   setFolderPath]   = useState<string>('')
+  const [folderImages, setFolderImages] = useState<string[]>([])
+  const [bulkGroup,    setBulkGroup]    = useState<string>('__all__')
+  const [bulkRunning,  setBulkRunning]  = useState(false)
+  const [bulkResults,  setBulkResults]  = useState<{ username: string; success: boolean; error?: string }[]>([])
+  const dirRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    api.accounts.list().then(setAccounts)
+    api.groups.list().then(setGroups)
+    api.imageGroups.get().then((res) => {
+      if (res.success && res.data) setIconGroup(res.data.group1)
+    })
+  }, [])
+
+  const saveIconGroup = async (urls: string[]) => {
+    setIconGroup(urls)
+    const cur = await api.imageGroups.get()
+    const current = cur.success && cur.data ? cur.data : { group1: [], group2: [] }
+    await api.imageGroups.save({ ...current, group1: urls })
+  }
+
+  const handleFileAdd = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const path = (file as File & { path: string }).path
+    saveIconGroup([...iconGroup, `file://${path}`])
+    e.target.value = ''
+  }
+
+  const handleRemove = (idx: number) => {
+    saveIconGroup(iconGroup.filter((_, i) => i !== idx))
+  }
+
+  const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    const IMAGE_EXTS = /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i
+    const paths: string[] = []
+    let folder = ''
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i] as File & { path: string }
+      if (!IMAGE_EXTS.test(f.name)) continue
+      paths.push(f.path)
+      if (!folder && f.path) {
+        folder = f.path.replace(/[/\\][^/\\]+$/, '')
+      }
+    }
+    setFolderPath(folder)
+    setFolderImages(paths)
+    e.target.value = ''
+  }
+
+  const bulkTargetAccounts = bulkGroup === '__all__'
+    ? accounts
+    : bulkGroup === '__none__'
+    ? accounts.filter(a => !a.group_name)
+    : accounts.filter(a => a.group_name === bulkGroup)
+
+  const handleBulkRun = async () => {
+    if (folderImages.length === 0) { alert('フォルダを選択してください'); return }
+    if (bulkTargetAccounts.length === 0) { alert('対象アカウントがありません'); return }
+    const label = bulkGroup === '__all__' ? '全アカウント'
+      : bulkGroup === '__none__' ? 'グループなし'
+      : `グループ「${bulkGroup}」`
+    if (!confirm(`${label}（${bulkTargetAccounts.length}件）のアイコンをフォルダ内画像（${folderImages.length}枚）からランダムに変更しますか？`)) return
+    setBulkRunning(true)
+    setBulkResults([])
+    const res: { username: string; success: boolean; error?: string }[] = []
+    for (const acc of bulkTargetAccounts) {
+      const imgPath = folderImages[Math.floor(Math.random() * folderImages.length)]
+      const r = await api.browserView.changeProfilePic(acc.id, imgPath)
+      res.push({ username: acc.username, success: r.success, error: r.error })
+      setBulkResults([...res])
+      if (r.success) await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+    setBulkRunning(false)
+  }
+
+  const targetAccounts = selectedGroup === '__all__'
+    ? accounts
+    : selectedGroup === '__none__'
+    ? accounts.filter(a => !a.group_name)
+    : accounts.filter(a => a.group_name === selectedGroup)
+
+  const handleRun = async () => {
+    if (iconGroup.length === 0) { alert('アイコン用画像を先に追加してください'); return }
+    const label = selectedGroup === '__all__' ? '全アカウント'
+      : selectedGroup === '__none__' ? 'グループなし'
+      : `グループ「${selectedGroup}」`
+    if (!confirm(`${label}（${targetAccounts.length}件）のアイコンをランダムに変更しますか？\nWebContentsView が開いているアカウントのみ変更されます。`)) return
+    setRunning(true)
+    setResults([])
+    const res: { username: string; success: boolean; error?: string }[] = []
+    for (const acc of targetAccounts) {
+      const imgPath = iconGroup[Math.floor(Math.random() * iconGroup.length)]
+      const localPath = imgPath.startsWith('file://') ? new URL(imgPath).pathname : imgPath
+      const r = await api.browserView.changeProfilePic(acc.id, localPath)
+      res.push({ username: acc.username, success: r.success, error: r.error })
+      setResults([...res])
+      if (r.success) await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+    setRunning(false)
+  }
+
+  return (
+    <div className="space-y-6">
+
+      {/* ── フォルダから一括変更（新機能） ─────────────────────────────── */}
+      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-4 space-y-3">
+        <h3 className="text-white text-sm font-semibold">フォルダから一括変更</h3>
+        <p className="text-zinc-500 text-xs">フォルダ内の画像からランダムに選んでグループ内の全垢のアイコンを変更します</p>
+
+        {/* フォルダ選択 */}
+        <div>
+          <input
+            ref={dirRef}
+            type="file"
+            // @ts-ignore webkitdirectory is non-standard
+            webkitdirectory=""
+            className="hidden"
+            onChange={handleFolderSelect}
+          />
+          <button
+            onClick={() => dirRef.current?.click()}
+            className="w-full px-2.5 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors text-left"
+          >
+            📂 フォルダを選択
+          </button>
+          {folderPath && (
+            <div className="mt-1.5 flex items-center gap-2 bg-zinc-800 rounded-lg px-2.5 py-1.5">
+              <span className="flex-1 text-zinc-400 text-[10px] font-mono truncate">{folderPath}</span>
+              <span className="shrink-0 text-emerald-400 text-[10px] font-semibold">{folderImages.length}枚</span>
+              <button
+                onClick={() => { setFolderPath(''); setFolderImages([]) }}
+                className="shrink-0 text-zinc-600 hover:text-red-400 text-xs"
+              >×</button>
+            </div>
+          )}
+        </div>
+
+        {/* グループ選択 */}
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">対象グループ</label>
+          <select
+            value={bulkGroup}
+            onChange={(e) => setBulkGroup(e.target.value)}
+            className="w-full px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-purple-500 rounded-lg text-white text-sm outline-none transition-colors"
+          >
+            <option value="__all__">全アカウント（{accounts.length}件）</option>
+            {groups.map((g) => {
+              const count = accounts.filter(a => a.group_name === g.name).length
+              return <option key={g.name} value={g.name}>{g.name}（{count}件）</option>
+            })}
+            {accounts.some(a => !a.group_name) && (
+              <option value="__none__">グループなし（{accounts.filter(a => !a.group_name).length}件）</option>
+            )}
+          </select>
+        </div>
+
+        {/* 一括変更ボタン */}
+        <button
+          onClick={handleBulkRun}
+          disabled={bulkRunning || folderImages.length === 0 || bulkTargetAccounts.length === 0}
+          className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+        >
+          {bulkRunning
+            ? `変更中... (${bulkResults.length}/${bulkTargetAccounts.length})`
+            : `一括変更（${bulkTargetAccounts.length}件）`}
+        </button>
+
+        {/* 結果表示 */}
+        {bulkResults.length > 0 && (
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {bulkResults.map((r, i) => (
+              <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-xs ${r.success ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'}`}>
+                <span>{r.success ? '✓' : '✗'}</span>
+                <span className="font-mono">@{r.username}</span>
+                {r.error && <span className="text-zinc-500 truncate">{r.error}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── 既存：画像リストから変更 ─────────────────────────────────────── */}
+      <div className="space-y-4">
+        <h3 className="text-white text-sm font-semibold">登録画像から変更</h3>
+
+        {/* アイコン画像リスト */}
+        <div>
+          <p className="text-zinc-500 text-xs mb-2">登録した画像からランダムに選んでアイコンを変更します</p>
+          <div className="space-y-1 max-h-40 overflow-y-auto mb-2">
+            {iconGroup.length === 0 && <p className="text-zinc-700 text-xs">画像なし</p>}
+            {iconGroup.map((url, i) => (
+              <div key={i} className="flex items-center gap-1.5 bg-zinc-800 rounded-lg px-2 py-1.5 group">
+                {url.startsWith('file://') && (
+                  <img src={url} className="w-6 h-6 rounded-full object-cover shrink-0" />
+                )}
+                <span className="flex-1 text-zinc-400 text-[10px] truncate font-mono">{url}</span>
+                <button onClick={() => handleRemove(i)} className="shrink-0 text-zinc-600 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition-all">×</button>
+              </div>
+            ))}
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFileAdd} />
+          <button onClick={() => fileRef.current?.click()} className="w-full px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors">
+            📁 アイコン画像を追加
+          </button>
+        </div>
+
+        {/* グループ選択 */}
+        <div>
+          <label className="text-zinc-400 text-xs font-medium block mb-1">対象グループ</label>
+          <select
+            value={selectedGroup}
+            onChange={(e) => setSelectedGroup(e.target.value)}
+            className="w-full px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-purple-500 rounded-lg text-white text-sm outline-none transition-colors"
+          >
+            <option value="__all__">全アカウント（{accounts.length}件）</option>
+            {groups.map((g) => {
+              const count = accounts.filter(a => a.group_name === g.name).length
+              return <option key={g.name} value={g.name}>{g.name}（{count}件）</option>
+            })}
+            {accounts.some(a => !a.group_name) && (
+              <option value="__none__">グループなし（{accounts.filter(a => !a.group_name).length}件）</option>
+            )}
+          </select>
+        </div>
+
+        <button
+          onClick={handleRun}
+          disabled={running || iconGroup.length === 0 || targetAccounts.length === 0}
+          className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+        >
+          {running
+            ? '変更中...'
+            : `アイコンをランダム変更（${targetAccounts.length}件）`}
+        </button>
+
+        {results.length > 0 && (
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {results.map((r, i) => (
+              <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-xs ${r.success ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'}`}>
+                <span>{r.success ? '✓' : '✗'}</span>
+                <span>@{r.username}</span>
+                {r.error && <span className="text-zinc-500 truncate">{r.error}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
     </div>
   )
 }

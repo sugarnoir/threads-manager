@@ -5,7 +5,7 @@ export interface Account {
   username: string
   display_name: string | null
   session_dir: string
-  status: 'active' | 'inactive' | 'needs_login' | 'frozen' | 'error'
+  status: 'active' | 'inactive' | 'needs_login' | 'frozen' | 'error' | 'challenge'
   avatar_url: string | null
   proxy_url: string | null
   proxy_username: string | null
@@ -13,8 +13,10 @@ export interface Account {
   group_name: string | null
   memo: string | null
   follower_count: number | null
+  follower_count_prev: number | null
   sort_order: number
   speed_preset: 'slow' | 'normal' | 'fast'
+  user_agent: string | null
   created_at: string
   updated_at: string
 }
@@ -120,6 +122,7 @@ export interface PostStock {
   content:     string
   image_url:   string | null
   image_url_2: string | null
+  topic:       string | null
   sort_order:  number
   created_at:  string
   updated_at:  string
@@ -171,7 +174,8 @@ export interface AutopostConfig {
   id:            number
   account_id:    number
   enabled:       boolean
-  mode:          'stock' | 'rewrite'
+  mode:          'stock' | 'rewrite' | 'random'
+  use_api:       boolean
   min_interval:  number
   max_interval:  number
   next_at:       string | null
@@ -182,16 +186,68 @@ export interface AutopostConfig {
   updated_at:    string
 }
 
+export interface AutoEngagementConfig {
+  id:               number
+  account_id:       number
+  action:           'like' | 'follow'
+  target_usernames: string
+  enabled:          boolean
+  min_interval:     number
+  max_interval:     number
+  next_at:          string | null
+  liked_post_ids:   string[]
+  follow_idx:       number
+  created_at:       string
+  updated_at:       string
+}
+
+export interface AutoReplyConfig {
+  id:              number
+  group_name:      string
+  enabled:         boolean
+  check_interval:  number
+  reply_texts:     string[]
+  last_checked_at: string | null
+  created_at:      string
+  updated_at:      string
+}
+
+export interface AutoReplyTemplate {
+  id:          number
+  name:        string
+  reply_texts: string[]
+  created_at:  string
+  updated_at:  string
+}
+
+export interface AutoReplyRecord {
+  id:             number
+  account_id:     number
+  parent_post_id: string
+  reply_post_id:  string
+  reply_username: string | null
+  reply_text:     string | null
+  status:         'pending' | 'replied' | 'skipped'
+  created_at:     string
+}
+
+export interface FollowQueueStats {
+  pending: number
+  done:    number
+  failed:  number
+}
+
 export interface ImageGroups {
   group1: string[]
   group2: string[]
 }
 
 export interface LicenseRow {
-  key: string
-  is_active: boolean
-  expires_at: string | null
-  memo: string | null
+  key:         string
+  is_active:   boolean
+  expires_at:  string | null
+  memo:        string | null
+  mac_address: string | null
 }
 
 export interface MasterKeyRow {
@@ -208,7 +264,8 @@ declare global {
         list:   () => Promise<{ success: boolean; data?: LicenseRow[]; error?: string }>
         create: (row: LicenseRow) => Promise<{ success: boolean; error?: string }>
         update: (data: Partial<LicenseRow> & { key: string }) => Promise<{ success: boolean; error?: string }>
-        delete: (key: string) => Promise<{ success: boolean; error?: string }>
+        delete:   (key: string) => Promise<{ success: boolean; error?: string }>
+        resetMac: (key: string) => Promise<{ success: boolean; error?: string }>
       }
       accounts: {
         list: () => Promise<Account[]>
@@ -232,6 +289,9 @@ declare global {
         updateGroup: (data: { id: number; group_name: string | null }) => Promise<{ success: boolean }>
         updateMemo: (data: { id: number; memo: string | null }) => Promise<{ success: boolean }>
         updateSpeedPreset: (data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) => Promise<{ success: boolean }>
+        updateUserAgent: (data: { id: number; user_agent: string | null }) => Promise<{ success: boolean }>
+        loginInstagram: (id: number) => Promise<{ success: boolean; hasSessionId?: boolean; error?: string }>
+        bulkLoginInstagram: (data: { group_name: string | null }) => Promise<{ success: boolean; error?: string }>
         clearCookies: (id: number) => Promise<{ success: boolean }>
         resetSession: (id: number) => Promise<{ success: boolean }>
         reorder: (updates: { id: number; sort_order: number; group_name: string | null }[]) => Promise<{ success: boolean }>
@@ -287,6 +347,7 @@ declare global {
         forward: (accountId: number) => Promise<void>
         reload: (accountId: number) => Promise<void>
         openCompose: (accountId: number, content: string, images?: string[]) => Promise<{ success: boolean; error?: string }>
+        changeProfilePic: (accountId: number, imagePath: string) => Promise<{ success: boolean; error?: string }>
       }
       settings: {
         getAll: () => Promise<Record<string, string>>
@@ -308,14 +369,18 @@ declare global {
         create: (name: string) => Promise<{ success: boolean; group: Group }>
         rename: (data: { oldName: string; newName: string }) => Promise<{ success: boolean }>
         delete: (name: string) => Promise<{ success: boolean }>
+        reorder: (updates: { id: number; sort_order: number }[]) => Promise<{ success: boolean }>
       }
       stocks: {
         list:   (accountId: number) => Promise<{ success: boolean; data: PostStock[]; error?: string }>
-        create: (data: { account_id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
-        update: (data: { id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
-        delete: (id: number) => Promise<{ success: boolean; error?: string }>
+        create: (data: { account_id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
+        update: (data: { id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) => Promise<{ success: boolean; data: PostStock; error?: string }>
+        delete:    (id: number) => Promise<{ success: boolean; error?: string }>
+        deleteAll:        (accountId: number) => Promise<{ success: boolean; deleted?: number; error?: string }>
+        deleteAllByGroup: (groupKey: string)  => Promise<{ success: boolean; deleted?: number; error?: string }>
         importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) => Promise<{ success: boolean; imported: number; errors: string[] }>
         randomizeImages: (accountId: number) => Promise<{ success: boolean; updated?: number; errors?: string[]; error?: string }>
+        updateAllTopics: (data: { account_id: number; topic: string | null }) => Promise<{ success: boolean; updated?: number; error?: string }>
         schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; error?: string }>
       }
       imageGroups: {
@@ -353,14 +418,54 @@ declare global {
         save:      (data: {
           account_id:    number
           enabled:       boolean
-          mode:          'stock' | 'rewrite'
+          mode:          'stock' | 'rewrite' | 'random'
+          use_api:       boolean
           min_interval:  number
           max_interval:  number
           rewrite_texts: string[]
         }) => Promise<AutopostConfig>
         resetNext: (accountId: number) => Promise<{ success: boolean }>
+        setNextAt: (data: { account_id: number; next_at: string }) => Promise<{ success: boolean }>
+      }
+      apiPost: {
+        send: (data: { account_id: number; content: string; image_urls?: (string | null)[]; topic?: string }) =>
+          Promise<{ success: boolean; error?: string }>
+      }
+      autoEngagement: {
+        get:       (accountId: number, action: 'like' | 'follow') => Promise<AutoEngagementConfig | null>
+        save:      (data: {
+          account_id:       number
+          action:           'like' | 'follow'
+          target_usernames: string
+          enabled:          boolean
+          min_interval:     number
+          max_interval:     number
+        }) => Promise<AutoEngagementConfig>
+        resetNext: (accountId: number, action: 'like' | 'follow') => Promise<{ success: boolean }>
+      }
+      autoReply: {
+        get:       (groupName: string) => Promise<AutoReplyConfig | null>
+        save:      (data: { group_name: string; enabled: boolean; check_interval: number; reply_texts: string[] }) => Promise<AutoReplyConfig>
+        history:   (groupName: string) => Promise<AutoReplyRecord[]>
+        checkNow:  (groupName: string) => Promise<{ success: boolean; error?: string }>
+        templates: {
+          list:   () => Promise<AutoReplyTemplate[]>
+          save:   (name: string, replyTexts: string[]) => Promise<AutoReplyTemplate>
+          delete: (id: number) => Promise<{ success: boolean }>
+        }
+      }
+      followQueue: {
+        enqueue:         (accountId: number) => Promise<{ added: number; total?: number; message?: string }>
+        fetchAndEnqueue: (accountId: number, targetUsername: string, maxCount?: number) =>
+          Promise<{ added: number; total?: number; error?: string }>
+        stats:           (accountId: number) => Promise<FollowQueueStats>
+        clearPending:    (accountId: number) => Promise<{ ok: boolean }>
+      }
+      dialog: {
+        openFile: () => Promise<{ name: string; data: number[] } | null>
       }
       on: (channel: string, callback: (...args: unknown[]) => void) => () => void
+      debugLog: (msg: string) => Promise<void>
     }
   }
 }

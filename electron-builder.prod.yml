@@ -7,7 +7,7 @@ publish:
   provider: github
   owner: sugarnoir
   repo: threads-manager
-  releaseType: release
+  releaseType: draft
 
 extraMetadata:
   authMode: "prod"

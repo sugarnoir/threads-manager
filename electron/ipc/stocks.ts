@@ -1,9 +1,14 @@
-import { ipcMain } from 'electron'
+import { ipcMain, dialog } from 'electron'
+import fs from 'fs'
+import path from 'path'
 import {
   getStocksByAccount,
   createStock,
   updateStock,
   deleteStock,
+  deleteAllStocks,
+  deleteAllStocksByGroup,
+  updateAllTopics,
 } from '../db/repositories/post_stocks'
 import { getSetting, setSetting } from '../db/repositories/settings'
 import { scheduleThread } from '../playwright/threads-client'
@@ -37,6 +42,7 @@ export function registerStockHandlers(): void {
     content:      string
     image_url?:   string | null
     image_url_2?: string | null
+    topic?:       string | null
   }) => {
     try {
       return { success: true, data: createStock(data) }
@@ -51,6 +57,7 @@ export function registerStockHandlers(): void {
     content:      string
     image_url?:   string | null
     image_url_2?: string | null
+    topic?:       string | null
   }) => {
     try {
       const { id, ...rest } = data
@@ -69,6 +76,33 @@ export function registerStockHandlers(): void {
     }
   })
 
+  ipcMain.handle('stocks:deleteAll', (_e, accountId: number) => {
+    try {
+      const deleted = deleteAllStocks(accountId)
+      return { success: true, deleted }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('stocks:deleteAllByGroup', (_e, groupKey: string) => {
+    try {
+      const deleted = deleteAllStocksByGroup(groupKey)
+      return { success: true, deleted }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('stocks:updateAllTopics', (_e, data: { account_id: number; topic: string | null }) => {
+    try {
+      const updated = updateAllTopics(data.account_id, data.topic || null)
+      return { success: true, updated }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   // rows はフロントエンドが「アカウント番号順」に解決済み（account_id 付き）
   ipcMain.handle('stocks:import-csv', (_e, rows: Array<{
     account_id:   number
@@ -76,11 +110,18 @@ export function registerStockHandlers(): void {
     image_url?:   string | null
     image_url_2?: string | null
   }>) => {
+    console.log(`[CSV import] received ${rows.length} rows`)
+    console.log(`[CSV import] account_ids=${[...new Set(rows.map(r => r.account_id))].join(',')}`)
+    console.log('[CSV import] first 3 payload:', JSON.stringify(rows.slice(0, 3), null, 2))
+
     let imported = 0
     const errors: string[] = []
 
     for (const row of rows) {
-      if (!row.content?.trim()) continue
+      if (!row.content?.trim()) {
+        console.log(`[CSV import] skip empty content for account_id=${row.account_id}`)
+        continue
+      }
       try {
         createStock({
           account_id:  row.account_id,
@@ -91,10 +132,13 @@ export function registerStockHandlers(): void {
         })
         imported++
       } catch (err) {
-        errors.push(`アカウントID ${row.account_id}: ${err instanceof Error ? err.message : String(err)}`)
+        const msg = `アカウントID ${row.account_id}: ${err instanceof Error ? err.message : String(err)}`
+        console.error('[CSV import] error:', msg)
+        errors.push(msg)
       }
     }
 
+    console.log(`[CSV import] done: imported=${imported} errors=${errors.length}`)
     return { success: true, imported, errors }
   })
 
@@ -164,5 +208,20 @@ export function registerStockHandlers(): void {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
+  })
+
+  ipcMain.handle('debug:log', (_e, msg: string) => {
+    console.log('[DEBUG]', msg)
+  })
+
+
+  ipcMain.handle('dialog:open-file', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    const filePath = result.filePaths[0]
+    const data = Array.from(fs.readFileSync(filePath))
+    return { name: path.basename(filePath), data }
   })
 }

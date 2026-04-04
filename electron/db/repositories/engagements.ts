@@ -1,10 +1,12 @@
 import { getDb } from '../index'
 
+export type EngagementAction = 'like' | 'repost' | 'api_like' | 'api_follow'
+
 export interface Engagement {
   id: number
   account_id: number
   post_url: string
-  action: 'like' | 'repost'
+  action: EngagementAction
   status: 'done' | 'failed' | 'already_done'
   error_msg: string | null
   created_at: string
@@ -19,9 +21,9 @@ export function getEngagements(limit = 100): Engagement[] {
 export function createEngagement(data: {
   account_id: number
   post_url: string
-  action: 'like' | 'repost'
+  action: EngagementAction
   status: Engagement['status']
-  error_msg?: string
+  error_msg?: string | null
 }): Engagement {
   const db = getDb()
   const result = db

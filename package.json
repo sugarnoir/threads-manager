@@ -22,15 +22,18 @@
     "electron-store": "^7.0.3",
     "electron-updater": "^6.8.3",
     "lucide-react": "^0.577.0",
+    "papaparse": "^5.5.3",
     "playwright": "^1.43.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.0",
-    "wanakana": "^5.3.1"
+    "wanakana": "^5.3.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.12.7",
+    "@types/papaparse": "^5.5.2",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.2.1",

@@ -2,10 +2,11 @@ import { ipcMain } from 'electron'
 import { getAdminSupabase } from '../lib/supabase-admin'
 
 export interface LicenseRow {
-  key: string
-  is_active: boolean
-  expires_at: string | null
-  memo: string | null
+  key:         string
+  is_active:   boolean
+  expires_at:  string | null
+  memo:        string | null
+  mac_address: string | null
 }
 
 export function registerLicenseAdminHandlers(): void {
@@ -16,7 +17,7 @@ export function registerLicenseAdminHandlers(): void {
     if (!sb) return { success: false, error: 'Service Role Key が未設定です' }
     const { data, error } = await sb
       .from('licenses')
-      .select('key, is_active, expires_at, memo')
+      .select('key, is_active, expires_at, memo, mac_address')
       .order('key')
     if (error) return { success: false, error: error.message }
     return { success: true, data: data as LicenseRow[] }
@@ -51,6 +52,15 @@ export function registerLicenseAdminHandlers(): void {
     const sb = getAdminSupabase()
     if (!sb) return { success: false, error: 'Service Role Key が未設定です' }
     const { error } = await sb.from('licenses').delete().eq('key', key)
+    if (error) return { success: false, error: error.message }
+    return { success: true }
+  })
+
+  // MACアドレスリセット（別Macへの移行時に管理者が実行）
+  ipcMain.handle('license:reset-mac', async (_e, key: string) => {
+    const sb = getAdminSupabase()
+    if (!sb) return { success: false, error: 'Service Role Key が未設定です' }
+    const { error } = await sb.from('licenses').update({ mac_address: null }).eq('key', key)
     if (error) return { success: false, error: error.message }
     return { success: true }
   })

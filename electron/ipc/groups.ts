@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { getAllGroups, createGroup, renameGroup, deleteGroup } from '../db/repositories/groups'
+import { getAllGroups, createGroup, renameGroup, deleteGroup, reorderGroups } from '../db/repositories/groups'
 
 export function registerGroupHandlers(): void {
   ipcMain.handle('groups:list', () => getAllGroups())
@@ -16,6 +16,11 @@ export function registerGroupHandlers(): void {
 
   ipcMain.handle('groups:delete', (_e, name: string) => {
     deleteGroup(name)
+    return { success: true }
+  })
+
+  ipcMain.handle('groups:reorder', (_e, updates: { id: number; sort_order: number }[]) => {
+    reorderGroups(updates)
     return { success: true }
   })
 }

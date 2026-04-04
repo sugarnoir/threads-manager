@@ -2,19 +2,20 @@ name: Build & Release
 
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'          # v1.0.8 などのタグ push でのみ起動
+  workflow_dispatch:   # 手動実行も可能
 
 permissions:
   contents: write
 
 jobs:
-  # ── Step 1: package.json の version からドラフトリリースを事前作成 ──────────
-  # 後続の Mac / Windows ビルドが同時にリリースを作ろうとする競合を防ぐ
+  # ── Step 1: ドラフトリリースを事前作成（Mac/Win の競合を防ぐ） ──────────────
   prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pkg.outputs.version }}
-      tag: ${{ steps.pkg.outputs.tag }}
+      tag:     ${{ steps.pkg.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,19 +24,19 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION"    >> $GITHUB_OUTPUT
 
       - name: Create draft release (idempotent)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.pkg.outputs.version }}
-          name: v${{ steps.pkg.outputs.version }}
-          draft: true
+          tag_name:              ${{ github.ref_name }}
+          name:                  ${{ github.ref_name }}
+          draft:                 true
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-  # ── Step 2a: macOS arm64 DMG ───────────────────────────────────────────────
+  # ── Step 2a: macOS arm64 DMG ──────────────────────────────────────────────
   build-mac:
     needs: prepare
     runs-on: macos-14   # Apple Silicon (arm64)
@@ -53,21 +54,21 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
-      - name: Build frontend + Electron
+      - name: Build frontend + Electron main process
         run: npm run build
 
-      - name: Package arm64 DMG
+      - name: Package arm64 DMG → upload to release
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          # コード署名なし（証明書がない場合はスキップ）
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN:                   ${{ secrets.GH_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # コード署名なし
         run: |
           npx electron-builder \
             --config electron-builder.prod.yml \
+            --mac \
             --arm64 \
             --publish always
 
-  # ── Step 2b: Windows x64 EXE ──────────────────────────────────────────────
+  # ── Step 2b: Windows x64 NSIS インストーラー ─────────────────────────────
   build-windows:
     needs: prepare
     runs-on: windows-latest
@@ -79,16 +80,24 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      # node-gyp (better-sqlite3 のネイティブビルド) が必要とする Python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies
+        # postinstall で electron-rebuild が走り better-sqlite3 を Windows 用に再ビルド
         run: npm ci
+        env:
+          npm_config_msvs_version: '2022'
 
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
-      - name: Build frontend + Electron
+      - name: Build frontend + Electron main process
         run: npm run build
 
-      - name: Package Windows x64 EXE
+      - name: Package Windows x64 EXE → upload to release
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
@@ -98,18 +107,17 @@ jobs:
             --x64 `
             --publish always
 
-  # ── Step 3: 両ビルド完了後にドラフトを公開 ────────────────────────────────
+  # ── Step 3: 両ビルド完了後にドラフトを公開 ───────────────────────────────
   publish:
     needs: [build-mac, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Publish release
+      - name: Publish release (draft → public)
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          gh release edit "v$VERSION" \
+          gh release edit "${{ github.ref_name }}" \
             --draft=false \
             --repo sugarnoir/threads-manager

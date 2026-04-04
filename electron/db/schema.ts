@@ -124,6 +124,39 @@ export function initializeSchema(db: Database.Database): void {
   `)
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS auto_engagement_configs (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id       INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      action           TEXT NOT NULL DEFAULT 'like',
+      target_usernames TEXT NOT NULL DEFAULT '',
+      enabled          INTEGER NOT NULL DEFAULT 0,
+      min_interval     INTEGER NOT NULL DEFAULT 30,
+      max_interval     INTEGER NOT NULL DEFAULT 60,
+      next_at          TEXT,
+      liked_post_ids   TEXT NOT NULL DEFAULT '[]',
+      follow_idx       INTEGER NOT NULL DEFAULT 0,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(account_id, action)
+    );
+    CREATE INDEX IF NOT EXISTS idx_auto_engagement_account_id ON auto_engagement_configs(account_id);
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_queue (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      target_pk       TEXT NOT NULL,
+      target_username TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      followed_at     TEXT,
+      UNIQUE(account_id, target_pk)
+    );
+    CREATE INDEX IF NOT EXISTS idx_follow_queue_account_status ON follow_queue(account_id, status);
+  `)
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS proxy_presets (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       name       TEXT NOT NULL,
@@ -135,6 +168,58 @@ export function initializeSchema(db: Database.Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS auto_reply_configs (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_name      TEXT UNIQUE NOT NULL,
+      enabled         INTEGER NOT NULL DEFAULT 0,
+      check_interval  INTEGER NOT NULL DEFAULT 5,
+      reply_texts     TEXT NOT NULL DEFAULT '[]',
+      last_checked_at TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS auto_reply_templates (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL UNIQUE,
+      reply_texts TEXT NOT NULL DEFAULT '[]',
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS auto_reply_records (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      parent_post_id TEXT NOT NULL,
+      reply_post_id  TEXT NOT NULL,
+      reply_username TEXT,
+      reply_text     TEXT,
+      status         TEXT NOT NULL DEFAULT 'pending',
+      created_at     TEXT NOT NULL,
+      UNIQUE(account_id, reply_post_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_auto_reply_records_account_id ON auto_reply_records(account_id, status);
+  `)
+
+  // auto_reply_configs migration: old schema had account_id, new has group_name
+  const arCols = db.prepare("PRAGMA table_info(auto_reply_configs)").all() as { name: string }[]
+  if (arCols.some(c => c.name === 'account_id')) {
+    db.exec('DROP TABLE IF EXISTS auto_reply_configs')
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS auto_reply_configs (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name      TEXT UNIQUE NOT NULL,
+        enabled         INTEGER NOT NULL DEFAULT 0,
+        check_interval  INTEGER NOT NULL DEFAULT 5,
+        reply_texts     TEXT NOT NULL DEFAULT '[]',
+        last_checked_at TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+      )
+    `)
+  }
 
   // 既存DBへのマイグレーション
   const cols = db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]
@@ -157,6 +242,9 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('follower_count')) {
     db.exec("ALTER TABLE accounts ADD COLUMN follower_count INTEGER")
   }
+  if (!colNames.includes('follower_count_prev')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN follower_count_prev INTEGER")
+  }
   if (!colNames.includes('sort_order')) {
     db.exec("ALTER TABLE accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
     // Initialize existing rows with their current rowid order
@@ -168,6 +256,9 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('fingerprint')) {
     db.exec("ALTER TABLE accounts ADD COLUMN fingerprint TEXT")
   }
+  if (!colNames.includes('user_agent')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN user_agent TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]
@@ -176,10 +267,19 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("CREATE INDEX IF NOT EXISTS idx_post_templates_account_id ON post_templates(account_id)")
   }
 
+  // autopost_configs テーブルへの use_api カラム追加
+  const autopostCols = db.prepare("PRAGMA table_info(autopost_configs)").all() as { name: string }[]
+  if (!autopostCols.map(c => c.name).includes('use_api')) {
+    db.exec("ALTER TABLE autopost_configs ADD COLUMN use_api INTEGER NOT NULL DEFAULT 0")
+  }
+
   // post_stocks テーブルへの image_url_2 カラム追加
   const stockCols = db.prepare("PRAGMA table_info(post_stocks)").all() as { name: string }[]
   if (!stockCols.map(c => c.name).includes('image_url_2')) {
     db.exec("ALTER TABLE post_stocks ADD COLUMN image_url_2 TEXT")
+  }
+  if (!stockCols.map(c => c.name).includes('topic')) {
+    db.exec("ALTER TABLE post_stocks ADD COLUMN topic TEXT")
   }
 
   // license_keys テーブルへの user_name カラム追加

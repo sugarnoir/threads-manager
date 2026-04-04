@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { ViewManager } from '../browser-views/view-manager'
+import { ViewManager, changeProfilePicViaView } from '../browser-views/view-manager'
 
 export function registerBrowserViewHandlers(win: BrowserWindow, manager: ViewManager): void {
   manager.setOnChanged((infos) => {
@@ -41,5 +41,29 @@ export function registerBrowserViewHandlers(win: BrowserWindow, manager: ViewMan
     const result = await manager.openCompose(accountId, content, images)
     console.log('[browserView:open-compose] result=', result)
     return result
+  })
+
+  // CDP レスポンスキャプチャ
+  ipcMain.handle('browserView:enableCapture', (_e, accountId: number) => {
+    const ok = manager.enableCdpCapture(accountId)
+    return { ok }
+  })
+
+  ipcMain.handle('browserView:getCaptured', () => {
+    return manager.getCapturedData()
+  })
+
+  ipcMain.handle('browserView:getFollowerCandidates', () => {
+    return manager.getFollowerCandidates()
+  })
+
+  ipcMain.handle('browserView:clearCaptured', () => {
+    manager.clearCapturedData()
+    return { ok: true }
+  })
+
+  ipcMain.handle('browserView:changeProfilePic', (_e, accountId: number, imagePath: string) => {
+    console.log(`[IPC:changeProfilePic] called accountId=${accountId} imagePath=${imagePath}`)
+    return changeProfilePicViaView(accountId, imagePath)
   })
 }

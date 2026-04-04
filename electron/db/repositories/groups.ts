@@ -32,3 +32,11 @@ export function deleteGroup(name: string): void {
     db.prepare("UPDATE accounts SET group_name = NULL, updated_at = datetime('now') WHERE group_name = ?").run(name)
   })()
 }
+
+export function reorderGroups(updates: { id: number; sort_order: number }[]): void {
+  const db = getDb()
+  const stmt = db.prepare('UPDATE groups SET sort_order = ? WHERE id = ?')
+  db.transaction(() => {
+    for (const u of updates) stmt.run(u.sort_order, u.id)
+  })()
+}

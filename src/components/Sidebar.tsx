@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Account, Group, api } from '../lib/ipc'
+import Papa from 'papaparse'
+import * as XLSX from 'xlsx'
 
 interface Props {
   accounts: Account[]
@@ -38,6 +40,7 @@ const STATUS_COLOR: Record<Account['status'], string> = {
   needs_login: 'bg-amber-400',
   frozen:      'bg-red-500',
   error:       'bg-red-400',
+  challenge:   'bg-yellow-400',
 }
 const STATUS_LABEL: Record<Account['status'], string> = {
   active:      'ログイン中',
@@ -45,6 +48,7 @@ const STATUS_LABEL: Record<Account['status'], string> = {
   needs_login: '要ログイン',
   frozen:      '凍結',
   error:       'エラー',
+  challenge:   '要確認（人間確認）',
 }
 
 const GRADIENTS = [
@@ -176,7 +180,6 @@ export function Sidebar({
   const accountNumberMap = new Map(accounts.map((a, i) => [a.id, i + 1]))
 
   // ── CSV インポート ────────────────────────────────────────────────────────
-  const csvInputRef = useRef<HTMLInputElement>(null)
   const [csvImporting,   setCsvImporting]   = useState(false)
   const [csvToast,       setCsvToast]       = useState<{ msg: string; ok: boolean } | null>(null)
   const [csvPanelOpen,   setCsvPanelOpen]   = useState(false)
@@ -206,29 +209,28 @@ export function Sidebar({
     setCsvPanelOpen(false)
     setCsvGroupSel('__all__')
     setCsvNewGrpName('')
-    csvInputRef.current?.click()
+    handleSidebarCsvFile()
   }
 
-  const handleSidebarCsvFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
+  const handleSidebarCsvFile = async () => {
+    const fileResult = await api.dialog.openFile()
+    if (!fileResult) return
     setCsvImporting(true)
     try {
-      const text = await file.text()
-      const parseRow = (line: string): string[] => {
-        const cols: string[] = []
-        let cur = '', inQ = false
-        for (let i = 0; i < line.length; i++) {
-          const ch = line[i]
-          if (ch === '"') {
-            if (inQ && line[i + 1] === '"') { cur += '"'; i++ } else inQ = !inQ
-          } else if (ch === ',' && !inQ) { cols.push(cur); cur = '' } else { cur += ch }
-        }
-        cols.push(cur)
-        return cols
+      let matrix: string[][]
+      const buf = new Uint8Array(fileResult.data)
+
+      if (fileResult.name.endsWith('.xlsx')) {
+        const wb = XLSX.read(buf, { type: 'array' })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        matrix = (XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][])
+          .filter(row => row.some(cell => String(cell).trim() !== ''))
+          .map(row => row.map(cell => String(cell)))
+      } else {
+        const text = new TextDecoder().decode(buf)
+        const result = Papa.parse(text, { delimiter: ',', skipEmptyLines: true })
+        matrix = result.data as string[][]
       }
-      const matrix = text.split(/\r?\n/).filter(l => l.trim()).map(parseRow)
       if (matrix.length === 0) { showCsvToast('空のCSVです', false); return }
 
       const payload: Array<{ account_id: number; content: string; image_url: null; image_url_2: null }> = []
@@ -293,6 +295,28 @@ export function Sidebar({
   const [groupEdit, setGroupEdit] = useState<GroupEditState | null>(null)
   const groupInputRef = useRef<HTMLInputElement>(null)
 
+  // ── グループ一括メンバー編集 ───────────────────────────────────────────────
+  const [groupMemberEdit, setGroupMemberEdit] = useState<{ groupName: string; checkedIds: Set<number> } | null>(null)
+
+  const openGroupMemberModal = (groupName: string) => {
+    const checkedIds = new Set(accounts.filter(a => a.group_name === groupName).map(a => a.id))
+    setGroupMemberEdit({ groupName, checkedIds })
+  }
+
+  const handleGroupMemberSave = () => {
+    if (!groupMemberEdit) return
+    const { groupName, checkedIds } = groupMemberEdit
+    const changed = accounts
+      .filter(a => {
+        const inGroup = a.group_name === groupName
+        const willBeIn = checkedIds.has(a.id)
+        return inGroup !== willBeIn
+      })
+      .map(a => ({ id: a.id, sort_order: a.sort_order, group_name: checkedIds.has(a.id) ? groupName : null }))
+    if (changed.length > 0) onReorderAccounts(changed)
+    setGroupMemberEdit(null)
+  }
+
   const [groups, setGroups] = useState<Group[]>([])
   const [groupRename, setGroupRename] = useState<GroupRenameState | null>(null)
   const groupRenameRef = useRef<HTMLInputElement>(null)
@@ -345,6 +369,61 @@ export function Sidebar({
   const draggingIdRef = useRef<number | null>(null)
   const [draggingId, setDraggingId] = useState<number | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
+
+  // ── Group drag state ──────────────────────────────────────────────────────
+  const draggingGroupRef = useRef<string | null>(null)
+  const [draggingGroupName, setDraggingGroupName] = useState<string | null>(null)
+  const [groupDropTarget, setGroupDropTarget] = useState<{ name: string; position: 'before' | 'after' } | null>(null)
+
+  const handleGroupDragStart = (e: React.DragEvent, groupName: string) => {
+    draggingGroupRef.current = groupName
+    setDraggingGroupName(groupName)
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/group', groupName)
+    e.stopPropagation()
+  }
+
+  const handleGroupDragEnd = () => {
+    draggingGroupRef.current = null
+    setDraggingGroupName(null)
+    setGroupDropTarget(null)
+  }
+
+  const handleGroupDragOver = (e: React.DragEvent, groupName: string) => {
+    if (!draggingGroupRef.current || draggingGroupRef.current === groupName) return
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+    setGroupDropTarget({ name: groupName, position })
+  }
+
+  const handleGroupDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const dragName = draggingGroupRef.current
+    draggingGroupRef.current = null
+    setDraggingGroupName(null)
+    if (!dragName || !groupDropTarget || dragName === groupDropTarget.name) {
+      setGroupDropTarget(null)
+      return
+    }
+
+    const ordered = [...groups]
+    const fromIdx = ordered.findIndex(g => g.name === dragName)
+    if (fromIdx === -1) { setGroupDropTarget(null); return }
+    const [moved] = ordered.splice(fromIdx, 1)
+    let toIdx = ordered.findIndex(g => g.name === groupDropTarget.name)
+    if (toIdx === -1) { setGroupDropTarget(null); return }
+    if (groupDropTarget.position === 'after') toIdx += 1
+    ordered.splice(toIdx, 0, moved)
+
+    const updates = ordered.map((g, i) => ({ id: g.id, sort_order: (i + 1) * 1000 }))
+    setGroups(ordered.map((g, i) => ({ ...g, sort_order: (i + 1) * 1000 })))
+    api.groups.reorder(updates)
+    setGroupDropTarget(null)
+  }
 
   useEffect(() => {
     if (groupEdit) groupInputRef.current?.focus()
@@ -557,64 +636,116 @@ export function Sidebar({
             <div key={groupKey}>
               {/* Group header */}
               {groupKey !== '' && (
-                <div
-                  className={`group/header flex items-center gap-1.5 px-2 pt-3 pb-1.5 cursor-default transition-colors rounded-lg ${
-                    isGroupDrop(groupKey) ? 'bg-blue-500/10' : ''
-                  }`}
-                  onDragOver={(e) => handleGroupHeaderDragOver(e, groupKey)}
-                >
-                  {groupRename?.groupName === groupKey ? (
-                    <input
-                      ref={groupRenameRef}
-                      value={groupRename.value}
-                      onChange={(e) => setGroupRename({ ...groupRename, value: e.target.value })}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleRenameGroup()
-                        if (e.key === 'Escape') setGroupRename(null)
-                      }}
-                      onBlur={handleRenameGroup}
-                      className="px-1 py-0 text-[10px] font-semibold uppercase tracking-widest bg-zinc-800 text-white border border-blue-500 rounded outline-none w-24"
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <span className={`text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition-colors flex items-center gap-1 ${
-                      isGroupDrop(groupKey) ? 'text-blue-400' : 'text-zinc-600'
-                    }`}>
-                      <span className="opacity-60">▾</span>
-                      {groupKey}
-                    </span>
+                <>
+                  {groupDropTarget?.name === groupKey && groupDropTarget.position === 'before' && (
+                    <div className="mx-2 h-0.5 rounded-full bg-purple-500 my-0.5" />
                   )}
-                  <div className={`h-px flex-1 transition-colors ${isGroupDrop(groupKey) ? 'bg-blue-500/50' : 'bg-zinc-800'}`} />
-                  <div className="flex gap-0.5 opacity-0 group-hover/header:opacity-100 transition-opacity">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setGroupRename({ groupName: groupKey, value: groupKey }) }}
-                      title="グループ名変更"
-                      className="w-4 h-4 flex items-center justify-center text-zinc-600 hover:text-zinc-300 text-[9px] rounded"
+                  <div
+                    draggable={!groupRename || groupRename.groupName !== groupKey}
+                    onDragStart={(e) => handleGroupDragStart(e, groupKey)}
+                    onDragEnd={handleGroupDragEnd}
+                    onDragOver={(e) => {
+                      if (draggingGroupRef.current) handleGroupDragOver(e, groupKey)
+                      else handleGroupHeaderDragOver(e, groupKey)
+                    }}
+                    onDrop={(e) => {
+                      if (draggingIdRef.current !== null) handleDrop(e)
+                      else handleGroupDrop(e)
+                    }}
+                    className={`group/header flex items-center gap-1.5 px-2 pt-3 pb-1.5 cursor-default transition-colors rounded-lg ${
+                      draggingGroupName === groupKey
+                        ? 'opacity-40'
+                        : isGroupDrop(groupKey)
+                        ? 'bg-blue-500/20 ring-1 ring-inset ring-blue-500/40'
+                        : groupDropTarget?.name === groupKey
+                        ? 'bg-purple-500/10'
+                        : draggingId !== null
+                        ? 'bg-zinc-800/40 ring-1 ring-inset ring-zinc-700/60'
+                        : ''
+                    }`}
+                  >
+                    <span
+                      className="text-zinc-700 opacity-0 group-hover/header:opacity-100 cursor-grab active:cursor-grabbing text-[10px] leading-none select-none shrink-0"
+                      title="ドラッグして並び替え"
                     >
-                      ✎
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDeleteGroup(groupKey) }}
-                      title="グループ削除"
-                      className="w-4 h-4 flex items-center justify-center text-zinc-600 hover:text-red-400 text-[9px] rounded"
-                    >
-                      ✕
-                    </button>
+                      ⠿
+                    </span>
+                    {groupRename?.groupName === groupKey ? (
+                      <input
+                        ref={groupRenameRef}
+                        value={groupRename.value}
+                        onChange={(e) => setGroupRename({ ...groupRename, value: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRenameGroup()
+                          if (e.key === 'Escape') setGroupRename(null)
+                        }}
+                        onBlur={handleRenameGroup}
+                        className="px-1 py-0 text-[10px] font-semibold uppercase tracking-widest bg-zinc-800 text-white border border-blue-500 rounded outline-none w-24"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <span
+                        className={`text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer hover:text-zinc-300 ${
+                          isGroupDrop(groupKey) ? 'text-blue-400' : 'text-zinc-600'
+                        }`}
+                        title="クリックしてメンバーを一括設定"
+                        onClick={(e) => { e.stopPropagation(); if (!draggingId) openGroupMemberModal(groupKey) }}
+                      >
+                        <span className="opacity-60">▾</span>
+                        {groupKey}
+                      </span>
+                    )}
+                    <div className={`h-px flex-1 transition-colors ${isGroupDrop(groupKey) ? 'bg-blue-500/50' : 'bg-zinc-800'}`} />
+                    <div className="flex gap-0.5 opacity-0 group-hover/header:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openGroupMemberModal(groupKey) }}
+                        title="メンバーを一括設定"
+                        className="w-4 h-4 flex items-center justify-center text-zinc-600 hover:text-blue-400 text-[9px] rounded"
+                      >
+                        ☰
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setGroupRename({ groupName: groupKey, value: groupKey }) }}
+                        title="グループ名変更"
+                        className="w-4 h-4 flex items-center justify-center text-zinc-600 hover:text-zinc-300 text-[9px] rounded"
+                      >
+                        ✎
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteGroup(groupKey) }}
+                        title="グループ削除"
+                        className="w-4 h-4 flex items-center justify-center text-zinc-600 hover:text-red-400 text-[9px] rounded"
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </div>
-                </div>
+                  {groupDropTarget?.name === groupKey && groupDropTarget.position === 'after' && (
+                    <div className="mx-2 h-0.5 rounded-full bg-purple-500 my-0.5" />
+                  )}
+                </>
               )}
 
               {/* Ungrouped label */}
               {groupKey === '' && allGroupNames.length > 0 && (
                 <div
-                  className={`flex items-center gap-1.5 px-2 pt-2 pb-1.5 ${isGroupDrop('') ? 'bg-blue-500/10 rounded-lg' : ''}`}
+                  className={`flex items-center gap-1.5 px-2 pt-2 pb-1.5 rounded-lg transition-colors ${
+                    isGroupDrop('')
+                      ? 'bg-blue-500/20 ring-1 ring-inset ring-blue-500/40'
+                      : draggingId !== null
+                      ? 'bg-zinc-800/40 ring-1 ring-inset ring-zinc-700/60'
+                      : ''
+                  }`}
                   onDragOver={(e) => handleGroupHeaderDragOver(e, '')}
+                  onDrop={handleDrop}
                 >
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-700 flex items-center gap-1">
+                  <span className={`text-[10px] font-semibold uppercase tracking-wider flex items-center gap-1 transition-colors ${
+                    isGroupDrop('') ? 'text-blue-400' : 'text-zinc-700'
+                  }`}>
                     <span className="opacity-60">▾</span>
                     グループなし
                   </span>
-                  <div className={`h-px flex-1 ${isGroupDrop('') ? 'bg-blue-500/50' : 'bg-zinc-800/60'}`} />
+                  <div className={`h-px flex-1 transition-colors ${isGroupDrop('') ? 'bg-blue-500/50' : 'bg-zinc-800/60'}`} />
                 </div>
               )}
 
@@ -682,19 +813,31 @@ export function Sidebar({
 
                       {/* Info */}
                       <div className="flex-1 min-w-0">
-                        <p className={`text-[12px] font-semibold truncate leading-tight ${isActive ? 'text-white' : 'text-zinc-200 group-hover:text-white'}`}>
-                          {account.display_name ?? account.username}
+                        <p className={`text-[12px] font-semibold truncate leading-tight flex items-center gap-1 ${isActive ? 'text-white' : 'text-zinc-200 group-hover:text-white'}`}>
+                          <span className="truncate">{account.display_name ?? account.username}</span>
+                          {account.status === 'challenge' && (
+                            <span className="shrink-0 text-yellow-400" title="人間確認が必要です">⚠</span>
+                          )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">
                           @{account.username}
-                          {account.follower_count !== null && (
-                            <span className="ml-1 text-zinc-600">
-                              · {account.follower_count >= 10000
-                                ? `${(account.follower_count / 10000).toFixed(1)}万`
-                                : account.follower_count.toLocaleString()}
-                            </span>
-                          )}
                         </p>
+                        {account.follower_count !== null && (() => {
+                          const cur  = account.follower_count
+                          const prev = account.follower_count_prev
+                          const diff = (prev !== null && prev !== undefined) ? cur - prev : null
+                          const fmt  = (n: number) => n >= 10000 ? `${(n / 10000).toFixed(1)}万` : n.toLocaleString()
+                          return (
+                            <p className="text-[9px] text-zinc-600 truncate leading-tight">
+                              フォロワー: {fmt(cur)}
+                              {diff !== null && diff !== 0 && (
+                                <span className={diff > 0 ? 'text-emerald-500' : 'text-red-500'}>
+                                  {' '}{diff > 0 ? `(+${diff})` : `(${diff})`}
+                                </span>
+                              )}
+                            </p>
+                          )
+                        })()}
                       </div>
 
                       {/* Edit button */}
@@ -813,14 +956,7 @@ export function Sidebar({
             </button>
           ))}
 
-          {/* CSV インポートボタン */}
-          <input
-            ref={csvInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            className="hidden"
-            onChange={handleSidebarCsvFile}
-          />
+          {/* CSV/xlsxインポートボタン */}
           <button
             onClick={() => { setCsvGroupSel('__all__'); setCsvNewGrpName(''); setCsvPanelOpen(v => !v) }}
             disabled={csvImporting}
@@ -890,6 +1026,76 @@ export function Sidebar({
       </div>
 
     </aside>
+
+      {/* ── Group member bulk-edit modal ── */}
+      {groupMemberEdit && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setGroupMemberEdit(null)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 w-80 shadow-2xl flex flex-col max-h-[80vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-white font-bold text-sm mb-0.5">
+              グループ「{groupMemberEdit.groupName}」
+            </h3>
+            <p className="text-zinc-500 text-xs mb-3">メンバーにするアカウントにチェックを入れてください</p>
+
+            <div className="flex-1 overflow-y-auto space-y-1 min-h-0 mb-4">
+              {accounts.map((acc) => {
+                const checked = groupMemberEdit.checkedIds.has(acc.id)
+                return (
+                  <label
+                    key={acc.id}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-zinc-800 cursor-pointer transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        const next = new Set(groupMemberEdit.checkedIds)
+                        if (checked) next.delete(acc.id)
+                        else next.add(acc.id)
+                        setGroupMemberEdit({ ...groupMemberEdit, checkedIds: next })
+                      }}
+                      className="w-3.5 h-3.5 accent-blue-500 shrink-0"
+                    />
+                    <div className="flex flex-col min-w-0">
+                      <span className="text-white text-xs font-medium truncate">
+                        {acc.display_name ?? `@${acc.username}`}
+                      </span>
+                      {acc.display_name && (
+                        <span className="text-zinc-500 text-[10px] truncate">@{acc.username}</span>
+                      )}
+                    </div>
+                    {acc.group_name && acc.group_name !== groupMemberEdit.groupName && (
+                      <span className="ml-auto shrink-0 text-[9px] text-zinc-600 bg-zinc-800 px-1.5 py-0.5 rounded">
+                        {acc.group_name}
+                      </span>
+                    )}
+                  </label>
+                )
+              })}
+            </div>
+
+            <div className="flex gap-2 shrink-0">
+              <button
+                onClick={handleGroupMemberSave}
+                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors"
+              >
+                保存（{groupMemberEdit.checkedIds.size}件）
+              </button>
+              <button
+                onClick={() => setGroupMemberEdit(null)}
+                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-sm rounded-lg transition-colors"
+              >
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Group edit modal ── */}
       {groupEdit && (

@@ -69,6 +69,13 @@ const STATUS_CONFIG: Record<AccountStatus, {
     badge: 'bg-zinc-700 text-zinc-400 border-zinc-600',
     row: '',
   },
+  challenge: {
+    label: '要確認',
+    icon: '⚠',
+    dot: 'bg-yellow-400',
+    badge: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
+    row: 'bg-yellow-500/5',
+  },
 }
 
 const GRADIENTS = [
@@ -108,9 +115,9 @@ export function StatusCheck({ accounts, onCheckOne, onCheckAll }: Props) {
 
   const counts = accounts.reduce<Record<AccountStatus, number>>(
     (acc, a) => { acc[a.status] = (acc[a.status] ?? 0) + 1; return acc },
-    { active: 0, needs_login: 0, frozen: 0, error: 0, inactive: 0 }
+    { active: 0, needs_login: 0, frozen: 0, error: 0, inactive: 0, challenge: 0 }
   )
-  const problemCount = counts.needs_login + counts.frozen + counts.error
+  const problemCount = counts.needs_login + counts.frozen + counts.error + counts.challenge
 
   // ── Check all ─────────────────────────────────────────────────────────────
 
@@ -200,6 +207,7 @@ export function StatusCheck({ accounts, onCheckOne, onCheckAll }: Props) {
           <SummaryCard status="needs_login" count={counts.needs_login} total={accounts.length} />
           <SummaryCard status="frozen"      count={counts.frozen}      total={accounts.length} />
           <SummaryCard status="error"       count={counts.error}       total={accounts.length} />
+          <SummaryCard status="challenge"   count={counts.challenge}   total={accounts.length} />
           <SummaryCard status="inactive"    count={counts.inactive}    total={accounts.length} />
         </div>
       )}

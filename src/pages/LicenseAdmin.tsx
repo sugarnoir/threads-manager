@@ -133,6 +133,18 @@ export function LicenseAdmin() {
     setLicenses((prev) => prev.filter((r) => r.key !== key))
   }
 
+  // ── MACアドレスリセット ──────────────────────────────────────────────────
+
+  const handleResetMac = async (key: string) => {
+    if (!confirm(`「${key}」のMACアドレス紐付けをリセットしますか？\n次回起動時に新しいMacで再紐付けされます。`)) return
+    const result = await api.license.resetMac(key)
+    if (!result.success) {
+      alert(result.error)
+      return
+    }
+    setLicenses((prev) => prev.map((r) => r.key === key ? { ...r, mac_address: null } : r))
+  }
+
   // ── 新規追加 ──────────────────────────────────────────────────────────────
 
   const handleAdd = async (e: React.FormEvent) => {
@@ -141,10 +153,11 @@ export function LicenseAdmin() {
     setAdding(true)
     setAddError(null)
     const result = await api.license.create({
-      key:        newKey.trim(),
-      is_active:  true,
-      expires_at: newExpires ? new Date(newExpires).toISOString() : null,
-      memo:       newMemo.trim() || null,
+      key:         newKey.trim(),
+      is_active:   true,
+      expires_at:  newExpires ? new Date(newExpires).toISOString() : null,
+      memo:        newMemo.trim() || null,
+      mac_address: null,
     })
     if (!result.success) {
       setAddError(result.error ?? '追加に失敗しました')
@@ -302,6 +315,13 @@ export function LicenseAdmin() {
                     {row.memo && (
                       <span className="text-zinc-500 text-[10px]">— {row.memo}</span>
                     )}
+                    {row.mac_address ? (
+                      <span className="text-[10px] text-emerald-700 font-mono">
+                        🔒 {row.mac_address}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-zinc-600">未紐付け</span>
+                    )}
                   </div>
                 </div>
 
@@ -312,6 +332,17 @@ export function LicenseAdmin() {
                   </span>
                   <Toggle checked={row.is_active} onChange={() => handleToggle(row)} />
                 </div>
+
+                {/* MAC reset */}
+                {row.mac_address && (
+                  <button
+                    onClick={() => handleResetMac(row.key)}
+                    className="px-1.5 py-1 text-[10px] text-zinc-500 hover:text-amber-400 border border-zinc-700 hover:border-amber-500/40 rounded transition-colors shrink-0"
+                    title="MACアドレス紐付けをリセット"
+                  >
+                    MAC解除
+                  </button>
+                )}
 
                 {/* Delete */}
                 <button

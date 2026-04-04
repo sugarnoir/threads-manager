@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react'
 import { User, Shield, FileText, Bookmark, Settings, Fingerprint } from 'lucide-react'
 import { Account, PostStock, FingerprintData, api } from '../lib/ipc'
 import { MasterKeyGate } from './MasterKeyGate'
+import Papa from 'papaparse'
+import * as XLSX from 'xlsx'
 
 interface Props {
   account: Account
@@ -49,6 +51,7 @@ const STATUS_COLOR: Record<Account['status'], string> = {
   needs_login: 'bg-amber-400',
   frozen:      'bg-red-500',
   error:       'bg-red-400',
+  challenge:   'bg-yellow-400',
 }
 const STATUS_LABEL: Record<Account['status'], string> = {
   active:      'ログイン中',
@@ -56,42 +59,19 @@ const STATUS_LABEL: Record<Account['status'], string> = {
   needs_login: '要ログイン',
   frozen:      '凍結',
   error:       'エラー',
+  challenge:   '要確認',
 }
 
 // ── Stocks tab ────────────────────────────────────────────────────────────────
 
-const STOCK_MAX = 50
+const STOCK_MAX = 500
 
 // ── CSV parser ────────────────────────────────────────────────────────────────
 
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = []
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim()
-    if (!line) continue
-    const cols: string[] = []
-    let cur = ''
-    let inQ = false
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i]
-      if (ch === '"') {
-        if (inQ && line[i + 1] === '"') { cur += '"'; i++ }
-        else inQ = !inQ
-      } else if (ch === ',' && !inQ) {
-        cols.push(cur); cur = ''
-      } else {
-        cur += ch
-      }
-    }
-    cols.push(cur)
-    rows.push(cols)
-  }
-  return rows
-}
 
 // ── StocksTab ─────────────────────────────────────────────────────────────────
 
-function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: (content: string, images: string[]) => void }) {
+function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; groupName: string | null; onUseStock?: (content: string, images: string[]) => void }) {
   const [stocks, setStocks]     = useState<PostStock[]>([])
   const [loading, setLoading]   = useState(true)
   const [editingId, setEditingId] = useState<number | 'new' | null>(null)
@@ -100,13 +80,16 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
   const [fContent, setFContent] = useState('')
   const [fImage1, setFImage1]   = useState('')  // base64 data URL
   const [fImage2, setFImage2]   = useState('')  // base64 data URL
+  const [fTopic, setFTopic]     = useState('')  // topic tag
   const [saving, setSaving]     = useState(false)
   const [error, setError]       = useState<string | null>(null)
 
-  // CSV import state
-  const csvInputRef                       = useRef<HTMLInputElement>(null)
+  // CSV/xlsx import state
   const [importing, setImporting]         = useState(false)
+  const [csvGroupAccounts, setCsvGroupAccounts] = useState<Account[]>([])
   const [randomizing, setRandomizing]     = useState(false)
+  const [bulkTopic, setBulkTopic]         = useState('')
+  const [applyingTopic, setApplyingTopic] = useState(false)
   const [toast, setToast]                 = useState<{ msg: string; ok: boolean } | null>(null)
 
   // 予約投稿モーダル state
@@ -135,45 +118,57 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
     setTimeout(() => setToast(null), 5000)
   }
 
-  const handleCsvFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
+  const handleFile = async () => {
+    const fileResult = await api.dialog.openFile()
+    if (!fileResult) return
     setImporting(true)
     try {
-      const text = await file.text()
-      // 列 = アカウント番号（1列目→アカウント1番, 2列目→アカウント2番…）
-      // 行 = 各アカウントのストック（最大50行）
-      const matrix = parseCsv(text)  // matrix[rowIdx][colIdx]
-      if (matrix.length === 0) { showToast('空のCSVです', false); return }
+      let rows: string[][]
+      const buf = new Uint8Array(fileResult.data)
 
-      const accounts = await api.accounts.list()
-      const numCols = Math.max(...matrix.map(r => r.length))
+      if (fileResult.name.endsWith('.xlsx')) {
+        const wb = XLSX.read(buf, { type: 'array' })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        rows = (XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][])
+          .filter(row => row.some(cell => String(cell).trim() !== ''))
+          .map(row => row.map(cell => String(cell)))
+      } else {
+        const text = new TextDecoder().decode(buf)
+        const result = Papa.parse(text, { delimiter: ',', skipEmptyLines: true })
+        rows = result.data as string[][]
+      }
+
+      // 先頭3行3列をメインプロセスにログ出力
+      const preview = rows.slice(0, 3).map(r => r.slice(0, 3))
+      api.debugLog(`[FILE] rows=${rows.length} groupName=${groupName} csvGroupAccounts=${csvGroupAccounts.length}`)
+      api.debugLog(`[FILE] preview 3x3: ${JSON.stringify(preview)}`)
+      if (rows.length === 0) { showToast('ファイルが空です', false); return }
 
       const payload: Array<{ account_id: number; content: string; image_url: null; image_url_2: null }> = []
-      let skippedCols = 0
 
-      for (let col = 0; col < numCols; col++) {
-        const account = accounts[col]
-        if (!account) { skippedCols++; continue }
-
-        for (let row = 0; row < matrix.length; row++) {
-          const content = matrix[row][col]?.trim() ?? ''
-          if (!content) continue
-          payload.push({ account_id: account.id, content, image_url: null, image_url_2: null })
+      if (groupName && csvGroupAccounts.length > 0) {
+        // グループあり：列インデックス = アカウントインデックス
+        for (let colIdx = 0; colIdx < csvGroupAccounts.length; colIdx++) {
+          const targetId = csvGroupAccounts[colIdx].id
+          const texts = rows.map(row => (row[colIdx] ?? '').trim()).filter(Boolean)
+          for (const content of texts) {
+            payload.push({ account_id: targetId, content, image_url: null, image_url_2: null })
+          }
+        }
+      } else {
+        // グループなし：全セルを現在のアカウントに
+        for (const row of rows) {
+          for (const cell of row) {
+            const content = cell.trim()
+            if (content) payload.push({ account_id: accountId, content, image_url: null, image_url_2: null })
+          }
         }
       }
 
       if (payload.length === 0) { showToast('インポートできるストックがありません', false); return }
-
       const res = await api.stocks.importCsv(payload)
-      const parts: string[] = [`${res.imported}件インポートしました`]
-      if (skippedCols > 0)       parts.push(`列超過スキップ: ${skippedCols}列`)
-      if (res.errors.length > 0) parts.push(`エラー: ${res.errors.length}件`)
-      showToast(parts.join(' / '), res.errors.length === 0 && skippedCols === 0)
-      if (res.errors.length > 0) console.warn('[CSV import] errors:', res.errors)
+      showToast(`${res.imported}件インポートしました` + (res.errors.length > 0 ? ` (エラー${res.errors.length}件)` : ''), res.errors.length === 0)
 
-      // 現在のアカウントのストック一覧を再取得
       const listRes = await api.stocks.list(accountId)
       if (listRes.success) setStocks(listRes.data)
     } catch (err) {
@@ -202,26 +197,70 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
     }
   }
 
-  useEffect(() => {
+  const handleDeleteAll = async () => {
+    if (stocks.length === 0) return
+    if (!confirm(`本当に全て削除しますか？（${stocks.length}件）`)) return
     try {
-      api.stocks.list(accountId)
-        .then((res) => {
-          if (res.success) setStocks(res.data)
-          setLoading(false)
-        })
-        .catch(() => setLoading(false))
-    } catch {
-      setLoading(false)
+      const res = await api.stocks.deleteAll(accountId)
+      if (res.success) {
+        setStocks([])
+        showToast(`${res.deleted}件のストックを削除しました`, true)
+      } else {
+        showToast(`エラー: ${res.error}`, false)
+      }
+    } catch (err) {
+      showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
     }
-  }, [accountId])
+  }
+
+  const handleApplyBulkTopic = async () => {
+    if (stocks.length === 0) return
+    setApplyingTopic(true)
+    try {
+      const res = await api.stocks.updateAllTopics({ account_id: accountId, topic: bulkTopic.trim() || null })
+      if (res.success) {
+        const listRes = await api.stocks.list(accountId)
+        if (listRes.success) setStocks(listRes.data)
+        showToast(`${res.updated}件のトピックを「${bulkTopic.trim() || '(クリア)'}」に更新しました`, true)
+      } else {
+        showToast(`エラー: ${res.error}`, false)
+      }
+    } catch (err) {
+      showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setApplyingTopic(false)
+    }
+  }
+
+  // マウント時：ストック・グループのアカウントをロード
+  useEffect(() => {
+    api.debugLog(`[StocksTab] useEffect fired, accountId=${accountId} groupName=${groupName}`)
+    api.stocks.list(accountId)
+      .then(res => { if (res.success) setStocks(res.data) })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+    if (groupName) {
+      api.accounts.list()
+        .then(accounts => {
+          const filtered = accounts
+            .filter(a => a.group_name === groupName)
+            .sort((a, b) => a.sort_order - b.sort_order)
+          api.debugLog(`[StocksTab] csvGroupAccounts loaded: ${filtered.length} [${filtered.map(a => a.username).join(',')}]`)
+          setCsvGroupAccounts(filtered)
+        })
+        .catch((err) => { api.debugLog(`[StocksTab] accounts.list error: ${String(err)}`) })
+    } else {
+      api.debugLog('[StocksTab] groupName is null/empty, skipping account load')
+    }
+  }, [accountId, groupName])
 
   const openNew = () => {
-    setFContent(''); setFImage1(''); setFImage2(''); setError(null)
+    setFContent(''); setFImage1(''); setFImage2(''); setFTopic(''); setError(null)
     setEditingId('new')
   }
 
   const openEdit = (s: PostStock) => {
-    setFContent(s.content); setFImage1(s.image_url ?? ''); setFImage2(s.image_url_2 ?? ''); setError(null)
+    setFContent(s.content); setFImage1(s.image_url ?? ''); setFImage2(s.image_url_2 ?? ''); setFTopic(s.topic ?? ''); setError(null)
     setEditingId(s.id)
   }
 
@@ -238,6 +277,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
           content:     fContent.trim(),
           image_url:   fImage1 || null,
           image_url_2: fImage2 || null,
+          topic:       fTopic.trim() || null,
         })
         if (!res.success) throw new Error(res.error)
         setStocks((prev) => [...prev, res.data])
@@ -248,6 +288,7 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
           content:     fContent.trim(),
           image_url:   fImage1 || null,
           image_url_2: fImage2 || null,
+          topic:       fTopic.trim() || null,
         })
         if (!res.success) throw new Error(res.error)
         setStocks((prev) => prev.map((s) => s.id === editingId ? res.data : s))
@@ -289,20 +330,19 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
           投稿ストック <span className="text-zinc-600">{stocks.length}/{STOCK_MAX}</span>
         </p>
         <div className="flex items-center gap-1.5 flex-nowrap">
-          {/* CSV import */}
-          <input
-            ref={csvInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            className="hidden"
-            onChange={handleCsvFile}
-          />
           <button
-            onClick={() => csvInputRef.current?.click()}
+            onClick={handleDeleteAll}
+            disabled={stocks.length === 0}
+            className="flex items-center gap-1 px-2.5 py-1 bg-red-800 hover:bg-red-700 disabled:opacity-50 text-red-200 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >
+            全削除
+          </button>
+          <button
+            onClick={handleFile}
             disabled={importing}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-zinc-300 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
           >
-            {importing ? '読込中...' : 'CSVインポート'}
+            {importing ? '読込中...' : 'インポート'}
           </button>
           <button
             onClick={handleRandomizeImages}
@@ -323,6 +363,43 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
         </div>
       </div>
 
+      {/* CSV 列振り分け先グループ（読み取り専用） */}
+      <div className="bg-zinc-800/60 rounded-xl px-3 py-2.5 space-y-1.5">
+        <div className="flex items-center gap-2">
+          <span className="text-zinc-400 text-xs font-semibold shrink-0">CSV列振り分け先</span>
+          {groupName ? (
+            <span className="text-white text-xs">{groupName}（{csvGroupAccounts.length}アカウント）</span>
+          ) : (
+            <span className="text-zinc-500 text-xs">グループなし → 現在のアカウントに追加</span>
+          )}
+        </div>
+        {groupName && csvGroupAccounts.length > 0 && (
+          <p className="text-zinc-500 text-[11px] leading-relaxed">
+            {csvGroupAccounts.slice(0, 5).map((a, i) => (
+              <span key={a.id}>{String.fromCharCode(65 + i)}列→@{a.username}　</span>
+            ))}
+            {csvGroupAccounts.length > 5 && <span>他{csvGroupAccounts.length - 5}アカウント</span>}
+          </p>
+        )}
+      </div>
+
+      {/* トピック一括設定 */}
+      <div className="flex items-center gap-2">
+        <input
+          value={bulkTopic}
+          onChange={(e) => setBulkTopic(e.target.value)}
+          placeholder="トピック一括設定（空欄でクリア）"
+          className="flex-1 bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+        />
+        <button
+          onClick={handleApplyBulkTopic}
+          disabled={applyingTopic || stocks.length === 0}
+          className="px-3 py-1.5 bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+        >
+          {applyingTopic ? '適用中...' : '全ストックに適用'}
+        </button>
+      </div>
+
       {/* Stock list */}
       {stocks.length === 0 && editingId === null && (
         <p className="text-zinc-600 text-xs text-center py-4">ストックがありません</p>
@@ -332,8 +409,8 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
         <div key={s.id}>
           {editingId === s.id ? (
             <StockForm
-              content={fContent} image1={fImage1} image2={fImage2}
-              onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2}
+              content={fContent} image1={fImage1} image2={fImage2} topic={fTopic}
+              onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2} onTopic={setFTopic}
               onSave={handleSave} onCancel={cancelEdit}
               saving={saving} error={error}
             />
@@ -387,8 +464,8 @@ function StocksTab({ accountId, onUseStock }: { accountId: number; onUseStock?: 
       {/* New stock form */}
       {editingId === 'new' && (
         <StockForm
-          content={fContent} image1={fImage1} image2={fImage2}
-          onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2}
+          content={fContent} image1={fImage1} image2={fImage2} topic={fTopic}
+          onContent={setFContent} onImage1={setFImage1} onImage2={setFImage2} onTopic={setFTopic}
           onSave={handleSave} onCancel={cancelEdit}
           saving={saving} error={error}
         />
@@ -585,12 +662,12 @@ function ImageUpload({ value, onChange, label }: { value: string; onChange: (v: 
 }
 
 function StockForm({
-  content, image1, image2,
-  onContent, onImage1, onImage2,
+  content, image1, image2, topic,
+  onContent, onImage1, onImage2, onTopic,
   onSave, onCancel, saving, error,
 }: {
-  content: string; image1: string; image2: string
-  onContent: (v: string) => void; onImage1: (v: string) => void; onImage2: (v: string) => void
+  content: string; image1: string; image2: string; topic: string
+  onContent: (v: string) => void; onImage1: (v: string) => void; onImage2: (v: string) => void; onTopic: (v: string) => void
   onSave: () => void; onCancel: () => void
   saving: boolean; error: string | null
 }) {
@@ -603,6 +680,12 @@ function StockForm({
         rows={3}
         maxLength={500}
         className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 resize-none"
+      />
+      <input
+        value={topic}
+        onChange={(e) => onTopic(e.target.value)}
+        placeholder="トピック（例: 大阪 枚方）"
+        className="w-full bg-zinc-700 border border-zinc-600 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500"
       />
       <div className="flex gap-2">
         <ImageUpload value={image1} onChange={onImage1} label="画像1を追加" />
@@ -717,6 +800,10 @@ export function AccountEditModal({
   const [speedPreset, setSpeedPreset] = useState<'slow' | 'normal' | 'fast'>(account.speed_preset ?? 'normal')
   const [savingSpeed, setSavingSpeed] = useState(false)
 
+  // User-Agent state
+  const [userAgent, setUserAgent] = useState(account.user_agent ?? '')
+  const [savingUA, setSavingUA] = useState(false)
+
   const handleSaveDisplayName = async () => {
     setSavingDisplayName(true)
     try {
@@ -733,6 +820,15 @@ export function AccountEditModal({
       await onSaveSpeedPreset(speedPreset)
     } finally {
       setSavingSpeed(false)
+    }
+  }
+
+  const handleSaveUserAgent = async () => {
+    setSavingUA(true)
+    try {
+      await api.accounts.updateUserAgent({ id: account.id, user_agent: userAgent.trim() || null })
+    } finally {
+      setSavingUA(false)
     }
   }
 
@@ -771,6 +867,10 @@ export function AccountEditModal({
   const [confirmReset, setConfirmReset] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [igLoggingIn, setIgLoggingIn] = useState(false)
+  const [igLoginResult, setIgLoginResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [bulkLoggingIn, setBulkLoggingIn] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; successCount: number; currentUsername?: string } | null>(null)
 
   const handleSaveProxy = async () => {
     setSavingProxy(true)
@@ -797,6 +897,54 @@ export function AccountEditModal({
       onClose()
     } finally {
       setSavingMemo(false)
+    }
+  }
+
+  const handleInstagramLogin = async () => {
+    setIgLoggingIn(true)
+    setIgLoginResult(null)
+    try {
+      const res = await api.accounts.loginInstagram(account.id)
+      if (res.success) {
+        setIgLoginResult({ ok: true, msg: res.hasSessionId ? 'instagram.com のセッションを取得しました' : 'ウィンドウを閉じました（sessionid未取得）' })
+      } else {
+        setIgLoginResult({ ok: false, msg: res.error ?? 'エラーが発生しました' })
+      }
+    } catch (e) {
+      setIgLoginResult({ ok: false, msg: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setIgLoggingIn(false)
+    }
+  }
+
+  const handleBulkLogin = async () => {
+    setBulkLoggingIn(true)
+    setBulkProgress(null)
+    const off = api.on('accounts:bulk-login-progress', (data: unknown) => {
+      const d = data as { type: string; current?: number; total?: number; successCount?: number; username?: string }
+      if (d.type === 'start') {
+        setBulkProgress({ current: 0, total: d.total ?? 0, successCount: 0 })
+      } else if (d.type === 'progress') {
+        setBulkProgress(prev => ({ ...(prev ?? { current: 0, total: d.total ?? 0, successCount: 0 }), currentUsername: d.username }))
+      } else if (d.type === 'result') {
+        const rd = data as { type: string; current?: number; total?: number; success?: boolean; username?: string }
+        setBulkProgress(prev => ({
+          current: rd.current ?? (prev?.current ?? 0),
+          total: rd.total ?? (prev?.total ?? 0),
+          successCount: (prev?.successCount ?? 0) + (rd.success ? 1 : 0),
+          currentUsername: rd.username,
+        }))
+      } else if (d.type === 'done') {
+        setBulkProgress({ current: d.total ?? 0, total: d.total ?? 0, successCount: d.successCount ?? 0 })
+        setBulkLoggingIn(false)
+      }
+    })
+    try {
+      await api.accounts.bulkLoginInstagram({ group_name: account.group_name })
+    } catch {
+      setBulkLoggingIn(false)
+    } finally {
+      off()
     }
   }
 
@@ -972,6 +1120,55 @@ export function AccountEditModal({
                   {savingSpeed ? '保存中...' : '速度設定を保存'}
                 </button>
               </div>
+
+              {/* モバイル投稿 User-Agent */}
+              <div className="border-t border-zinc-800 pt-4">
+                <label className="text-zinc-400 text-xs font-medium block mb-1">モバイル投稿 User-Agent</label>
+                <p className="text-zinc-600 text-xs mb-2">API投稿（mobilePostText / mobilePostWithMedia）に使うiPhone UAです</p>
+                <div className="grid grid-cols-2 gap-1 mb-2">
+                  {[
+                    { label: 'iPhone 14 Pro Max / iOS 17.5', ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 15 Pro / iOS 17.4',     ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 13 Pro Max / iOS 16.6', ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 14 Pro / iOS 17.2',     ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 15 Pro Max / iOS 17.3', ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 12 Pro Max / iOS 15.8', ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.8 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 13 / iOS 16.7',         ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.7 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 14 / iOS 17.1',         ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 15 / iOS 17.4.1',       ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 11 Pro / iOS 16.3',     ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone 13 mini / iOS 16.5',    ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1' },
+                    { label: 'iPhone SE 3rd / iOS 16.4',     ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1' },
+                  ].map((p) => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => setUserAgent(p.ua)}
+                      className={`text-left px-2 py-1.5 rounded-lg text-[10px] border transition-colors leading-tight ${
+                        userAgent === p.ua
+                          ? 'bg-blue-900/40 border-blue-600 text-blue-300'
+                          : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={userAgent}
+                  onChange={(e) => setUserAgent(e.target.value)}
+                  rows={2}
+                  placeholder="カスタムUAを直接入力..."
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-[10px] text-zinc-300 font-mono placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none mb-2"
+                />
+                <button
+                  onClick={handleSaveUserAgent}
+                  disabled={savingUA || userAgent === (account.user_agent ?? '')}
+                  className="w-full py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition-colors"
+                >
+                  {savingUA ? '保存中...' : 'UA設定を保存'}
+                </button>
+              </div>
             </>
           )}
 
@@ -1117,7 +1314,7 @@ export function AccountEditModal({
           )}
 
           {/* ── Stocks tab ── */}
-          {tab === 'stocks' && <StocksTab accountId={account.id} onUseStock={onUseStock} />}
+          {tab === 'stocks' && <StocksTab accountId={account.id} groupName={account.group_name} onUseStock={onUseStock} />}
 
           {/* ── Fingerprint tab ── */}
           {tab === 'fingerprint' && <FingerprintTab accountId={account.id} />}
@@ -1125,6 +1322,56 @@ export function AccountEditModal({
           {/* ── Danger tab ── */}
           {tab === 'danger' && (
             <div className="space-y-3">
+              {/* Instagram login */}
+              <div className="bg-zinc-800 rounded-xl p-4">
+                <p className="text-white text-xs font-semibold mb-1">Instagramでログイン</p>
+                <p className="text-zinc-500 text-xs mb-3">
+                  instagram.com のセッションを取得します。i.instagram.com API を使う場合に必要です。
+                </p>
+                {igLoginResult && (
+                  <p className={`text-xs font-medium mb-2 ${igLoginResult.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {igLoginResult.ok ? '✓' : '✗'} {igLoginResult.msg}
+                  </p>
+                )}
+                <div className="flex gap-2 flex-wrap">
+                  <button
+                    onClick={handleInstagramLogin}
+                    disabled={igLoggingIn || bulkLoggingIn}
+                    className="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition-all"
+                  >
+                    {igLoggingIn ? 'ログイン中...' : 'Instagramでログイン'}
+                  </button>
+                  <button
+                    onClick={handleBulkLogin}
+                    disabled={igLoggingIn || bulkLoggingIn}
+                    className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition-all"
+                  >
+                    {bulkLoggingIn ? '一括ログイン中...' : `グループ一括ログイン${account.group_name ? ` [${account.group_name}]` : ' [未分類]'}`}
+                  </button>
+                </div>
+                {bulkProgress && (
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-zinc-400 text-xs">
+                        {bulkProgress.current}/{bulkProgress.total} 完了
+                        {bulkLoggingIn && bulkProgress.currentUsername && (
+                          <span className="ml-2 text-zinc-500">— @{bulkProgress.currentUsername}</span>
+                        )}
+                      </span>
+                      {!bulkLoggingIn && (
+                        <span className="text-emerald-400 text-xs font-medium">✓ {bulkProgress.successCount}/{bulkProgress.total} 成功</span>
+                      )}
+                    </div>
+                    <div className="w-full bg-zinc-700 rounded-full h-1.5">
+                      <div
+                        className="bg-gradient-to-r from-indigo-500 to-purple-500 h-1.5 rounded-full transition-all duration-300"
+                        style={{ width: `${bulkProgress.total > 0 ? (bulkProgress.current / bulkProgress.total) * 100 : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Cookie clear */}
               <div className="bg-zinc-800 rounded-xl p-4">
                 <p className="text-white text-xs font-semibold mb-1">Cookieを削除</p>

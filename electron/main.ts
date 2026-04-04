@@ -19,8 +19,11 @@ import { registerStockHandlers } from './ipc/stocks'
 import { registerTemplateHandlers } from './ipc/templates'
 import { registerLicenseAdminHandlers } from './ipc/license-admin'
 import { registerAutopostHandlers } from './ipc/autopost'
+import { registerAutoEngagementHandlers } from './ipc/auto_engagement'
+import { registerFollowQueueHandlers } from './ipc/follow-queue'
 import { registerProxyPresetHandlers } from './ipc/proxy-presets'
 import { registerMasterKeyHandlers } from './ipc/master-key'
+import { registerAutoReplyHandlers } from './ipc/auto-reply'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 
@@ -63,6 +66,8 @@ app.whenReady().then(() => {
   registerAuthHandlers()
   registerLicenseAdminHandlers()
   registerAutopostHandlers()
+  registerAutoEngagementHandlers()
+  registerAutoReplyHandlers()
   registerProxyPresetHandlers()
   registerMasterKeyHandlers()
   registerGroupHandlers()
@@ -83,7 +88,9 @@ app.whenReady().then(() => {
     registerEngagementHandlers(mainWindow)
     registerContextHandlers(mainWindow)
     registerBrowserViewHandlers(mainWindow, viewManager)
+    registerFollowQueueHandlers(viewManager, mainWindow)
     initAutoUpdater(mainWindow)
+
 
     // Auto-start Discord Bot if enabled
     if (getSetting('discord_bot_enabled') === 'true') {
@@ -91,6 +98,7 @@ app.whenReady().then(() => {
         if (!r.ok) console.warn('[DiscordBot] auto-start failed:', r.error)
       })
     }
+
   }
 
   app.on('activate', () => {

@@ -1,9 +1,22 @@
-import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage } from 'electron'
+import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage, powerMonitor } from 'electron'
 import { toRomaji } from 'wanakana'
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
 import { getContextCookiesIfOpen } from '../playwright/browser-manager'
 import { getSetting, setSetting } from '../db/repositories/settings'
 import { getAccountById, updateAccountStatus } from '../db/repositories/accounts'
+import { sendDiscordNotification } from '../discord'
+
+/** チャレンジ（人間確認）ページのURLパターン */
+const CHALLENGE_URL_PATTERNS = [
+  '/accounts/suspended/',
+  '/challenge/',
+  'checkpoint',
+  '/accounts/login/challenge/',
+]
+
+function isChallengeUrl(url: string): boolean {
+  return CHALLENGE_URL_PATTERNS.some(p => url.includes(p))
+}
 
 const THREADS_URL = 'https://www.threads.com'
 const LOGIN_URL   = `${THREADS_URL}/login`
@@ -70,46 +83,118 @@ async function injectCookies(cookies: RawCookie[], sess: Electron.Session): Prom
 // ds_user_id Cookie → /api/v1/users/{id}/info/ → username + full_name
 
 async function fetchProfileFromInstagram(
-  cookies: Electron.Cookie[]
+  cookies: Electron.Cookie[],
+  popupWebContents?: Electron.WebContents
 ): Promise<{ username: string; displayName: string | null }> {
-  // ds_user_id はログイン中ユーザーの数値 ID (Instagram がセットする)
-  const dsUserId = cookies.find((c) => c.name === 'ds_user_id')?.value
-  if (!dsUserId) return { username: 'unknown', displayName: null }
+  const cookieNames = cookies.map(c => c.name).join(', ')
+  console.log(`[fetchProfile] total_cookies=${cookies.length} names=${cookieNames}`)
 
-  // Cookie ヘッダー文字列を構築（instagram.com / threads.com 両ドメイン分）
-  const cookieHeader = cookies
-    .filter((c) => c.value && (c.domain?.includes('instagram.com') || c.domain?.includes('threads.com')))
-    .map((c) => `${c.name}=${c.value}`)
-    .join('; ')
-
+  const dsUserId  = cookies.find((c) => c.name === 'ds_user_id')?.value
   const csrfToken = cookies.find((c) => c.name === 'csrftoken')?.value ?? ''
+  console.log(`[fetchProfile] ds_user_id=${dsUserId ?? 'NOT_FOUND'} csrfToken=${csrfToken ? csrfToken.slice(0,8)+'…' : 'NONE'}`)
 
-  try {
-    const resp = await net.fetch(
-      `https://i.instagram.com/api/v1/users/${dsUserId}/info/`,
-      {
-        headers: {
-          Cookie:         cookieHeader,
-          'X-CSRFToken':  csrfToken,
-          'X-IG-App-ID':  '936619743392459',
-          'User-Agent':   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
-        },
-      }
-    )
-    if (resp.ok) {
-      const data = await resp.json() as { user?: { username?: string; full_name?: string } }
-      const username    = data.user?.username?.trim()  || 'unknown'
-      const displayName = data.user?.full_name?.trim() || null
-      return { username, displayName }
+  // ── 1. ポップアップ内 JS で fetch（threads.com コンテキスト・Cookie 自動送信） ──
+  // ポップアップがまだ生きていればページ内から直接 API を叩く。
+  // CORS なし・sessionid の domain 問題もなし。
+  if (popupWebContents && !popupWebContents.isDestroyed()) {
+    try {
+      const result = await popupWebContents.executeJavaScript(`
+        (async () => {
+          try {
+            const r = await fetch('/api/v1/accounts/current_user/?edit=true', {
+              headers: { 'X-IG-App-ID': '238260118697367' }
+            })
+            const d = await r.json()
+            console.log('[fetchProfile:js] status=' + r.status + ' user=' + JSON.stringify(d.user))
+            return { ok: r.ok, status: r.status, username: d.user?.username || null, displayName: d.user?.full_name || null }
+          } catch(e) {
+            return { ok: false, status: 0, error: String(e) }
+          }
+        })()
+      `) as { ok: boolean; status: number; username?: string | null; displayName?: string | null; error?: string }
+      console.log(`[fetchProfile] js_fetch status=${result.status} username=${result.username ?? 'null'} error=${result.error ?? '-'}`)
+      if (result.ok && result.username) return { username: result.username, displayName: result.displayName ?? null }
+    } catch (e) {
+      console.error(`[fetchProfile] js_fetch exception: ${e}`)
     }
-  } catch { /* ネットワークエラーなど */ }
+  }
 
+  // ── 2. session.fetch() で threads.com API を叩く ──
+  const popupSession = popupWebContents && !popupWebContents.isDestroyed()
+    ? popupWebContents.session
+    : undefined
+  if (popupSession) {
+    for (const endpoint of [
+      'https://www.threads.com/api/v1/accounts/current_user/?edit=true',
+      dsUserId ? `https://www.threads.com/api/v1/users/${dsUserId}/info/` : null,
+    ]) {
+      if (!endpoint) continue
+      try {
+        const resp = await popupSession.fetch(endpoint, {
+          headers: {
+            'X-IG-App-ID': '238260118697367',
+            'X-CSRFToken': csrfToken,
+            'User-Agent':  'Barcelona 289.0.0.77.109 Android',
+          },
+        })
+        console.log(`[fetchProfile] session_fetch endpoint=${endpoint.replace('https://www.threads.com','')} status=${resp.status}`)
+        if (resp.ok) {
+          const data = await resp.json() as { user?: { username?: string; full_name?: string } }
+          const username    = data.user?.username?.trim()  || null
+          const displayName = data.user?.full_name?.trim() || null
+          console.log(`[fetchProfile] session_fetch username=${username ?? 'null'}`)
+          if (username) return { username, displayName }
+        } else {
+          const body = await resp.text().catch(() => '')
+          console.warn(`[fetchProfile] session_fetch error body=${body.slice(0, 200)}`)
+        }
+      } catch (e) {
+        console.error(`[fetchProfile] session_fetch exception: ${e}`)
+      }
+    }
+  }
+
+  // ── 3. instagram.com API（threads.com cookie + Instagram App ID）──
+  if (dsUserId) {
+    const cookieHeader = cookies
+      .filter((c) => c.value && (c.domain?.includes('instagram.com') || c.domain?.includes('threads.com')))
+      .map((c) => `${c.name}=${c.value}`)
+      .join('; ')
+    try {
+      const resp = await net.fetch(
+        `https://i.instagram.com/api/v1/users/${dsUserId}/info/`,
+        {
+          headers: {
+            Cookie:        cookieHeader,
+            'X-CSRFToken': csrfToken,
+            'X-IG-App-ID': '936619743392459',
+            'User-Agent':  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+          },
+        }
+      )
+      console.log(`[fetchProfile] ig_api status=${resp.status}`)
+      if (resp.ok) {
+        const data = await resp.json() as { user?: { username?: string; full_name?: string } }
+        const username    = data.user?.username?.trim()  || null
+        const displayName = data.user?.full_name?.trim() || null
+        console.log(`[fetchProfile] ig_api username=${username ?? 'null'}`)
+        if (username) return { username, displayName }
+      } else {
+        const body = await resp.text().catch(() => '')
+        console.warn(`[fetchProfile] ig_api error body=${body.slice(0, 200)}`)
+      }
+    } catch (e) {
+      console.error(`[fetchProfile] ig_api exception: ${e}`)
+    }
+  }
+
+  console.warn(`[fetchProfile] all methods failed, returning unknown`)
   return { username: 'unknown', displayName: null }
 }
 
 // ── StatusCheckResult ─────────────────────────────────────────────────────────
 
-export type AccountStatus = 'active' | 'needs_login' | 'frozen' | 'error'
+export type AccountStatus = 'active' | 'needs_login' | 'frozen' | 'error' | 'challenge'
 
 export interface StatusCheckResult {
   status: AccountStatus
@@ -157,17 +242,69 @@ interface ViewEntry {
   loaded:           boolean
 }
 
+export interface CapturedResponse {
+  url:          string
+  body:         string
+  timestamp:    number
+  friendlyName: string
+}
+
+export interface FollowerCandidate {
+  pk:       string
+  username: string
+}
+
 export class ViewManager {
   private views:           Map<number, ViewEntry> = new Map()
   private activeAccountId: number | null          = null
   private mainWindow:      BrowserWindow
   private onChanged:       ((infos: ViewInfo[]) => void) | null = null
 
-  private notifyTimer: ReturnType<typeof setTimeout> | null = null
-  private showQueue:   Promise<void> = Promise.resolve()
+  private notifyTimer:    ReturnType<typeof setTimeout> | null    = null
+  private showQueue:      Promise<void>                            = Promise.resolve()
+  private healthInterval: ReturnType<typeof setInterval> | null   = null
+
+  // CDP キャプチャ
+  private capturedData:       CapturedResponse[] = []
+  private cdpEnabledAccounts: Set<number>        = new Set()
 
   constructor(win: BrowserWindow) {
     this.mainWindow = win
+    this._setupPowerMonitor()
+    this._startHealthCheck()
+  }
+
+  /** スリープ復帰時に全ビューを再描画する */
+  private _setupPowerMonitor(): void {
+    powerMonitor.on('resume', () => {
+      console.log('[ViewManager] powerMonitor resume — nudging all views')
+      for (const [accountId] of this.views) {
+        this.nudgeRepaint(accountId)
+      }
+    })
+  }
+
+  /** 30秒ごとに body.offsetHeight をチェックし、0ならリロード */
+  private _startHealthCheck(): void {
+    this.healthInterval = setInterval(() => {
+      for (const [accountId, entry] of this.views) {
+        if (!entry.loaded || entry.view.webContents.isDestroyed()) continue
+        const b = entry.view.getBounds()
+        if (b.x < 0 || b.width <= 0 || b.height <= 0) continue   // offscreen/hidden
+        const url = entry.view.webContents.getURL() ?? ''
+        if (!url.includes('threads.com') || url.includes('/login')) continue
+
+        entry.view.webContents.executeJavaScript('document.body ? document.body.offsetHeight : -1')
+          .then((h: unknown) => {
+            console.log(`[ViewManager] health account=${accountId} offsetHeight=${h}`)
+            if (h === 0) {
+              console.warn(`[ViewManager] health: blank body detected for account=${accountId}, reloading`)
+              entry.view.webContents.reload()
+            }
+          })
+          .catch(() => {})
+      }
+    }, 30_000)
   }
 
   setOnChanged(cb: (infos: ViewInfo[]) => void): void {
@@ -310,9 +447,37 @@ export class ViewManager {
       }
     })
 
+    // ── 全ナビゲーション後の GPU 再描画 ─────────────────────────────────────
+    // _bgInitView の once('did-finish-load') は初回ロードのみ。
+    // navigate() や SPA 遷移後も白画面にならないよう永続リスナーで必ず nudge する。
+    view.webContents.on('did-finish-load', () => {
+      console.log(`[did-finish-load] account=${accountId} url=${view.webContents.getURL().slice(0, 80)}`)
+      setTimeout(() => this.nudgeRepaint(accountId),  100)
+      setTimeout(() => this.nudgeRepaint(accountId),  500)
+      setTimeout(() => this.nudgeRepaint(accountId), 1500)
+      setTimeout(() => this.nudgeRepaint(accountId), 3000)
+    })
+
     view.webContents.on('did-navigate', (_event, url) => {
       this.notify()
       const entry = this.views.get(accountId)
+
+      // チャレンジ（人間確認）ページ検知
+      if (isChallengeUrl(url)) {
+        console.warn(`[did-navigate] account=${accountId} challenge URL detected: ${url}`)
+        try { updateAccountStatus(accountId, 'challenge') } catch { /* DB error */ }
+        if (!this.mainWindow.isDestroyed()) {
+          this.mainWindow.webContents.send('accounts:challenge-detected', { account_id: accountId, url })
+        }
+        const acct = getAccountById(accountId)
+        sendDiscordNotification({
+          event:    'account_error',
+          username: acct?.username ?? String(accountId),
+          message:  '「人間であることを確認してください」のチャレンジページが表示されました。',
+          detail:   url,
+        }).catch(() => {})
+        return
+      }
 
       if (entry && this.isLoginUrl(url) && !entry.restoringSession) {
         // ログインページへ遷移: Cookie バックアップから自動復元を試みる
@@ -352,7 +517,30 @@ export class ViewManager {
         }).catch(() => {})
       }
     })
-    view.webContents.on('did-navigate-in-page', () => this.notify())
+    view.webContents.on('did-navigate-in-page', (_event, url) => {
+      this.notify()
+      this.nudgeRepaint(accountId)
+      // チャレンジ（人間確認）ページ検知
+      if (isChallengeUrl(url)) {
+        console.warn(`[did-navigate-in-page] account=${accountId} challenge URL detected: ${url}`)
+        try { updateAccountStatus(accountId, 'challenge') } catch { /* DB error */ }
+        if (!this.mainWindow.isDestroyed()) {
+          this.mainWindow.webContents.send('accounts:challenge-detected', { account_id: accountId, url })
+        }
+        const acct = getAccountById(accountId)
+        sendDiscordNotification({
+          event:    'account_error',
+          username: acct?.username ?? String(accountId),
+          message:  '「人間であることを確認してください」のチャレンジページが表示されました。',
+          detail:   url,
+        }).catch(() => {})
+        return
+      }
+      // スレッド投稿ページへの遷移を検出
+      if (url.includes('/post/')) {
+        console.log(`[THREAD_NAV] account=${accountId} navigated to post page: ${url}`)
+      }
+    })
     view.webContents.on('page-title-updated',   () => this.notify())
 
     // プロキシ認証（407）に自動応答する
@@ -374,7 +562,236 @@ export class ViewManager {
       }
     } catch (err) { console.error(`[makeView] proxy setup error account=${accountId}:`, err) }
 
+    // [IMG_CAPTURE] instagram/threads への画像関連POSTリクエストをログ出力
+    sess.webRequest.onBeforeRequest(
+      { urls: ['*://*.instagram.com/*', '*://*.threads.com/*', '*://*.threads.net/*'] },
+      (details, cb) => {
+        if (details.method === 'POST') {
+          const url = details.url
+          let body = ''
+          if (details.uploadData) {
+            for (const chunk of details.uploadData) {
+              if ('bytes' in chunk && chunk.bytes) {
+                try { body += Buffer.from(chunk.bytes).toString('utf8') } catch { /* binary */ }
+              }
+            }
+          }
+          console.log(`[POST_CAPTURE] account=${accountId} POST ${url}`)
+          if (body && (body.includes('LikeMutation') || body.includes('FollowMutation') || body.includes('UnlikeMutation') || body.includes('UnfollowMutation'))) {
+            console.log(`[MUTATION_CAPTURE] account=${accountId} POST ${url}`)
+            console.log(`[MUTATION_CAPTURE] body: ${body}`)
+          }
+          if (url.includes('configure_text_only_post')) {
+            console.log(`[CONFIGURE_POST_BODY] account=${accountId} body: ${body}`)
+          }
+        }
+        cb({})
+      }
+    )
+    // いいね・フォロー・GraphQL操作を広くキャプチャ
+    sess.webRequest.onBeforeSendHeaders(
+      { urls: ['*://*.threads.com/*', '*://*.instagram.com/*', '*://*.threads.net/*', '*://*.cdninstagram.com/*'] },
+      (details, cb) => {
+        if (details.method === 'POST') {
+          console.log(`[ENGAGE_CAPTURE] account=${accountId} POST ${details.url}`)
+          console.log(`[ENGAGE_CAPTURE] headers: ${JSON.stringify(details.requestHeaders)}`)
+        }
+        cb({ requestHeaders: details.requestHeaders })
+      }
+    )
+
+    // ── CDP 自動有効化 ────────────────────────────────────────────────────────
+    // makeView 時点では this.views にまだ登録されていないため、
+    // enableCdpCapture() を経由せず view を直接使ってアタッチする。
+    this.cdpEnabledAccounts.add(accountId)
+    const dbgAuto = view.webContents.debugger
+    try { dbgAuto.attach('1.3') } catch { /* already attached */ }
+    dbgAuto.sendCommand('Network.enable').catch((e: unknown) => {
+      console.error(`[CDP] Network.enable failed (auto) account=${accountId}:`, e)
+    })
+
+    // requestId → X-FB-Friendly-Name の対応表（リクエスト→レスポンス紐付け用）
+    const friendlyNames = new Map<string, string>()
+
+    dbgAuto.on('message', async (_event, method, params: Record<string, unknown>) => {
+      // ── リクエスト送信時: X-FB-Friendly-Name を記録 ──────────────────────
+      if (method === 'Network.requestWillBeSent') {
+        type ReqParams = { requestId: string; request?: { url?: string; headers?: Record<string, string>; postData?: string } }
+        const p = params as ReqParams
+        const friendlyName = p.request?.headers?.['X-FB-Friendly-Name'] ?? ''
+        if (friendlyName) friendlyNames.set(p.requestId, friendlyName)
+        // リクエストボディからクエリ名・URLを全ログ出力（一時デバッグ用）
+        if (p.request?.url?.includes('graphql') || p.request?.url?.includes('/api/v1/')) {
+          const url = p.request.url ?? ''
+          const body = p.request.postData ?? ''
+          // doc_id, __d (query name) などを抽出
+          const docId = body.match(/doc_id=([^&]+)/)?.[1] ?? ''
+          const rootField = p.request.headers?.['X-Root-Field-Name'] ?? ''
+          console.log(`[REQ_CAPTURE] account=${accountId} [${friendlyName||'?'}] ${url.slice(0,70)} doc_id=${docId} root=${rootField}`)
+          if (friendlyName === 'BarcelonaActivityFeedStoryListContainerQuery' && body) {
+            const vars = body.match(/variables=([^&]+)/)?.[1] ?? ''
+            console.log(`[NOTIF_VARS] doc_id=${docId} variables=${decodeURIComponent(vars)}`)
+          }
+          if (friendlyName === 'useBarcelonaEditProfileMutation' && body) {
+            console.log(`[DOC_ID_CAPTURE] postData: ${body}`)
+          }
+          if (url.includes('configure_text_only_post')) {
+            console.log(`[CDP_CONFIGURE_POST] account=${accountId} postData: ${body}`)
+          }
+        }
+        return
+      }
+
+      if (method !== 'Network.responseReceived') return
+      type RawResp = { url?: string }
+      const url = (params.response as RawResp | undefined)?.url ?? ''
+      if (
+        !url.includes('threads.net') &&
+        !url.includes('threads.com') &&
+        !url.includes('instagram.com')
+      ) return
+      if (
+        !url.includes('graphql') &&
+        !url.includes('/api/v1/') &&
+        !url.includes('/api/graphql')
+      ) return
+      const requestId = params.requestId as string
+      const friendlyName = friendlyNames.get(requestId) ?? ''
+      friendlyNames.delete(requestId)
+      try {
+        type BodyResult = { body: string; base64Encoded: boolean }
+        const result = await dbgAuto.sendCommand('Network.getResponseBody', { requestId }) as BodyResult
+        const bodyText = result.base64Encoded
+          ? Buffer.from(result.body, 'base64').toString('utf8')
+          : result.body
+        this.capturedData.push({ url, body: bodyText, timestamp: Date.now(), friendlyName: friendlyName || 'unknown' })
+        console.log(`[CDP] captured account=${accountId} [${friendlyName || 'unknown'}] ${url.slice(0, 60)} (${bodyText.length} bytes)`)
+
+      } catch { /* body not available */ }
+    })
+    console.log(`[CDP] auto-enabled for account=${accountId}`)
+
     return view
+  }
+
+  // ── CDP Response Capture ─────────────────────────────────────────────────
+
+  /**
+   * 指定アカウントの WebContentsView に CDP（Chrome DevTools Protocol）を
+   * アタッチし、Threads / Instagram GraphQL レスポンス本文をメモリに蓄積する。
+   * 競合アカウントのフォロワー一覧・リプライ一覧を手動操作でキャプチャする用途。
+   */
+  enableCdpCapture(accountId: number): boolean {
+    const entry = this.views.get(accountId)
+    if (!entry) return false
+    if (this.cdpEnabledAccounts.has(accountId)) return true
+
+    const dbg = entry.view.webContents.debugger
+    try {
+      dbg.attach('1.3')
+    } catch { /* already attached */ }
+
+    dbg.sendCommand('Network.enable').catch((e: unknown) => {
+      console.error('[CDP] Network.enable failed:', e)
+    })
+
+    dbg.on('message', async (_event, method, params: Record<string, unknown>) => {
+      if (method !== 'Network.responseReceived') return
+
+      type RawResp = { url?: string; mimeType?: string }
+      const url = (params.response as RawResp | undefined)?.url ?? ''
+
+      // Threads GraphQL / API エンドポイントのみキャプチャ
+      if (
+        !url.includes('threads.net') &&
+        !url.includes('threads.com') &&
+        !url.includes('instagram.com')
+      ) return
+      if (
+        !url.includes('graphql') &&
+        !url.includes('/api/v1/') &&
+        !url.includes('/api/graphql')
+      ) return
+
+      const requestId = params.requestId as string
+      try {
+        type BodyResult = { body: string; base64Encoded: boolean }
+        const result = await dbg.sendCommand('Network.getResponseBody', { requestId }) as BodyResult
+        const bodyText = result.base64Encoded
+          ? Buffer.from(result.body, 'base64').toString('utf8')
+          : result.body
+
+        this.capturedData.push({ url, body: bodyText, timestamp: Date.now(), friendlyName: 'unknown' })
+        console.log(`[CDP] captured ${url.slice(0, 80)} (${bodyText.length} bytes)`)
+      } catch { /* body not available – streaming or already consumed */ }
+    })
+
+    this.cdpEnabledAccounts.add(accountId)
+    console.log(`[ViewManager] CDP capture enabled for account=${accountId}`)
+    return true
+  }
+
+  getCapturedData(): CapturedResponse[] {
+    return this.capturedData
+  }
+
+  clearCapturedData(): void {
+    this.capturedData = []
+    console.log('[ViewManager] captured data cleared')
+  }
+
+  /**
+   * CDP キャプチャ済みレスポンスから競合アカウントのフォロワー候補を抽出する。
+   *
+   * 対象クエリ:
+   *   - BarcelonaFriendshipsFollowersTabQuery       (初回ロード)
+   *   - BarcelonaFriendshipsFollowersTabRefetchableQuery (スクロールページネーション)
+   *
+   * 条件: friendship_status.following === false のユーザーのみ返す。
+   * 重複は pk で除去。
+   */
+  getFollowerCandidates(): FollowerCandidate[] {
+    type NodeShape = {
+      pk?:               string
+      username?:         string
+      friendship_status?: { following?: boolean }
+    }
+    type EdgeShape = { node?: NodeShape }
+
+    const seen = new Set<string>()
+    const result: FollowerCandidate[] = []
+
+    for (const entry of this.capturedData) {
+      if (
+        !entry.friendlyName.includes('FriendshipsFollowersTab')
+      ) continue
+
+      let parsed: unknown
+      try { parsed = JSON.parse(entry.body) } catch { continue }
+
+      // 初回: data.user.followers.edges
+      // ページネーション: data.fetch__XDTUserDict.followers.edges
+      const data = (parsed as Record<string, unknown>)?.data as Record<string, unknown> | undefined
+      const container =
+        (data?.user as Record<string, unknown> | undefined) ??
+        (data?.fetch__XDTUserDict as Record<string, unknown> | undefined)
+
+      const edges = (container?.followers as Record<string, unknown> | undefined)
+        ?.edges as EdgeShape[] | undefined
+      if (!Array.isArray(edges)) continue
+
+      for (const edge of edges) {
+        const node = edge.node
+        if (!node?.pk || !node.username) continue
+        if (node.friendship_status?.following === true) continue  // すでにフォロー済み
+        if (seen.has(node.pk)) continue
+        seen.add(node.pk)
+        result.push({ pk: node.pk, username: node.username })
+      }
+    }
+
+    console.log(`[ViewManager] getFollowerCandidates → ${result.length} users`)
+    return result
   }
 
   /** 1 つのアカウントビューを破棄してマップから削除する */
@@ -465,12 +882,82 @@ export class ViewManager {
         clearTimeout(timer)
         if (pollInterval) clearInterval(pollInterval)
 
-        // Cookie はすでに取得済み → メインプロセスから Instagram API を直接叩く
-        // CORS なし・DOM 待機不要・他人のリンクを誤検知しない
-        const { username, displayName } = await fetchProfileFromInstagram(allCookies)
+        // Cookie はすでに取得済み → ポップアップ JS + Threads API でユーザー名取得
+        const wc = popup.isDestroyed() ? undefined : popup.webContents
+        const { username, displayName } = await fetchProfileFromInstagram(allCookies, wc)
 
         if (!popup.isDestroyed()) popup.close()
         resolve({ username, displayName })
+      }
+
+      pollInterval = setInterval(checkCookies, 1000)
+      popup.webContents.on('did-navigate',         () => checkCookies())
+      popup.webContents.on('did-navigate-in-page', () => checkCookies())
+    })
+  }
+
+  /** instagram.com のログインページを既存アカウントのセッションで開き、sessionid を取得 */
+  async startInstagramLogin(accountId: number): Promise<void> {
+    const partition = `persist:account-${accountId}`
+    const mainBounds = this.mainWindow.getBounds()
+    const popupW = 820
+    const popupH = 640
+    const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
+    const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
+
+    const popup = new BrowserWindow({
+      width: popupW, height: popupH, x, y,
+      parent: this.mainWindow,
+      modal: false,
+      title: 'Instagram にログイン',
+      titleBarStyle: 'default',
+      webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
+    })
+
+    popup.loadURL('https://www.instagram.com/accounts/login/')
+    popup.focus()
+
+    return new Promise((resolve, reject) => {
+      let done = false
+      let pollInterval: ReturnType<typeof setInterval> | null = null
+
+      const cleanup = () => {
+        clearTimeout(timer)
+        if (pollInterval) clearInterval(pollInterval)
+        if (!popup.isDestroyed()) popup.close()
+      }
+
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        cleanup()
+        reject(new Error('Instagramログインタイムアウト (5分)'))
+      }, 5 * 60 * 1000)
+
+      popup.on('closed', () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        if (pollInterval) clearInterval(pollInterval)
+        resolve()  // 手動クローズも成功扱い
+      })
+
+      const checkCookies = async () => {
+        if (done) return
+        try {
+          if (popup.isDestroyed()) return
+          const allCookies = await popup.webContents.session.cookies.get({})
+          const hasSession = allCookies.some(
+            c => c.name === 'sessionid' && c.value.length > 0 && c.domain?.includes('instagram.com')
+          )
+          if (!hasSession) return
+          done = true
+          clearTimeout(timer)
+          if (pollInterval) clearInterval(pollInterval)
+          console.log(`[InstagramLogin] account=${accountId} sessionid obtained`)
+          if (!popup.isDestroyed()) popup.close()
+          resolve()
+        } catch { return }
       }
 
       pollInterval = setInterval(checkCookies, 1000)
@@ -570,16 +1057,19 @@ export class ViewManager {
         clearTimeout(timer)
         if (pollInterval) clearInterval(pollInterval)
 
-        // Cookie はすでに取得済み → メインプロセスから Instagram API を直接叩く
+        // Cookie はすでに取得済み → ポップアップ JS + Threads API でユーザー名取得
         // 新規登録直後は ds_user_id が sessionid より遅れてセットされる場合があるため
         // username が取得できるまで最大 5 秒リトライする（ポップアップ破棄後もセッションから取得）
         const tempSess = session.fromPartition(partition)
-        let { username, displayName } = await fetchProfileFromInstagram(allCookies)
+        const popupWc = popup.isDestroyed() ? undefined : popup.webContents
+        let { username, displayName } = await fetchProfileFromInstagram(allCookies, popupWc)
         if (username === 'unknown') {
           for (let i = 0; i < 5; i++) {
             await new Promise(r => setTimeout(r, 1000))
             const fresh = await tempSess.cookies.get({}).catch(() => allCookies)
-            const res = await fetchProfileFromInstagram(fresh)
+            // リトライ時はポップアップがまだ生きていれば再利用、閉じていれば cookie のみで試みる
+            const wc = popup.isDestroyed() ? undefined : popup.webContents
+            const res = await fetchProfileFromInstagram(fresh, wc)
             if (res.username !== 'unknown') { username = res.username; displayName = res.displayName; break }
           }
         }
@@ -975,8 +1465,10 @@ export class ViewManager {
     entry.view.webContents.once('did-finish-load', () => {
       loadSucceeded = true
       console.log(`[_bgInitView] did-finish-load account=${accountId}`)
-      this.nudgeRepaint(accountId)
-      setTimeout(() => this.nudgeRepaint(accountId), 600)
+      setTimeout(() => this.nudgeRepaint(accountId),  100)
+      setTimeout(() => this.nudgeRepaint(accountId),  500)
+      setTimeout(() => this.nudgeRepaint(accountId), 1500)
+      setTimeout(() => this.nudgeRepaint(accountId), 3000)
     })
 
     // did-fail-load: リトライ処理（再帰的に登録）
@@ -1143,6 +1635,40 @@ export class ViewManager {
       entry.view.setBounds(this.calcBounds(y, height))
       try { entry.view.webContents.invalidate() } catch {}
     }
+  }
+
+  /**
+   * viewが存在しない場合バックグラウンドで作成し、
+   * threads.com が実際にロードされるまで最大30秒待機する。
+   */
+  async ensureViewLoaded(accountId: number): Promise<boolean> {
+    // まずviewを作成/ロード開始
+    const existing = this.views.get(accountId)
+    if (!existing) {
+      console.log(`[ensureView] creating background view for account=${accountId}`)
+      const view  = this.makeView(accountId)
+      const entry: ViewEntry = { view, restoringSession: false, loaded: false }
+      this.views.set(accountId, entry)
+      this.mainWindow.contentView.addChildView(view)
+      view.setBounds({ x: -1200, y: 0, width: 1000, height: 800 })
+      this._bgInitView(accountId).catch(() => {})  // fire, waitは下のポーリングで
+    }
+    // URLが threads.com になるまで最大30秒ポーリング
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      const e = this.views.get(accountId)
+      if (e && !e.view.webContents.isDestroyed()) {
+        const url = e.view.webContents.getURL() ?? ''
+        if (url.includes('threads.com') && !url.includes('/login')) {
+          // loaded フラグも確実に立てる
+          e.loaded = true
+          return true
+        }
+      }
+      await new Promise(r => setTimeout(r, 1000))
+    }
+    console.warn(`[ensureView] account=${accountId} timed out waiting for threads.com`)
+    return false
   }
 
   navigate(accountId: number, url: string): void {
@@ -1573,4 +2099,1294 @@ export function initViewManager(win: BrowserWindow): ViewManager {
 export function getViewManager(): ViewManager {
   if (!_manager) throw new Error('ViewManager not initialized')
   return _manager
+}
+
+/**
+ * ロード済み WebContentsView の JavaScript コンテキストから
+ * LSD / fbDtsg トークンを取得する。
+ * ビューが未開放の場合は null を返す。
+ */
+export async function extractPageApiTokens(
+  accountId: number
+): Promise<{ lsd: string; fbDtsg: string } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) return null
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed() || !entry.loaded) return null
+  const url = wc.getURL() ?? ''
+  if (!url.includes('threads.com') || url.includes('/login')) return null
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(function() {
+        var lsd = '', fbDtsg = '';
+        try { lsd    = require('LSD').token; } catch(e) {}
+        try { fbDtsg = require('DTSGInitialData').token; } catch(e) {}
+        if (!lsd || !fbDtsg) {
+          var h = document.documentElement.innerHTML;
+          if (!lsd) {
+            var m = h.match(/"LSD",\\[\\],\\{"token":"([^"]+)"/) || h.match(/"lsd":"([^"]+)"/);
+            if (m) lsd = m[1];
+          }
+          if (!fbDtsg) {
+            var m2 = h.match(/"DTSGInitialData",\\[\\],\\{"token":"([^"]+)"/) ||
+                     h.match(/"DTSGInitData",\\[\\],\\{"token":"([^"]+)"/) ||
+                     h.match(/"fb_dtsg":"([^"]+)"/) ||
+                     h.match(/"token":"(AQ[^"]+)"/);
+            if (m2) fbDtsg = m2[1];
+          }
+        }
+        return { lsd: lsd || '', fbDtsg: fbDtsg || '' };
+      })()`,
+      true
+    )
+    return result as { lsd: string; fbDtsg: string }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * ロード済み WebContentsView の fetch() を使って HTTP POST を実行する。
+ * 同一オリジンリクエストになるため SameSite Cookie 制限を受けない。
+ * ビューが未開放の場合は null を返す。
+ */
+export async function fetchViaView(
+  accountId: number,
+  url:       string,
+  headers:   Record<string, string>,
+  body:      string
+): Promise<{ status: number; body: string } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) return null
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed() || !entry.loaded) return null
+  const viewUrl = wc.getURL() ?? ''
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) return null
+
+  // JSON.stringify で安全にシリアライズしてインジェクションを防ぐ
+  const headersJson = JSON.stringify(headers)
+  const bodyJson    = JSON.stringify(body)
+  const urlJson     = JSON.stringify(url)
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(async function() {
+        try {
+          var resp = await fetch(${urlJson}, {
+            method: 'POST',
+            headers: ${headersJson},
+            body: ${bodyJson},
+            credentials: 'include',
+          });
+          var text = await resp.text();
+          return { status: resp.status, body: text };
+        } catch(e) {
+          return { status: 0, body: '', error: e.message };
+        }
+      })()`,
+      true
+    )
+    const r = result as { status: number; body: string; error?: string }
+    if (r.error) {
+      console.error(`[ViewFetch] fetch error: ${r.error}`)
+      return null
+    }
+    return { status: r.status, body: r.body }
+  } catch (e) {
+    console.error(`[ViewFetch] executeJavaScript error: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
+
+/** viewが存在しない場合バックグラウンドで作成してロードを待つ */
+export async function ensureViewLoaded(accountId: number): Promise<boolean> {
+  if (!_manager) return false
+  return _manager.ensureViewLoaded(accountId)
+}
+
+/**
+ * ロード済み WebContentsView の JS コンテキストから GraphQL で通知一覧を取得する。
+ * JS 内から fetch するため SameSite 制限を受けず、ページ上のトークンをそのまま使える。
+ * ページ上の JS バンドルを走査して現在の doc_id を動的取得してから GraphQL を呼ぶ。
+ */
+/**
+ * ロード済み WebContentsView で SPA クライアントサイドナビゲーションを使い、
+ * fetch をインターセプトして通知 GraphQL レスポンスを取得する。
+ * ページリロードなしで /notifications/ に遷移するため JS コンテキストが維持される。
+ */
+export async function fetchNotificationsViaJS(accountId: number): Promise<string | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents } }
+    | undefined
+  if (!entry) return null
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed()) return null
+  const viewUrl = wc.getURL() ?? ''
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) return null
+
+  try {
+    const result = await wc.executeJavaScript(`
+      (async function() {
+        try {
+          // fetch をインターセプトして通知 GraphQL レスポンスを捕捉
+          var captured = null;
+          var origFetch = window.fetch;
+          window.fetch = async function() {
+            var r = await origFetch.apply(this, arguments);
+            try {
+              var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
+              if (!captured && url.includes('graphql/query')) {
+                var clone = r.clone();
+                var text = await clone.text();
+                if (text.includes('text_feed__notifications') || text.includes('ActivityFeed')) {
+                  captured = text;
+                }
+              }
+            } catch(e) {}
+            return r;
+          };
+
+          // SPA クライアントサイドナビゲーションで /notifications/ へ遷移
+          // history.pushState + popstate でルーターを起動する
+          var origPath = window.location.pathname;
+          if (origPath !== '/notifications/') {
+            window.history.pushState(null, '', '/notifications/');
+            window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+          }
+
+          // 最大15秒待機
+          var waited = 0;
+          while (!captured && waited < 15000) {
+            await new Promise(function(r) { setTimeout(r, 300); });
+            waited += 300;
+          }
+
+          // fetch を元に戻す
+          window.fetch = origFetch;
+
+          // 元のパスに戻る
+          if (origPath !== '/notifications/') {
+            window.history.pushState(null, '', origPath);
+            window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+          }
+
+          return captured ? { status: 200, body: captured } : { error: 'timeout or no notification query fired' };
+        } catch(e) {
+          return { error: String(e) };
+        }
+      })()
+    `, true)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = result as any
+    console.log(`[fetchNotificationsViaJS] account=${accountId} status=${res?.status ?? '?'} body=${(res?.body ?? res?.error ?? '').slice(0, 300)}`)
+    if (res?.status === 200 && res.body) return res.body as string
+    return null
+  } catch (e) {
+    console.error(`[fetchNotificationsViaJS] error account=${accountId}:`, e)
+    return null
+  }
+}
+
+/**
+ * WebContentsView の JS コンテキストから GET リクエストを実行する。
+ * same-origin fetch なので UA・Cookie が正しく送信される。
+ */
+export async function getViaView(
+  accountId: number,
+  path:      string,
+  extraHeaders: Record<string, string> = {}
+): Promise<{ status: number; body: string } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) return null
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed() || !entry.loaded) return null
+  const viewUrl = wc.getURL() ?? ''
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) return null
+
+  const headersJson = JSON.stringify({ 'X-IG-App-ID': '238260118697367', ...extraHeaders })
+  const pathJson    = JSON.stringify(path)
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(async function() {
+        try {
+          var resp = await fetch(${pathJson}, {
+            method: 'GET',
+            headers: ${headersJson},
+            credentials: 'include',
+          });
+          var text = await resp.text();
+          return { status: resp.status, body: text };
+        } catch(e) {
+          return { status: 0, body: '', error: e.message };
+        }
+      })()`,
+      true
+    )
+    const r = result as { status: number; body: string; error?: string }
+    if (r.error) { console.error(`[getViaView] fetch error: ${r.error}`); return null }
+    return { status: r.status, body: r.body }
+  } catch (e) {
+    console.error(`[getViaView] executeJavaScript error: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
+
+/**
+ * WebContentsView の JS コンテキストから /api/v1/media/configure_text_only_post/ を呼ぶ。
+ * same-origin fetch なので sessionid SameSite 制限を受けない。
+ */
+export async function restPostTextViaView(
+  accountId: number,
+  text:      string,
+  topic?:    string
+): Promise<{ status: number; body: string } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) return null
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed() || !entry.loaded) return null
+  const viewUrl = wc.getURL() ?? ''
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) return null
+
+  // Node.js 側のセッションから csrftoken を取得
+  const { session: electronSessionText } = await import('electron')
+  const sessText = electronSessionText.fromPartition(`persist:account-${accountId}`)
+  const allCookiesText = await sessText.cookies.get({}).catch(() => [] as Electron.Cookie[])
+  const csrftokenText = allCookiesText.find(c => c.name === 'csrftoken' && c.domain?.includes('threads.com'))?.value
+                     ?? allCookiesText.find(c => c.name === 'csrftoken')?.value
+                     ?? ''
+  console.log(`[RestPostText] account=${accountId} topic=${JSON.stringify(topic ?? null)} csrftoken=${csrftokenText.slice(0, 8) || '(empty)'}…`)
+
+  const textJson    = JSON.stringify(text)
+  const topicJson   = JSON.stringify(topic ?? null)
+  const csrftokenJs = JSON.stringify(csrftokenText)
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(async function() {
+        try {
+          var csrftoken  = ${csrftokenJs};
+          var uploadId   = Date.now().toString();
+          var selfId     = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+          });
+          var textVal    = ${textJson};
+          var topicVal   = ${topicJson};
+          var appInfo    = JSON.stringify({
+            community_flair_id: null,
+            entry_point: 'main_tab_bar',
+            excluded_inline_media_ids: '[]',
+            fediverse_composer_enabled: true,
+            is_reply_approval_enabled: false,
+            is_spoiler_media: false,
+            link_attachment_url: null,
+            reply_control: 0,
+            self_thread_context_id: selfId,
+            snippet_attachment: null,
+            special_effects_enabled_str: null,
+            tag_header: topicVal ? { display_text: topicVal } : null,
+            text_with_entities: { entities: [], text: textVal }
+          });
+          var params = new URLSearchParams({
+            audience: 'default',
+            barcelona_source_reply_id: '',
+            caption: textVal,
+            creator_geo_gating_info: JSON.stringify({ whitelist_country_codes: [] }),
+            cross_share_info: '',
+            custom_accessibility_caption: '',
+            gen_ai_detection_method: '',
+            internal_features: '',
+            is_meta_only_post: '',
+            is_paid_partnership: '',
+            is_upload_type_override_allowed: '1',
+            music_params: '',
+            publish_mode: 'text_post',
+            should_include_permalink: 'true',
+            text_post_app_info: appInfo,
+            upload_id: uploadId,
+          });
+          var resp = await fetch('/api/v1/media/configure_text_only_post/', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'x-csrftoken':  csrftoken,
+              'x-ig-app-id':  '238260118697367',
+              'x-asbd-id':    '129477',
+            },
+            body: params.toString(),
+            credentials: 'include',
+          });
+          var body = await resp.text();
+          return { status: resp.status, body: body };
+        } catch(e) {
+          return { status: 0, body: '', error: e.message };
+        }
+      })()`,
+      true
+    )
+    const r = result as { status: number; body: string; error?: string }
+    if (r.error) {
+      console.error(`[RestPost] fetch error: ${r.error}`)
+      return null
+    }
+    return { status: r.status, body: r.body }
+  } catch (e) {
+    console.error(`[RestPost] executeJavaScript error: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
+
+/**
+ * 画像付き投稿を WebContentsView の JS コンテキストから実行する。
+ *
+ * 手順:
+ *   1. 各画像ファイルを base64 → Uint8Array に変換し /rupload_igphoto/fb_uploader_{id} へバイナリ POST
+ *   2. 取得した upload_id で /api/v1/media/configure_text_post_app_feed/ へ POST
+ *
+ * same-origin fetch なので sessionid SameSite 制限を受けない。
+ * imagePaths は Node.js 側で読み込んだローカルファイルパスの配列。
+ */
+export async function restPostMediaViaView(
+  accountId:  number,
+  text:       string,
+  imagePaths: string[],
+  topic?:     string
+): Promise<{ status: number; body: string } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) return null
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed() || !entry.loaded) return null
+  const viewUrl = wc.getURL() ?? ''
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) return null
+
+  // Node.js 側で画像ファイルを読み込み base64 に変換して JS へ渡す
+  const { readFileSync, existsSync } = await import('fs')
+  const images = imagePaths
+    .filter(p => existsSync(p))
+    .map(p => {
+      const buf  = readFileSync(p)
+      const mime = p.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'
+      return { data: buf.toString('base64'), mime, size: buf.length }
+    })
+
+  if (images.length === 0) return null
+
+  // Node.js 側のセッションから csrftoken を取得（document.cookie は Threads ページで制限される）
+  const { session: electronSession } = await import('electron')
+  const sess = electronSession.fromPartition(`persist:account-${accountId}`)
+  const allCookies = await sess.cookies.get({}).catch(() => [] as Electron.Cookie[])
+  const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('threads.com'))?.value
+                 ?? allCookies.find(c => c.name === 'csrftoken')?.value
+                 ?? ''
+  console.log(`[RestPostMedia] account=${accountId} csrftoken=${csrftoken.slice(0, 8) || '(empty)'}…`)
+
+  const textJson    = JSON.stringify(text)
+  const topicJson   = JSON.stringify(topic ?? null)
+  const imagesJson  = JSON.stringify(images)
+  const csrftokenJs = JSON.stringify(csrftoken)
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(async function() {
+        try {
+          var csrftoken       = ${csrftokenJs};
+          var images          = ${imagesJson};
+          var uploadIds       = [];
+          var isSidecar       = images.length > 1;
+          var clientSidecarId = isSidecar ? Date.now().toString() : '';
+
+          // ── Step 1: 各画像をアップロード ──────────────────────────────────
+          for (var i = 0; i < images.length; i++) {
+            if (i > 0) await new Promise(function(r) { setTimeout(r, 200); });
+            var uploadId = Date.now().toString();
+            uploadIds.push(uploadId);
+
+            // base64 → Uint8Array
+            var b64    = images[i].data;
+            var mime   = images[i].mime;
+            var size   = images[i].size;
+            var bin    = atob(b64);
+            var bytes  = new Uint8Array(bin.length);
+            for (var j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+
+            var ruploadParams = { media_type: 1, upload_id: uploadId };
+            if (isSidecar) { ruploadParams.is_sidecar = '1'; ruploadParams.client_sidecar_id = clientSidecarId; }
+
+            var upResp = await fetch('/rupload_igphoto/fb_uploader_' + uploadId, {
+              method: 'POST',
+              headers: {
+                'x-entity-type':               mime,
+                'x-entity-length':             String(size),
+                'x-entity-name':               'fb_uploader_' + uploadId,
+                'x-instagram-rupload-params':  JSON.stringify(ruploadParams),
+                'offset':                      '0',
+                'content-type':                'application/octet-stream',
+                'x-csrftoken':                 csrftoken,
+                'x-ig-app-id':                 '238260118697367',
+                'x-asbd-id':                   '129477',
+              },
+              body: bytes,
+              credentials: 'include',
+            });
+            if (!upResp.ok) {
+              var upBody = await upResp.text();
+              return { status: upResp.status, body: upBody, error: 'upload failed image ' + i };
+            }
+            // サーバーが返す upload_id があればそちらを使う
+            try {
+              var upJson = await upResp.clone().json();
+              if (upJson && upJson.upload_id) uploadIds[uploadIds.length - 1] = String(upJson.upload_id);
+            } catch (_) { /* レスポンスが JSON でない場合は無視 */ }
+          }
+
+          // ── Step 2: configure ──────────────────────────────────────────────
+          var textVal   = ${textJson};
+          var topicVal  = ${topicJson};
+          var selfId    = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+          });
+          var appInfo = JSON.stringify({
+            community_flair_id: null,
+            entry_point: 'main_tab_bar',
+            excluded_inline_media_ids: '[]',
+            fediverse_composer_enabled: true,
+            gif_media_id: null,
+            is_reply_approval_enabled: false,
+            is_spoiler_media: false,
+            link_attachment_url: null,
+            reply_control: 0,
+            self_thread_context_id: selfId,
+            snippet_attachment: null,
+            special_effects_enabled_str: null,
+            tag_header: topicVal ? { display_text: topicVal } : null,
+            text_with_entities: { entities: [], text: textVal },
+          });
+          var cfgResp;
+          if (uploadIds.length === 1) {
+            // ── 1枚: configure_text_post_app_feed (URL-encoded) ──────────────
+            var params = new URLSearchParams({
+              audience: 'default',
+              barcelona_source_reply_id: '',
+              caption: textVal,
+              creator_geo_gating_info: JSON.stringify({ whitelist_country_codes: [] }),
+              cross_share_info: '',
+              custom_accessibility_caption: '',
+              gen_ai_detection_method: '',
+              internal_features: '',
+              is_meta_only_post: '',
+              is_paid_partnership: '',
+              is_threads: 'true',
+              is_upload_type_override_allowed: '1',
+              should_include_permalink: 'true',
+              text_post_app_info: appInfo,
+              upload_id: uploadIds[0],
+              usertags: '',
+            });
+            cfgResp = await fetch('/api/v1/media/configure_text_post_app_feed/', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'x-csrftoken':  csrftoken,
+                'x-ig-app-id':  '238260118697367',
+                'x-asbd-id':    '129477',
+              },
+              body: params.toString(),
+              credentials: 'include',
+            });
+          } else {
+            // ── 複数枚: configure_text_post_app_sidecar (JSON) ───────────────
+            var sidecarBody = JSON.stringify({
+              audience: 'default',
+              caption: textVal,
+              children_metadata: uploadIds.map(function(uid) { return { upload_id: uid }; }),
+              client_sidecar_id: clientSidecarId,
+              creator_geo_gating_info: JSON.stringify({ whitelist_country_codes: [] }),
+              internal_features: '',
+              is_threads: true,
+              is_upload_type_override_allowed: '1',
+              should_include_permalink: true,
+              text_post_app_info: appInfo,
+            });
+            cfgResp = await fetch('/api/v1/media/configure_text_post_app_sidecar/', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-csrftoken':  csrftoken,
+                'x-ig-app-id':  '238260118697367',
+                'x-asbd-id':    '129477',
+              },
+              body: sidecarBody,
+              credentials: 'include',
+            });
+          }
+          var cfgBody = await cfgResp.text();
+          return { status: cfgResp.status, body: cfgBody };
+        } catch(e) {
+          return { status: 0, body: '', error: e.message };
+        }
+      })()`,
+      true
+    )
+    const r = result as { status: number; body: string; error?: string }
+    if (r.error) {
+      console.error(`[RestPostMedia] error: ${r.error}`)
+      return null
+    }
+    return { status: r.status, body: r.body }
+  } catch (e) {
+    console.error(`[RestPostMedia] executeJavaScript error: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
+
+/**
+ * アップロード済みの upload_ids を使い、WebContentsView の JS から sidecar configure を実行する。
+ * doPost（手動Cookie）では sidecar configure が 400 になるため、ブラウザセッションのまま呼ぶ。
+ */
+export async function configureSidecarViaView(opts: {
+  accountId:      number
+  text:           string
+  uploadIds:      string[]
+  topic?:         string
+  clientSidecarId: string
+}): Promise<{ status: number; body: string } | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const allKeys = [...((_manager as any)?.views?.keys() ?? [])]
+  console.log(`[configureSidecarViaView] views keys=${JSON.stringify(allKeys)} accountId=${opts.accountId}`)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(opts.accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) { console.warn(`[configureSidecarViaView] no entry for account=${opts.accountId}`); return null }
+  const wc = entry.view?.webContents
+  if (!wc || wc.isDestroyed()) { console.warn(`[configureSidecarViaView] webContents unavailable`); return null }
+  if (!entry.loaded) { console.warn(`[configureSidecarViaView] entry.loaded=false`); return null }
+  const viewUrl = wc.getURL() ?? ''
+  console.log(`[configureSidecarViaView] viewUrl=${viewUrl}`)
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) {
+    console.warn(`[configureSidecarViaView] URL check failed: ${viewUrl}`)
+    return null
+  }
+
+  const { session: electronSession } = await import('electron')
+  const sess = electronSession.fromPartition(`persist:account-${opts.accountId}`)
+  const allCookies = await sess.cookies.get({}).catch(() => [] as Electron.Cookie[])
+  const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('threads.com'))?.value
+                 ?? allCookies.find(c => c.name === 'csrftoken')?.value ?? ''
+
+  const selfId = crypto.randomUUID()
+  const appInfo = JSON.stringify({
+    community_flair_id: null,
+    entry_point: 'main_tab_bar',
+    excluded_inline_media_ids: '[]',
+    fediverse_composer_enabled: true,
+    gif_media_id: null,
+    is_reply_approval_enabled: false,
+    is_spoiler_media: false,
+    link_attachment_url: null,
+    reply_control: 0,
+    self_thread_context_id: selfId,
+    snippet_attachment: null,
+    special_effects_enabled_str: null,
+    tag_header: opts.topic ? { display_text: opts.topic } : null,
+    text_with_entities: { entities: [], text: opts.text },
+  })
+
+  const bodyObj = {
+    audience: 'default',
+    barcelona_source_reply_id: '',
+    caption: opts.text,
+    children_metadata: opts.uploadIds.map(uid => ({
+      upload_id: uid,
+      scene_type: null,
+      scene_capture_type: '',
+    })),
+    client_sidecar_id: opts.clientSidecarId,
+    creator_geo_gating_info: JSON.stringify({ whitelist_country_codes: [] }),
+    cross_share_info: '',
+    custom_accessibility_caption: '',
+    gen_ai_detection_method: '',
+    internal_features: '',
+    is_meta_only_post: '',
+    is_paid_partnership: '',
+    is_threads: 'true',
+    is_upload_type_override_allowed: '1',
+    should_include_permalink: 'true',
+    text_post_app_info: appInfo,
+    usertags: '',
+  }
+
+  const bodyJs     = JSON.stringify(JSON.stringify(bodyObj))  // JS文字列リテラルとして安全に埋め込む
+  const csrftokenJs = JSON.stringify(csrftoken)
+
+  console.log(`[configureSidecarViaView] account=${opts.accountId} uploadIds=${JSON.stringify(opts.uploadIds)} sidecarId=${opts.clientSidecarId} csrftoken=${csrftoken.slice(0,8)}...`)
+  console.log(`[configureSidecarViaView] body=${JSON.stringify(bodyObj)}`)
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(async function() {
+        try {
+          var csrftoken = ${csrftokenJs};
+          var body      = ${bodyJs};
+          var resp = await fetch('/api/v1/media/configure_text_post_app_sidecar/', {
+            method: 'POST',
+            headers: {
+              'Content-Type':       'text/plain;charset=UTF-8',
+              'x-csrftoken':        csrftoken,
+              'x-ig-app-id':        '238260118697367',
+              'x-asbd-id':          '359341',
+              'x-instagram-ajax':   '0',
+              'x-bloks-version-id': '86eaac606b7c5e9b45f4357f86082d05eace8411e43d3f754d885bf54a759a71',
+            },
+            body: body,
+            credentials: 'include',
+          });
+          var text = await resp.text();
+          var hdrs = {};
+          resp.headers.forEach(function(v, k) { hdrs[k] = v; });
+          return { status: resp.status, body: text, headers: hdrs };
+        } catch(e) {
+          return { status: 0, body: '', error: e.message };
+        }
+      })()`,
+      true
+    )
+    const r = result as { status: number; body: string; headers?: Record<string, string>; error?: string }
+    if (r.error) {
+      console.error(`[configureSidecarViaView] error: ${r.error}`)
+      return null
+    }
+    console.log(`[configureSidecarViaView] status=${r.status}`)
+    console.log(`[configureSidecarViaView] resp-headers=${JSON.stringify(r.headers ?? {})}`)
+    console.log(`[configureSidecarViaView] resp-body=${r.body}`)
+    return { status: r.status, body: r.body }
+  } catch (e) {
+    console.error(`[configureSidecarViaView] executeJavaScript error: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
+
+// ── GraphQL helpers (like / follow) ──────────────────────────────────────────
+
+const THREADS_GRAPHQL_URL = 'https://www.threads.com/api/graphql'
+const LIKE_DOC_ID         = '24753372994365040'
+const FOLLOW_DOC_ID       = '26234294899535416'
+// BarcelonaActivityFeedListPaginationQuery (activity ページの通知一覧取得クエリ)
+const NOTIF_DOC_ID        = '26652441151048593'
+const BLOKS_VERSION_ID    = '86eaac606b7c5e9b45f4357f86082d05eace8411e43d3f754d885bf54a759a71'
+
+/** View の JS コンテキストで GraphQL ミューテーションを実行する共通ヘルパー */
+async function graphqlViaView(opts: {
+  accountId:    number
+  docId:        string
+  friendlyName: string
+  variables:    Record<string, unknown>
+}): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(opts.accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry?.view?.webContents || entry.view.webContents.isDestroyed() || !entry.loaded) {
+    return { ok: false, error: 'view not available' }
+  }
+  const wc = entry.view.webContents
+  const viewUrl = wc.getURL() ?? ''
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) {
+    return { ok: false, error: `view URL invalid: ${viewUrl}` }
+  }
+
+  const tokens = await extractPageApiTokens(opts.accountId).catch(() => null)
+  if (!tokens?.fbDtsg || !tokens?.lsd) {
+    return { ok: false, error: 'fb_dtsg/lsd unavailable' }
+  }
+
+  const { session: electronSession } = await import('electron')
+  const sess = electronSession.fromPartition(`persist:account-${opts.accountId}`)
+  const allCookies = await sess.cookies.get({}).catch(() => [] as Electron.Cookie[])
+  const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('threads.com'))?.value
+                 ?? allCookies.find(c => c.name === 'csrftoken')?.value ?? ''
+
+  const fbDtsgJs   = JSON.stringify(tokens.fbDtsg)
+  const lsdJs      = JSON.stringify(tokens.lsd)
+  const csrfJs     = JSON.stringify(csrftoken)
+  const varsJs     = JSON.stringify(JSON.stringify(opts.variables))
+  const docIdJs    = JSON.stringify(opts.docId)
+  const nameJs     = JSON.stringify(opts.friendlyName)
+  const gqlUrlJs   = JSON.stringify(THREADS_GRAPHQL_URL)
+  const bloksJs    = JSON.stringify(BLOKS_VERSION_ID)
+
+  console.log(`[graphqlViaView] account=${opts.accountId} ${opts.friendlyName}`)
+
+  try {
+    const result = await wc.executeJavaScript(
+      `(async function() {
+        try {
+          var fbDtsg   = ${fbDtsgJs};
+          var lsd      = ${lsdJs};
+          var csrftoken = ${csrfJs};
+          var variables = ${varsJs};
+          var docId    = ${docIdJs};
+          var name     = ${nameJs};
+          var gqlUrl   = ${gqlUrlJs};
+          var bloks    = ${bloksJs};
+          var params = new URLSearchParams();
+          params.set('fb_dtsg', fbDtsg);
+          params.set('lsd', lsd);
+          params.set('__a', '1');
+          params.set('__comet_req', '29');
+          params.set('fb_api_caller_class', 'RelayModern');
+          params.set('fb_api_req_friendly_name', name);
+          params.set('server_timestamps', 'true');
+          params.set('variables', variables);
+          params.set('doc_id', docId);
+          var resp = await fetch(gqlUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type':       'application/x-www-form-urlencoded',
+              'X-CSRFToken':        csrftoken,
+              'X-FB-LSD':           lsd,
+              'X-FB-Friendly-Name': name,
+              'X-ASBD-ID':          '359341',
+              'X-IG-App-ID':        '238260118697367',
+              'X-BLOKS-VERSION-ID': bloks,
+            },
+            body: params.toString(),
+            credentials: 'include',
+          });
+          var text = await resp.text();
+          return { status: resp.status, body: text };
+        } catch(e) {
+          return { status: 0, body: '', error: e.message };
+        }
+      })()`,
+      true
+    )
+    const r = result as { status: number; body: string; error?: string }
+    if (r.error) return { ok: false, error: r.error }
+    console.log(`[graphqlViaView] ${opts.friendlyName} status=${r.status} body=${r.body.slice(0, 200)}`)
+    if (r.status < 200 || r.status >= 300) return { ok: false, error: `HTTP ${r.status}: ${r.body.slice(0, 100)}` }
+    try {
+      const json = JSON.parse(r.body) as Record<string, unknown>
+      return { ok: true, data: json }
+    } catch {
+      return { ok: true }
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * /activity ページをロードし Relay ストアから通知一覧を読み取る。
+ * GraphQL リクエストを送らず SSR でプリロードされたデータを利用する。
+ */
+export async function fetchNotificationsViaGraphQL(
+  accountId: number
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry?.view?.webContents || entry.view.webContents.isDestroyed() || !entry.loaded) {
+    return { ok: false, error: 'view not available' }
+  }
+  const wc = entry.view.webContents
+  const prevUrl = wc.getURL() ?? ''
+  if (!prevUrl.includes('threads.com') || prevUrl.includes('/login')) {
+    return { ok: false, error: `view URL invalid: ${prevUrl}` }
+  }
+
+  // /activity ページへ遷移してRelayストアを水和させる
+  const isOnActivity = prevUrl.includes('/activity')
+  if (!isOnActivity) {
+    await new Promise<void>(resolve => {
+      const onLoad = () => resolve()
+      wc.once('did-finish-load', onLoad)
+      wc.loadURL('https://www.threads.com/activity')
+      setTimeout(() => { wc.off('did-finish-load', onLoad); resolve() }, 15000)
+    })
+    // Relay ストア水和を待つ
+    await new Promise(r => setTimeout(r, 3000))
+  }
+
+  console.log(`[fetchNotificationsViaGraphQL] account=${accountId} reading Relay store`)
+
+  try {
+    const raw = await wc.executeJavaScript(`
+      (function() {
+        function resolveRec(source, id, depth) {
+          if (depth > 3 || !id) return null;
+          var rec = source.get(id);
+          if (!rec) return null;
+          var out = {};
+          for (var k in rec) {
+            var v = rec[k];
+            if (v && typeof v === 'object' && v.__ref) {
+              out[k] = resolveRec(source, v.__ref, depth + 1);
+            } else if (v && typeof v === 'object' && v.__refs) {
+              out[k] = v.__refs.map(function(r) { return resolveRec(source, r, depth + 1); }).filter(Boolean);
+            } else {
+              out[k] = v;
+            }
+          }
+          return out;
+        }
+        try {
+          var relayEnv = require('BarcelonaRelayEnvironment');
+          var env = relayEnv && relayEnv.default ? relayEnv.default : relayEnv;
+          var source = env.getStore().getSource();
+          var conn = source.get('client:root:xdt_api__v1__text_feed__notifications__connection');
+          if (!conn) return JSON.stringify({ error: 'no connection' });
+          var edgeRefs = (conn.edges && conn.edges.__refs) ? conn.edges.__refs : [];
+          var notifications = [];
+          for (var i = 0; i < edgeRefs.length; i++) {
+            var edge = source.get(edgeRefs[i]);
+            if (!edge) continue;
+            var nodeRef = edge.node && edge.node.__ref;
+            if (!nodeRef) continue;
+            var node = resolveRec(source, nodeRef, 0);
+            if (!node) continue;
+            var args = node.args || {};
+            var extra = args.extra || {};
+            var mediaDict = extra.media_dict || {};
+            var title = extra.title || '';
+            var usernameMatch = title.match(/\\{([^|]+)\\|/);
+            notifications.push({
+              notifId:   args.tuuid || node.__id,
+              iconName:  extra.icon_name || '',
+              mediaId:   mediaDict.pk || '',
+              username:  usernameMatch ? usernameMatch[1] : '',
+              content:   extra.content || '',
+              context:   extra.context || '',
+              timestamp: mediaDict.taken_at || 0,
+            });
+          }
+          return JSON.stringify({ notifications: notifications });
+        } catch(e) {
+          return JSON.stringify({ error: e.message });
+        }
+      })()
+    `, false) as string
+
+    // 元ページへ戻る
+    if (!isOnActivity && prevUrl) {
+      wc.loadURL(prevUrl).catch(() => {})
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (parsed.error) return { ok: false, error: parsed.error as string }
+    console.log(`[fetchNotificationsViaGraphQL] account=${accountId} notifications=${(parsed.notifications as unknown[])?.length ?? 0}`)
+    return { ok: true, data: parsed }
+  } catch (e) {
+    if (!isOnActivity && prevUrl) {
+      wc.loadURL(prevUrl).catch(() => {})
+    }
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 投稿にいいねする（GraphQL ミューテーション） */
+export async function likeViaView(
+  accountId: number,
+  mediaId:   string
+): Promise<{ success: boolean; error?: string }> {
+  const result = await graphqlViaView({
+    accountId,
+    docId:        LIKE_DOC_ID,
+    friendlyName: 'useTHLikeMutationLikeMutation',
+    variables: {
+      mediaID: mediaId,
+      requestData: {
+        container_module:    'ig_text_feed_timeline',
+        logging_info_token:  null,
+        nav_chain:           null,
+        query_text:          null,
+        search_session_id:   null,
+        serp_session_id:     null,
+      },
+    },
+  })
+  if (result.ok) return { success: true }
+  return { success: false, error: result.error }
+}
+
+/** ユーザーをフォローする（GraphQL ミューテーション） */
+export async function followViaView(
+  accountId: number,
+  userId:    string
+): Promise<{ success: boolean; error?: string }> {
+  const result = await graphqlViaView({
+    accountId,
+    docId:        FOLLOW_DOC_ID,
+    friendlyName: 'useTHFollowMutationFollowMutation',
+    variables: {
+      target_user_id:                userId,
+      media_id_attribution:          null,
+      container_module:              'ig_text_feed_profile',
+      ranking_info_token:            null,
+      barcelona_source_quote_post_id: null,
+      barcelona_source_reply_id:     null,
+    },
+  })
+  if (result.ok) return { success: true }
+  return { success: false, error: result.error }
+}
+
+/**
+ * openCompose でテキストを入力した後、投稿ボタンをクリックして投稿を完了させる。
+ * API (GraphQL) が使えない場合の代替投稿手段として使用する。
+ */
+export async function autoPostViaUI(
+  accountId: number,
+  content:   string
+): Promise<{ success: boolean; error?: string }> {
+  if (!_manager) return { success: false, error: 'ViewManager not initialized' }
+
+  console.log(`[autoPostViaUI] account=${accountId} filling compose...`)
+
+  // Step 1: openCompose でコンポーズダイアログを開きテキストを入力
+  const fillResult = await _manager.openCompose(accountId, content)
+  if (!fillResult.success) {
+    console.warn(`[autoPostViaUI] openCompose failed: ${fillResult.error}`)
+    return fillResult
+  }
+
+  // Step 2: webContents を取得して投稿ボタンをクリック
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  const wc = entry?.view?.webContents
+  if (!wc || wc.isDestroyed()) {
+    return { success: false, error: '投稿ボタンのクリックに失敗: view not available' }
+  }
+
+  try {
+    const res = await Promise.race<{ ok: boolean; error?: string }>([
+      wc.executeJavaScript(`
+        (async function() {
+          // テキスト挿入後、少し待ってからボタンを探す
+          await new Promise(function(r) { setTimeout(r, 600); });
+
+          // 投稿ボタンのセレクタ（日本語/英語両対応）
+          var sels = [
+            'button[aria-label="投稿する"]',
+            'button[aria-label="Post"]',
+            'div[role="button"][aria-label="投稿する"]',
+            'div[role="button"][aria-label="Post"]',
+          ];
+          var btn = document.querySelector(sels.join(', '));
+
+          if (!btn) {
+            // aria-label がない場合はテキストで探す
+            var allBtns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            btn = allBtns.find(function(b) {
+              var t = (b.textContent || '').trim();
+              return t === '投稿する' || t === '投稿' || t === 'Post';
+            }) || null;
+          }
+
+          if (!btn) {
+            var labels = Array.from(document.querySelectorAll('button, div[role="button"]'))
+              .map(function(b) {
+                return (b.textContent || '').trim().slice(0, 20) + '|' + (b.getAttribute('aria-label') || '');
+              })
+              .filter(function(t) { return t.length > 1 && t.length < 80; })
+              .slice(0, 20);
+            return { ok: false, error: '投稿ボタン未検出: ' + JSON.stringify(labels) };
+          }
+
+          console.log('[autoPostViaUI] clicking post button: ' + (btn.getAttribute('aria-label') || btn.textContent));
+          btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+          // 投稿処理完了を待つ
+          await new Promise(function(r) { setTimeout(r, 3000); });
+          return { ok: true };
+        })()
+      `, true),
+      new Promise<{ ok: false; error: string }>(resolve =>
+        setTimeout(() => resolve({ ok: false, error: '投稿ボタンクリックタイムアウト (15秒)' }), 15000)
+      ),
+    ])
+
+    if (!res?.ok) {
+      console.warn(`[autoPostViaUI] submit failed: ${res?.error}`)
+      return { success: false, error: res?.error ?? 'submit failed' }
+    }
+    console.log(`[autoPostViaUI] account=${accountId} posted via UI`)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * プロフィールアイコンを変更する。
+ *
+ * 手順:
+ *   1. imagePath のファイルを base64 に変換
+ *   2. WebContentsView の JS コンテキストで Canvas を使い WebP に変換してから
+ *      /rupload_igphoto/fb_uploader_{id} へバイナリ POST
+ *   3. require('useBarcelonaEditProfileMutation') で doc_id を取得し
+ *      /graphql/query へ mutation POST
+ */
+export async function changeProfilePicViaView(
+  accountId: number,
+  imagePath: string,
+): Promise<{ success: boolean; error?: string }> {
+  // ビューが既に存在するか記録（操作後に一時ビューを破棄するため）
+  const hadViewBefore = !!(_manager as any)?.views?.get(accountId)
+  console.log(`[changeProfilePic] start accountId=${accountId} hadViewBefore=${hadViewBefore} imagePath=${imagePath}`)
+
+  // ビューが開いていない場合はバックグラウンドで一時起動する
+  const ready = await ensureViewLoaded(accountId).catch((e) => {
+    console.error(`[changeProfilePic] ensureViewLoaded threw: ${e}`)
+    return false
+  })
+  console.log(`[changeProfilePic] ensureViewLoaded ready=${ready}`)
+  if (!ready) {
+    if (!hadViewBefore) _manager?.closeView(accountId)
+    return { success: false, error: 'Threads ページを読み込めませんでした（ログイン済みか確認してください）' }
+  }
+
+  const entry = (_manager as any)?.views?.get(accountId) as
+    | { view: { webContents: Electron.WebContents }; loaded?: boolean }
+    | undefined
+  if (!entry) {
+    console.warn(`[changeProfilePic] entry not found for accountId=${accountId}`)
+    return { success: false, error: 'WebContentsView が見つかりません。' }
+  }
+  const wc = entry.view?.webContents
+  console.log(`[changeProfilePic] wc=${!!wc} destroyed=${wc?.isDestroyed()} loaded=${entry.loaded}`)
+  if (!wc || wc.isDestroyed() || !entry.loaded) return { success: false, error: 'WebContentsView が未ロードです。' }
+  const viewUrl = wc.getURL() ?? ''
+  console.log(`[changeProfilePic] viewUrl=${viewUrl}`)
+  if (!viewUrl.includes('threads.com') || viewUrl.includes('/login')) {
+    if (!hadViewBefore) _manager?.closeView(accountId)
+    return { success: false, error: 'Threads にログインしていません。' }
+  }
+
+  const { readFileSync, existsSync } = await import('fs')
+  if (!existsSync(imagePath)) return { success: false, error: `ファイルが見つかりません: ${imagePath}` }
+
+  const buf  = readFileSync(imagePath)
+  const mime = imagePath.toLowerCase().endsWith('.png') ? 'image/png'
+             : imagePath.toLowerCase().endsWith('.webp') ? 'image/webp'
+             : 'image/jpeg'
+  const b64  = buf.toString('base64')
+
+  const { session: electronSession } = await import('electron')
+  const sess = electronSession.fromPartition(`persist:account-${accountId}`)
+  const allCookies = await sess.cookies.get({}).catch(() => [] as Electron.Cookie[])
+  const csrftoken  = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('threads.com'))?.value
+                  ?? allCookies.find(c => c.name === 'csrftoken')?.value ?? ''
+
+  const b64Json  = JSON.stringify(b64)
+  const mimeJson = JSON.stringify(mime)
+  const csrfJson = JSON.stringify(csrftoken)
+
+  // ハードコード済み doc_id（ネットワークキャプチャから取得）
+  const MUT_DOC_ID = '26068142076211881'
+  const PROFILE_QUERY_DOC_ID = '27246326161633735'
+
+  try {
+    const result = await Promise.race([
+      wc.executeJavaScript(`
+        (async function() {
+          try {
+            var b64       = ${b64Json};
+            var mime      = ${mimeJson};
+            var csrftoken = ${csrfJson};
+            var mutDocId  = ${JSON.stringify(MUT_DOC_ID)};
+
+            // ── トークン取得（LSD/DTSGInitialData は常にロード済みの基本モジュール）──
+            var lsd = '', fbDtsg = '';
+            try { lsd    = require('LSD')?.token || ''; }             catch(_) {}
+            try { fbDtsg = require('DTSGInitialData')?.token || ''; } catch(_) {}
+            if (!lsd) return { success: false, error: 'lsd token 取得失敗（Threadsへのログインが必要な可能性があります）' };
+
+            // ── 現在のプロフィール情報取得（name/biography/etc. を上書きしないため）──
+            var profileName = '', biography = '', externalUrl = '', isPrivate = false, username = '';
+            try {
+              var profileBodyStr = 'lsd=' + encodeURIComponent(lsd)
+                + '&doc_id=${PROFILE_QUERY_DOC_ID}'
+                + '&variables=' + encodeURIComponent('{}')
+                + '&fb_api_req_friendly_name=BarcelonaProfileEditDialogQuery'
+                + '&server_timestamps=true';
+              if (fbDtsg) profileBodyStr += '&fb_dtsg=' + encodeURIComponent(fbDtsg);
+              var profileResp = await fetch('/graphql/query', {
+                method: 'POST',
+                headers: {
+                  'Content-Type':       'application/x-www-form-urlencoded',
+                  'X-IG-App-ID':        '238260118697367',
+                  'X-FB-LSD':           lsd,
+                  'X-FB-Friendly-Name': 'BarcelonaProfileEditDialogQuery',
+                  'X-Root-Field-Name':  'xdt_text_app_viewer',
+                  'X-CSRFToken':        csrftoken,
+                  'X-ASBD-ID':          '359341',
+                },
+                body: profileBodyStr,
+                credentials: 'include',
+              });
+              var profileData = await profileResp.json();
+              var viewer = profileData?.data?.xdt_text_app_viewer;
+              if (viewer) {
+                username    = viewer.username    || '';
+                profileName = viewer.full_name   || '';
+                biography   = viewer.biography   || '';
+                externalUrl = viewer.external_lynx_url || viewer.external_url || '';
+                isPrivate   = viewer.is_private  || false;
+              }
+            } catch(_) {}
+
+            var uploadId = String(Date.now());
+
+            // ── 画像を WebP に変換 (Canvas) ──────────────────────────────────
+            var img = new Image();
+            await new Promise(function(res, rej) {
+              img.onload = res; img.onerror = rej;
+              img.src = 'data:' + mime + ';base64,' + b64;
+            });
+            var canvas = document.createElement('canvas');
+            canvas.width  = img.naturalWidth  || img.width  || 400;
+            canvas.height = img.naturalHeight || img.height || 400;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            var webpBlob = await new Promise(function(res) { canvas.toBlob(res, 'image/webp', 0.9); });
+            var webpBuf  = await webpBlob.arrayBuffer();
+            var webpBytes = new Uint8Array(webpBuf);
+
+            // ── Step 1: rupload ──────────────────────────────────────────────
+            var ruploadParams = JSON.stringify({
+              is_sidecar: '0', is_threads: '1', media_type: 1,
+              upload_id: uploadId,
+              upload_media_height: canvas.height,
+              upload_media_width:  canvas.width,
+            });
+            var upResp = await fetch('/rupload_igphoto/fb_uploader_' + uploadId, {
+              method: 'POST',
+              headers: {
+                'X-Entity-Type':              'image/webp',
+                'X-Entity-Length':            String(webpBytes.length),
+                'X-Entity-Name':              'fb_uploader_' + uploadId,
+                'X-Instagram-Rupload-Params': ruploadParams,
+                'Offset':                     '0',
+                'Content-Type':               'image/webp',
+                'X-CSRFToken':                csrftoken,
+                'X-IG-App-ID':                '238260118697367',
+                'X-ASBD-ID':                  '359341',
+                'X-FB-LSD':                   lsd,
+              },
+              body: webpBytes,
+              credentials: 'include',
+            });
+            var upText = await upResp.text();
+            if (!upResp.ok) return { success: false, error: 'rupload failed ' + upResp.status + ': ' + upText.slice(0, 200), debug: { step: 'rupload', status: upResp.status, body: upText.slice(0, 500) } };
+            try {
+              var upJson = JSON.parse(upText);
+              if (upJson && upJson.upload_id) uploadId = String(upJson.upload_id);
+            } catch(_) {}
+
+            // ── Step 2: useBarcelonaEditProfileMutation ──────────────────────
+            var uploadIdNum = Number(uploadId);
+            var mutVars = JSON.stringify({
+              external_url:                           externalUrl,
+              biography:                              biography,
+              username:                               username,
+              name:                                   profileName,
+              is_private:                             isPrivate,
+              profile_picture_upload_id:              uploadIdNum,
+              remove_profile_picture:                 false,
+              copy_ig_profile_picture_to_text_post_app: false,
+            });
+            var mutBodyStr = 'lsd=' + encodeURIComponent(lsd)
+              + '&doc_id='                      + encodeURIComponent(mutDocId)
+              + '&variables='                   + encodeURIComponent(mutVars)
+              + '&fb_api_caller_class=RelayModern'
+              + '&fb_api_req_friendly_name=useBarcelonaEditProfileMutation'
+              + '&server_timestamps=true';
+            if (fbDtsg) mutBodyStr += '&fb_dtsg=' + encodeURIComponent(fbDtsg);
+
+            var mutResp = await fetch('/graphql/query', {
+              method: 'POST',
+              headers: {
+                'Content-Type':          'application/x-www-form-urlencoded',
+                'X-IG-App-ID':           '238260118697367',
+                'X-FB-LSD':              lsd,
+                'X-FB-Friendly-Name':    'useBarcelonaEditProfileMutation',
+                'X-Root-Field-Name':     'xdt_text_app_edit_profile_mutation',
+                'X-CSRFToken':           csrftoken,
+                'X-ASBD-ID':             '359341',
+              },
+              body: mutBodyStr,
+              credentials: 'include',
+            });
+            var mutText = await mutResp.text();
+            var dbgInfo = {
+              step: 'mutation',
+              uploadId: uploadId,
+              uploadIdType: typeof uploadIdNum,
+              uploadStatus: upResp.status,
+              uploadBody: upText.slice(0, 200),
+              mutStatus: mutResp.status,
+              mutBody: mutText.slice(0, 1000),
+              variables: mutVars,
+              username: username,
+              profileName: profileName,
+              lsdOk: !!lsd,
+              fbDtsgOk: !!fbDtsg,
+            };
+            if (!mutResp.ok) return { success: false, error: 'mutation failed ' + mutResp.status, debug: dbgInfo };
+            try {
+              var mutJson = JSON.parse(mutText);
+              if (mutJson.errors && mutJson.errors.length > 0) {
+                return { success: false, error: 'mutation error: ' + JSON.stringify(mutJson.errors[0]), debug: dbgInfo };
+              }
+            } catch(_) {}
+            return { success: true, debug: dbgInfo };
+          } catch(e) {
+            return { success: false, error: String(e && e.message ? e.message : e), debug: { step: 'exception' } };
+          }
+        })()
+      `, true) as Promise<{ success: boolean; error?: string; debug?: Record<string, unknown> }>,
+      new Promise<{ success: boolean; error: string; debug?: Record<string, unknown> }>(resolve =>
+        setTimeout(() => resolve({ success: false, error: 'タイムアウト (60秒)' }), 60000)
+      ),
+    ])
+
+    if (result.debug) {
+      console.log(`[changeProfilePic:debug] account=${accountId} debug=${JSON.stringify(result.debug)}`)
+    }
+    if (result.success) {
+      console.log(`[changeProfilePic] account=${accountId} icon changed ✓`)
+    } else {
+      console.warn(`[changeProfilePic] account=${accountId} failed: ${result.error}`)
+    }
+    if (!hadViewBefore) {
+      console.log(`[changeProfilePic] account=${accountId} closing temporary background view`)
+      _manager?.closeView(accountId)
+    }
+    return result
+  } catch (e) {
+    if (!hadViewBefore) _manager?.closeView(accountId)
+    return { success: false, error: e instanceof Error ? e.message : String(e) }
+  }
 }

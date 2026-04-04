@@ -10,11 +10,13 @@ import {
   updateAccountGroup,
   updateAccountMemo,
   updateAccountSpeedPreset,
+  updateAccountUserAgent,
   reorderAccounts,
   deleteAccount,
   getAccountById,
   getAccountFingerprint,
 } from '../db/repositories/accounts'
+import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { setSetting } from '../db/repositories/settings'
 import type { StatusCheckResult } from '../browser-views/view-manager'
 import { createAndSaveFingerprint } from '../fingerprint'
@@ -53,6 +55,7 @@ export function registerAccountHandlers(): void {
           proxy_url: options?.proxy_url,
           proxy_username: options?.proxy_username,
           proxy_password: options?.proxy_password,
+          user_agent: pickRandomIphoneUA(),
         })
         // アカウント作成直後にフィンガープリントを固定
         createAndSaveFingerprint(account.id)
@@ -114,6 +117,7 @@ export function registerAccountHandlers(): void {
           proxy_url: options?.proxy_url,
           proxy_username: options?.proxy_username,
           proxy_password: options?.proxy_password,
+          user_agent: pickRandomIphoneUA(),
         })
         // アカウント作成直後にフィンガープリントを固定
         createAndSaveFingerprint(account.id)
@@ -256,6 +260,11 @@ export function registerAccountHandlers(): void {
     return { success: true }
   })
 
+  ipcMain.handle('accounts:update-user-agent', (_event, data: { id: number; user_agent: string | null }) => {
+    updateAccountUserAgent(data.id, data.user_agent)
+    return { success: true }
+  })
+
   ipcMain.handle(
     'accounts:reorder',
     (_event, updates: { id: number; sort_order: number; group_name: string | null }[]) => {
@@ -380,6 +389,7 @@ export function registerAccountHandlers(): void {
         proxy_url:      data.proxy_url      ?? undefined,
         proxy_username: data.proxy_username ?? undefined,
         proxy_password: data.proxy_password ?? undefined,
+        user_agent: pickRandomIphoneUA(),
       })
       createAndSaveFingerprint(account.id)
       updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
@@ -422,6 +432,60 @@ export function registerAccountHandlers(): void {
     ])
 
     menu.popup({ window: win })
+  })
+
+  ipcMain.handle('accounts:login-instagram', async (_event, accountId: number) => {
+    try {
+      const viewManager = getViewManager()
+      await viewManager.startInstagramLogin(accountId)
+      // ログイン後のクッキーを確認
+      const sess = session.fromPartition(`persist:account-${accountId}`)
+      const cookies = await sess.cookies.get({})
+      const hasSessionId = cookies.some(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))
+      return { success: true, hasSessionId }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('accounts:bulk-login-instagram', async (event, data: { group_name: string | null }) => {
+    const push = (payload: object) => {
+      if (!event.sender.isDestroyed()) event.sender.send('accounts:bulk-login-progress', payload)
+    }
+
+    const all = getAllAccounts()
+    const targets = data.group_name === null
+      ? all.filter(a => a.group_name === null)
+      : all.filter(a => a.group_name === data.group_name)
+
+    const total = targets.length
+    if (total === 0) {
+      push({ type: 'done', total: 0, successCount: 0 })
+      return { success: true }
+    }
+
+    push({ type: 'start', total })
+    let successCount = 0
+
+    for (let i = 0; i < targets.length; i++) {
+      const account = targets[i]
+      push({ type: 'progress', current: i, total, accountId: account.id, username: account.username })
+      try {
+        const viewManager = getViewManager()
+        await viewManager.startInstagramLogin(account.id)
+        const sess = session.fromPartition(`persist:account-${account.id}`)
+        const cookies = await sess.cookies.get({})
+        const hasSessionId = cookies.some(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))
+        if (hasSessionId) successCount++
+        push({ type: 'result', current: i + 1, total, accountId: account.id, username: account.username, success: hasSessionId })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        push({ type: 'result', current: i + 1, total, accountId: account.id, username: account.username, success: false, error: msg })
+      }
+    }
+
+    push({ type: 'done', total, successCount })
+    return { success: true }
   })
 
 }

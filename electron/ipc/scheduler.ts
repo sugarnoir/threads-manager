@@ -15,10 +15,62 @@ import {
   AutopostConfig,
 } from '../db/repositories/autopost'
 import { getSetting } from '../db/repositories/settings'
+import { createEngagement } from '../db/repositories/engagements'
 import { sendPost } from './post'
+import { apiPostText, apiPostWithMedia, fetchFollowerCount } from '../api/threads-web-api'
+import { resolveImagePaths } from '../utils/image-download'
+import { apiGetUserId, apiGetUserPosts, apiLikePost, apiFollowUser, apiReplyToPost, apiFetchNotifications } from '../api/threads-engage-api'
+import {
+  getEnabledAutoEngagementConfigs,
+  updateAutoEngagementState,
+  AutoEngagementConfig,
+} from '../db/repositories/auto_engagement'
+import {
+  getNextPendingFollow,
+  markFollowQueueDone,
+  markFollowQueueFailed,
+} from '../db/repositories/follow_queue'
+import {
+  getAllEnabledAutoReplyConfigs,
+  getAutoReplyConfig,
+  upsertReplyRecord,
+  getPendingReplyRecords,
+  updateReplyRecordStatus,
+  updateAutoReplyLastChecked,
+  hasRepliedToUsername,
+  AutoReplyConfig,
+} from '../db/repositories/auto-reply'
+import { getAllAccounts, updateAccountFollowerCount } from '../db/repositories/accounts'
 
 let schedulerInterval: NodeJS.Timeout | null = null
 let schedulerRunning = false
+let followerCountLastUpdated = 0
+const FOLLOWER_COUNT_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6時間
+
+async function refreshFollowerCounts(win: BrowserWindow): Promise<void> {
+  if (getSetting('follower_count_auto_fetch') !== 'true') return
+  const accounts = getAllAccounts().filter(a => a.status === 'active')
+  for (const account of accounts) {
+    try {
+      const count = await fetchFollowerCount(account.id)
+      if (count !== null) {
+        const prev = account.follower_count  // 更新前の値を退避
+        updateAccountFollowerCount(account.id, count)
+        if (!win.isDestroyed()) {
+          win.webContents.send('accounts:follower-count-updated', {
+            account_id: account.id,
+            follower_count: count,
+            follower_count_prev: prev,
+          })
+        }
+      }
+    } catch (e) {
+      console.error(`[followerCount] error for account=${account.id}:`, e)
+    }
+    // アカウント間に少し間隔を開ける
+    await new Promise(r => setTimeout(r, 2000))
+  }
+}
 
 // ── Claude API rewrite ────────────────────────────────────────────────────────
 
@@ -52,6 +104,96 @@ async function rewriteWithClaude(text: string): Promise<string | null> {
   }
 }
 
+// ── Auto-engagement execution ─────────────────────────────────────────────────
+
+async function executeAutoEngagement(cfg: AutoEngagementConfig): Promise<void> {
+  const usernames = cfg.target_usernames
+    .split('\n')
+    .map(u => u.trim().replace(/^@/, ''))
+    .filter(Boolean)
+
+  if (usernames.length === 0) return
+
+  if (cfg.action === 'like') {
+    const username = usernames[0]
+    const userId = await apiGetUserId(cfg.account_id, username)
+    if (!userId) {
+      console.warn(`[AutoEngagement] like: user not found: @${username}`)
+      return
+    }
+    const posts = await apiGetUserPosts(cfg.account_id, userId, 20)
+    if (posts.length === 0) return
+
+    const alreadyLiked = new Set(cfg.liked_post_ids)
+    const tolike = posts.filter(p => !alreadyLiked.has(p.id))
+    if (tolike.length === 0) return
+
+    // 1件だけいいね（間隔ごとに1件）
+    const target = tolike[0]
+    const result = await apiLikePost(cfg.account_id, target.id)
+
+    createEngagement({
+      account_id: cfg.account_id,
+      post_url:   `ig://media/${target.id}`,
+      action:     'api_like',
+      status:     result.success ? 'done' : 'failed',
+      error_msg:  result.error ?? null,
+    })
+
+    if (result.success) {
+      const newIds = [...cfg.liked_post_ids, target.id].slice(-300)
+      updateAutoEngagementState(cfg.account_id, 'like', { liked_post_ids: newIds })
+    }
+  }
+
+  if (cfg.action === 'follow') {
+    // ── キューが優先: follow_queue に pending があればそちらから消化 ──────────
+    const queueItem = getNextPendingFollow(cfg.account_id)
+    if (queueItem) {
+      console.log(`[AutoEngagement] follow via queue: account=${cfg.account_id} @${queueItem.target_username} (pk=${queueItem.target_pk})`)
+      const result = await apiFollowUser(cfg.account_id, queueItem.target_pk)
+      createEngagement({
+        account_id: cfg.account_id,
+        post_url:   `https://www.threads.com/@${queueItem.target_username}`,
+        action:     'api_follow',
+        status:     result.success ? 'done' : 'failed',
+        error_msg:  result.error ?? null,
+      })
+      if (result.success) {
+        markFollowQueueDone(queueItem.id)
+      } else {
+        markFollowQueueFailed(queueItem.id)
+      }
+      return
+    }
+
+    // ── フォールバック: 従来の target_usernames リスト ───────────────────────
+    if (usernames.length === 0) return
+    const idx = cfg.follow_idx % usernames.length
+    const username = usernames[idx]
+
+    const userId = await apiGetUserId(cfg.account_id, username)
+    if (!userId) {
+      console.warn(`[AutoEngagement] follow: user not found: @${username}`)
+      updateAutoEngagementState(cfg.account_id, 'follow', { follow_idx: (idx + 1) % usernames.length })
+      return
+    }
+
+    const result = await apiFollowUser(cfg.account_id, userId)
+    createEngagement({
+      account_id: cfg.account_id,
+      post_url:   `https://www.threads.com/@${username}`,
+      action:     'api_follow',
+      status:     result.success ? 'done' : 'failed',
+      error_msg:  result.error ?? null,
+    })
+
+    updateAutoEngagementState(cfg.account_id, 'follow', {
+      follow_idx: (idx + 1) % usernames.length,
+    })
+  }
+}
+
 // ── Auto-post execution ───────────────────────────────────────────────────────
 
 async function executeAutopost(
@@ -67,34 +209,160 @@ async function executeAutopost(
     const nextIdx = lastIdx + 1 >= stocks.length ? 0 : lastIdx + 1
     const stock = stocks[nextIdx]
 
-    const result = await sendPost(config.account_id, stock.content)
+    let result: { success: boolean; error?: string }
+    if (config.use_api) {
+      console.log(`[Autopost] stock.topic=${JSON.stringify(stock.topic)}`)
+      const { paths: imagePaths, cleanup } = await resolveImagePaths([stock.image_url, stock.image_url_2])
+      try {
+        if (imagePaths.length > 0) {
+          result = await apiPostWithMedia(config.account_id, stock.content, imagePaths, stock.topic ?? undefined)
+        } else {
+          result = await apiPostText(config.account_id, stock.content, stock.topic ?? undefined)
+        }
+      } finally {
+        cleanup()
+      }
+    } else {
+      result = await sendPost(config.account_id, stock.content)
+    }
     updateAutopostState(config.account_id, { stock_last_id: stock.id })
     return result
   }
 
+  if (config.mode === 'random') {
+    const stocks = getStocksByAccount(config.account_id)
+    if (stocks.length === 0) return null
+
+    const stock = stocks[Math.floor(Math.random() * stocks.length)]
+
+    let result: { success: boolean; error?: string }
+    if (config.use_api) {
+      const { paths: imagePaths, cleanup } = await resolveImagePaths([stock.image_url, stock.image_url_2])
+      try {
+        if (imagePaths.length > 0) {
+          result = await apiPostWithMedia(config.account_id, stock.content, imagePaths, stock.topic ?? undefined)
+        } else {
+          result = await apiPostText(config.account_id, stock.content, stock.topic ?? undefined)
+        }
+      } finally {
+        cleanup()
+      }
+    } else {
+      result = await sendPost(config.account_id, stock.content)
+    }
+    return result
+  }
+
   if (config.mode === 'rewrite') {
-    if (config.rewrite_texts.length === 0) return null
+    const stocks = getStocksByAccount(config.account_id)
+    if (stocks.length === 0) return { success: false, error: 'ストックが空です' }
 
-    const idx = config.rewrite_idx % config.rewrite_texts.length
-    const sourceText = config.rewrite_texts[idx]
+    const lastIdx = config.stock_last_id
+      ? stocks.findIndex((s) => s.id === config.stock_last_id)
+      : -1
+    const nextIdx = lastIdx + 1 >= stocks.length ? 0 : lastIdx + 1
+    const stock = stocks[nextIdx]
 
-    const rewritten = await rewriteWithClaude(sourceText)
+    console.log(`[Autopost] rewrite: account=${config.account_id} stock.id=${stock.id} text="${stock.content.slice(0, 50)}..."`)
+
+    const rewritten = await rewriteWithClaude(stock.content)
     if (!rewritten) return { success: false, error: 'AIリライト失敗（APIキー未設定？）' }
 
-    const result = await sendPost(config.account_id, rewritten)
-    updateAutopostState(config.account_id, {
-      rewrite_idx: (idx + 1) % config.rewrite_texts.length,
-    })
+    console.log(`[Autopost] rewritten: "${rewritten.slice(0, 80)}..."`)
+
+    let result: { success: boolean; error?: string }
+    if (config.use_api) {
+      result = await apiPostText(config.account_id, rewritten)
+    } else {
+      result = await sendPost(config.account_id, rewritten)
+    }
+    updateAutopostState(config.account_id, { stock_last_id: stock.id })
     return result
   }
 
   return null
 }
 
+// ── Auto-reply execution ──────────────────────────────────────────────────────
+
+async function executeAutoReply(config: AutoReplyConfig): Promise<void> {
+  const { group_name } = config
+  console.log(`[autoReply] checking group=${group_name}`)
+
+  updateAutoReplyLastChecked(group_name)
+
+  if (config.reply_texts.length === 0) {
+    console.log(`[autoReply] no reply_texts for group=${group_name}`)
+    return
+  }
+
+  const allAccounts = getAllAccounts()
+  const accounts = allAccounts.filter(a => a.group_name === group_name)
+  if (accounts.length === 0) {
+    console.log(`[autoReply] no accounts in group=${group_name}`)
+    return
+  }
+
+  for (const account of accounts) {
+    try {
+      // 通知ページからリプライ通知を取得
+      const notifications = await apiFetchNotifications(account.id)
+      if (notifications === null || notifications.length === 0) {
+        console.log(`[autoReply] account=${account.id} no reply notifications (view may not be loaded)`)
+      } else {
+        console.log(`[autoReply] account=${account.id} found ${notifications.length} reply notifications`)
+        for (const notif of notifications) {
+          const isNew = upsertReplyRecord({
+            account_id:     account.id,
+            parent_post_id: notif.parentPostId,
+            reply_post_id:  notif.mediaId,
+            reply_username: notif.username,
+            reply_text:     notif.content,
+          })
+          if (isNew) {
+            console.log(`[autoReply] new reply from @${notif.username}: "${notif.content.slice(0, 50)}"`)
+          }
+        }
+      }
+
+      // pending レコードに返信
+      const pending = getPendingReplyRecords(account.id)
+      console.log(`[autoReply] account=${account.id} pending=${pending.length}`)
+      for (const record of pending) {
+        // 同じユーザーへの2回目以降の返信はスキップ（初回のみ返信）
+        if (record.reply_username && hasRepliedToUsername(account.id, record.reply_username)) {
+          console.log(`[autoReply] skip: already replied to @${record.reply_username}`)
+          updateReplyRecordStatus(record.id, 'skipped')
+          continue
+        }
+        const text = config.reply_texts[Math.floor(Math.random() * config.reply_texts.length)]
+        const result = await apiReplyToPost(account.id, record.reply_post_id, text)
+        if (result.success) {
+          updateReplyRecordStatus(record.id, 'replied')
+          console.log(`[autoReply] replied to ${record.reply_post_id} from @${record.reply_username}`)
+        } else {
+          console.warn(`[autoReply] failed to reply to ${record.reply_post_id}: ${result.error}`)
+          updateReplyRecordStatus(record.id, 'skipped')
+        }
+        await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500))
+      }
+    } catch (e) {
+      console.error(`[autoReply] error for account=${account.id}:`, e)
+    }
+  }
+}
+
 // ── Scheduler loop ────────────────────────────────────────────────────────────
 
 export function startScheduler(win: BrowserWindow): void {
   if (schedulerInterval) return
+
+  // 起動時にフォロワー数を即時取得（3秒後に開始してセッション初期化を待つ）
+  setTimeout(() => {
+    refreshFollowerCounts(win).catch(e => console.error('[followerCount] startup error:', e))
+    followerCountLastUpdated = Date.now()
+  }, 3000)
+
   schedulerInterval = setInterval(async () => {
     if (schedulerRunning) return
     schedulerRunning = true
@@ -150,6 +418,44 @@ export function startScheduler(win: BrowserWindow): void {
           console.error('[Autopost] Error for account', config.account_id, e)
         }
       }
+
+      // 3. 自動エンゲージメント (いいね / フォロー)
+      const engConfigs = getEnabledAutoEngagementConfigs()
+      for (const cfg of engConfigs) {
+        if (cfg.next_at && new Date(cfg.next_at) > new Date()) continue
+        try {
+          await executeAutoEngagement(cfg)
+          const delayMs =
+            (cfg.min_interval + Math.random() * (cfg.max_interval - cfg.min_interval)) * 60_000
+          const nextAt = new Date(Date.now() + delayMs).toISOString()
+          updateAutoEngagementState(cfg.account_id, cfg.action, { next_at: nextAt })
+          if (!win.isDestroyed()) {
+            win.webContents.send('autoEngagement:executed', {
+              account_id: cfg.account_id,
+              action:     cfg.action,
+              next_at:    nextAt,
+            })
+          }
+        } catch (e) {
+          console.error('[AutoEngagement] Error for account', cfg.account_id, cfg.action, e)
+        }
+      }
+      // 4. フォロワー数定期更新（1時間ごと）
+      if (Date.now() - followerCountLastUpdated >= FOLLOWER_COUNT_INTERVAL_MS) {
+        followerCountLastUpdated = Date.now()
+        refreshFollowerCounts(win).catch(e => console.error('[followerCount] periodic error:', e))
+      }
+
+      // 5. 自動返信
+      const replyNow = new Date()
+      const replyConfigs = getAllEnabledAutoReplyConfigs()
+      for (const cfg of replyConfigs) {
+        const lastChecked = cfg.last_checked_at ? new Date(cfg.last_checked_at) : null
+        const checkIntervalMs = cfg.check_interval * 60_000
+        if (!lastChecked || replyNow.getTime() - lastChecked.getTime() >= checkIntervalMs) {
+          executeAutoReply(cfg).catch(e => console.error('[autoReply] error:', e))
+        }
+      }
     } finally {
       schedulerRunning = false
     }
@@ -186,6 +492,13 @@ export function registerSchedulerHandlers(): void {
 
   ipcMain.handle('schedules:delete', (_event, id: number) => {
     deleteSchedule(id)
+    return { success: true }
+  })
+
+  ipcMain.handle('autoReply:checkNow', async (_e, groupName: string) => {
+    const cfg = getAutoReplyConfig(groupName)
+    if (!cfg) return { success: false, error: 'config not found' }
+    executeAutoReply(cfg).catch(e => console.error('[autoReply:checkNow] error:', e))
     return { success: true }
   })
 }

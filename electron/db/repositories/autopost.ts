@@ -4,7 +4,8 @@ export interface AutopostConfig {
   id:            number
   account_id:    number
   enabled:       boolean
-  mode:          'stock' | 'rewrite'
+  mode:          'stock' | 'rewrite' | 'random'
+  use_api:       boolean
   min_interval:  number   // minutes
   max_interval:  number   // minutes
   next_at:       string | null
@@ -15,8 +16,9 @@ export interface AutopostConfig {
   updated_at:    string
 }
 
-interface AutopostRow extends Omit<AutopostConfig, 'enabled' | 'rewrite_texts'> {
+interface AutopostRow extends Omit<AutopostConfig, 'enabled' | 'use_api' | 'rewrite_texts'> {
   enabled:       number
+  use_api:       number
   rewrite_texts: string
 }
 
@@ -24,6 +26,7 @@ function parseConfig(row: AutopostRow): AutopostConfig {
   return {
     ...row,
     enabled:       row.enabled === 1,
+    use_api:       row.use_api === 1,
     rewrite_texts: JSON.parse(row.rewrite_texts),
   }
 }
@@ -45,7 +48,8 @@ export function getEnabledAutopostConfigs(): AutopostConfig[] {
 export function upsertAutopostConfig(data: {
   account_id:    number
   enabled:       boolean
-  mode:          'stock' | 'rewrite'
+  mode:          'stock' | 'rewrite' | 'random'
+  use_api:       boolean
   min_interval:  number
   max_interval:  number
   rewrite_texts: string[]
@@ -58,12 +62,13 @@ export function upsertAutopostConfig(data: {
   if (existing) {
     db.prepare(
       `UPDATE autopost_configs
-       SET enabled = ?, mode = ?, min_interval = ?, max_interval = ?,
+       SET enabled = ?, mode = ?, use_api = ?, min_interval = ?, max_interval = ?,
            rewrite_texts = ?, updated_at = datetime('now')
        WHERE account_id = ?`
     ).run(
       data.enabled ? 1 : 0,
       data.mode,
+      data.use_api ? 1 : 0,
       data.min_interval,
       data.max_interval,
       JSON.stringify(data.rewrite_texts),
@@ -71,12 +76,13 @@ export function upsertAutopostConfig(data: {
     )
   } else {
     db.prepare(
-      `INSERT INTO autopost_configs (account_id, enabled, mode, min_interval, max_interval, rewrite_texts)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO autopost_configs (account_id, enabled, mode, use_api, min_interval, max_interval, rewrite_texts)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       data.account_id,
       data.enabled ? 1 : 0,
       data.mode,
+      data.use_api ? 1 : 0,
       data.min_interval,
       data.max_interval,
       JSON.stringify(data.rewrite_texts)
@@ -112,4 +118,10 @@ export function resetAutopostNext(accountId: number): void {
   getDb()
     .prepare("UPDATE autopost_configs SET next_at = NULL, updated_at = datetime('now') WHERE account_id = ?")
     .run(accountId)
+}
+
+export function setAutopostNextAt(accountId: number, nextAt: string): void {
+  getDb()
+    .prepare("UPDATE autopost_configs SET next_at = ?, updated_at = datetime('now') WHERE account_id = ?")
+    .run(nextAt, accountId)
 }
