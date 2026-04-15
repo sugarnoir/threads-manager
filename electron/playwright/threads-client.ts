@@ -290,12 +290,15 @@ async function jsFocusAndType(el: import('playwright').ElementHandle, text: stri
 
 // ナビゲーション投稿ボタン（コンポーザーを開く）
 const COMPOSE_BTN = [
+  '[aria-label="作成"]',
   '[aria-label="新しいスレッドを作成"]',
   '[aria-label="Create new thread"]',
   '[aria-label="新規スレッド"]',
   '[aria-label="New thread"]',
   '[aria-label="スレッドを作成"]',
   '[aria-label="Create a thread"]',
+  '[aria-label="Threads を作成"]',
+  '[aria-label="Create a Thread"]',
   'a[href="/compose"]',
   'a[href*="/compose"]',
 ]
@@ -431,6 +434,11 @@ function isProxyError(err: unknown): boolean {
   )
 }
 
+function isTimeoutError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return msg.includes('timeout') && (msg.includes('exceeded') || msg.includes('page.goto'))
+}
+
 // ─── Schedule Post ────────────────────────────────────────────────────────────
 // 調査済みフロー:
 //   1. [aria-label*="テキストフィールド"] → click → compose modal
@@ -487,14 +495,16 @@ async function scheduleThreadCore(
   content: string,
   scheduledAt: Date,
   resolvedMedia: string[],
-  ctxLabel: string  // ログ識別用 ('proxy' | 'direct')
+  ctxLabel: string,  // ログ識別用 ('proxy' | 'direct')
+  topic?: string
 ): Promise<PostResult> {
   console.log(`[scheduleThread/${ctxLabel}] page.goto ${THREADS_URL}`)
   try {
-    await page.goto(THREADS_URL, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+    await page.goto(THREADS_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     if (isProxyError(e)) throw new Error(`PROXY_ERROR: ${msg}`)
+    if (isTimeoutError(e)) throw new Error(`PROXY_ERROR: 接続タイムアウト（60秒以内に応答なし）`)
     throw e
   }
 
@@ -519,7 +529,7 @@ async function scheduleThreadCore(
 
   if (composeNavBtn) {
     await composeNavBtn.click()
-    await page.waitForSelector('[contenteditable="true"]', { timeout: 8_000 }).catch(() => {})
+    await page.waitForSelector('[role="dialog"]', { timeout: 8_000 }).catch(() => {})
     console.log(`[scheduleThread/${ctxLabel}] Step1: compose btn clicked`)
   } else {
     const inlineArea = await page.waitForSelector(
@@ -531,8 +541,16 @@ async function scheduleThreadCore(
       const ariaLabel = await inlineArea.getAttribute('aria-label').catch(() => '')
       console.log(`[scheduleThread/${ctxLabel}] Step1: inline area found (aria-label="${ariaLabel}"), clicking`)
       await inlineArea.click()
-      await page.waitForSelector('[contenteditable="true"]', { timeout: 8_000 }).catch(() => {})
-      console.log(`[scheduleThread/${ctxLabel}] Step1: inline area clicked, waiting for modal`)
+      // インラインエリアをクリックするとモーダルが開く。モーダルが表示されるまで待つ
+      const dialogAppeared = await page.waitForSelector('[role="dialog"]', { timeout: 8_000 }).catch(() => null)
+      if (!dialogAppeared) {
+        // モーダルが開かなかった場合は /compose へ直接遷移
+        console.log(`[scheduleThread/${ctxLabel}] Step1: dialog not opened after inline click, navigating to /compose`)
+        await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+      } else {
+        console.log(`[scheduleThread/${ctxLabel}] Step1: dialog opened after inline click`)
+      }
     } else {
       console.log(`[scheduleThread/${ctxLabel}] Step1: navigating to /compose`)
       await page.goto(`${THREADS_URL}/compose`, { waitUntil: 'domcontentloaded', timeout: 15_000 })
@@ -588,6 +606,92 @@ async function scheduleThreadCore(
     await page.keyboard.type(content, { delay: 20 })
   }
   console.log(`[scheduleThread/${ctxLabel}] Step2: content typed`)
+
+  // ── Step 2.5: トピック入力 ───────────────────────────────────────────────────
+  console.log(`[scheduleThread/${ctxLabel}] Step2.5: topic=${JSON.stringify(topic)}`)
+  if (topic) {
+    console.log(`[scheduleThread/${ctxLabel}] Step2.5: filling topic="${topic}"`)
+
+    // aria-label ベースで探す（waitForSelector で最大3秒待機）
+    const TOPIC_BTN_SELS = [
+      '[aria-label="トピックを追加"]',
+      '[aria-label="Add topic"]',
+      '[aria-label="Add a topic"]',
+      '[aria-label="トピック"]',
+      '[aria-label="Topic"]',
+      '[aria-label="トピックを選択"]',
+      '[aria-label="Add a topic to your thread"]',
+      '[aria-label="スレッドにトピックを追加"]',
+    ]
+    let topicBtn = await page.waitForSelector(TOPIC_BTN_SELS.join(', '), { timeout: 3_000 }).catch(() => null)
+
+    // aria-label で見つからなければ Playwright のテキストロケーターで探す
+    if (!topicBtn) {
+      const TOPIC_TEXTS = ['トピックを追加', 'Add topic', 'Add a topic', 'トピック', 'Topic']
+      for (const txt of TOPIC_TEXTS) {
+        const loc = page.locator(`div[role="button"]:has-text("${txt}"), button:has-text("${txt}"), span:has-text("${txt}")`)
+        const cnt = await loc.count().catch(() => 0)
+        if (cnt > 0) {
+          topicBtn = await loc.first().elementHandle().catch(() => null)
+          if (topicBtn) {
+            console.log(`[scheduleThread/${ctxLabel}] Step2.5: topic button found by text="${txt}"`)
+            break
+          }
+        }
+      }
+    }
+
+    // ページ内の全ボタンをログ出力（デバッグ用）
+    if (!topicBtn) {
+      const allBtns = await page.evaluate(`
+        Array.from(document.querySelectorAll('div[role="button"],button'))
+          .map(el => ({ text: (el.textContent||'').trim().slice(0,30), aria: el.getAttribute('aria-label') }))
+          .filter(b => b.text || b.aria)
+      `).catch(() => [])
+      console.warn(`[scheduleThread/${ctxLabel}] Step2.5: topic button not found. Buttons: ${JSON.stringify(allBtns)}`)
+    } else {
+      await topicBtn.click().catch(() => {})
+      await page.waitForTimeout(600)
+
+      // トピック入力欄
+      const TOPIC_INPUT_SELS = [
+        'input[placeholder*="トピック"]',
+        'input[placeholder*="topic" i]',
+        'input[placeholder*="Topic"]',
+        'input[placeholder*="Search" i]',
+        'input[placeholder*="検索"]',
+        'input[type="text"]',
+        'input[type="search"]',
+      ]
+      const topicInput = await page.waitForSelector(TOPIC_INPUT_SELS.join(', '), { timeout: 3_000 }).catch(() => null)
+      if (topicInput) {
+        await topicInput.click()
+        await topicInput.fill(topic)
+        await page.waitForTimeout(800)
+        // 候補リストからマッチするものをクリック
+        const matchItem = await page.evaluate(`
+          (() => {
+            const val = ${JSON.stringify(topic)}.toLowerCase()
+            const items = Array.from(document.querySelectorAll('[role="option"],[role="listitem"],li'))
+            const found = items.find(el => (el.textContent||'').toLowerCase().includes(val))
+            if (found) { found.click(); return true }
+            return false
+          })()
+        `).catch(() => false)
+        if (matchItem) {
+          console.log(`[scheduleThread/${ctxLabel}] Step2.5: topic candidate clicked`)
+          await page.waitForTimeout(300)
+        } else {
+          console.warn(`[scheduleThread/${ctxLabel}] Step2.5: no matching topic candidate found`)
+        }
+        console.log(`[scheduleThread/${ctxLabel}] Step2.5: topic filled`)
+      } else {
+        console.warn(`[scheduleThread/${ctxLabel}] Step2.5: topic input not found after button click`)
+      }
+    }
+  } else {
+    console.log(`[scheduleThread/${ctxLabel}] Step2.5: no topic, skipping`)
+  }
 
   // ── Step 3: 画像添付 ────────────────────────────────────────────────────────
   if (resolvedMedia.length > 0) {
@@ -656,15 +760,26 @@ async function scheduleThreadCore(
   await page.waitForSelector('[role="grid"]', { state: 'hidden', timeout: 5_000 }).catch(() => {
     console.warn(`[scheduleThread/${ctxLabel}] Step7: [role="grid"] still visible after 完了 click`)
   })
-  await page.waitForTimeout(800)
+  await page.waitForTimeout(1500)
   console.log(`[scheduleThread/${ctxLabel}] Step7: 完了/Done clicked`)
+
+  // ── Step 7.5: ダイアログがまだ開いているか確認 ─────────────────────────────
+  // 新しい Threads UI では「完了」クリック時点で予約が確定しダイアログが閉じる場合がある。
+  // その場合 Step 8（確定ボタン）は不要なので成功として返す。
+  const dialogAfterDone = await page.$('[role="dialog"]').catch(() => null)
+  if (!dialogAfterDone) {
+    console.log(`[scheduleThread/${ctxLabel}] Step7.5: dialog closed after 完了 → schedule confirmed`)
+    return { success: true }
+  }
+  console.log(`[scheduleThread/${ctxLabel}] Step7.5: dialog still open, proceeding to Step8`)
 
   // ── Step 8: 予約確定ボタンをクリック ─────────────────────────────────────
   // スケジュール設定後のコンポーズモーダルでは「投稿」ボタンが「日時を指定」に変わる。
   // 「日時を指定」ボタン（右下、通常の「投稿」と同じ位置）をクリックして予約確定する。
   console.log(`[scheduleThread/${ctxLabel}] Step8: clicking schedule/post btn`)
 
-  const SCHEDULE_BTN = [
+  // まず [role="dialog"] スコープで探し、見つからなければスコープなしで探す
+  const SCHEDULE_BTN_IN_DIALOG = [
     '[role="dialog"] div[role="button"]:has-text("日時を指定")',
     '[role="dialog"] div[role="button"]:has-text("Schedule")',
     '[role="dialog"] div[role="button"]:has-text("スケジュール")',
@@ -672,10 +787,23 @@ async function scheduleThreadCore(
     '[role="dialog"] div[role="button"]:has-text("投稿する")',
     '[role="dialog"] div[role="button"]:has-text("Post")',
   ]
-  const postBtn = await page.waitForSelector(
-    SCHEDULE_BTN.join(', '),
-    { timeout: 10_000 }
+  const SCHEDULE_BTN_GLOBAL = [
+    'div[role="button"]:has-text("日時を指定")',
+    'div[role="button"]:has-text("Schedule")',
+    'div[role="button"]:has-text("スケジュール")',
+    'div[role="button"]:has-text("予約投稿")',
+    'button:has-text("日時を指定")',
+    'button:has-text("Schedule")',
+    'button:has-text("スケジュール")',
+  ]
+  let postBtn = await page.waitForSelector(
+    SCHEDULE_BTN_IN_DIALOG.join(', '),
+    { timeout: 8_000 }
   ).catch(() => null)
+  if (!postBtn) {
+    console.log(`[scheduleThread/${ctxLabel}] Step8: dialog-scoped btn not found, trying global selectors`)
+    postBtn = await page.$(SCHEDULE_BTN_GLOBAL.join(', ')).catch(() => null)
+  }
   if (!postBtn) {
     const btnText = await page.evaluate(`
       (() => Array.from(document.querySelectorAll('[role="button"]'))
@@ -704,12 +832,13 @@ export async function scheduleThread(
   accountId: number,
   content: string,
   scheduledAt: Date,
-  mediaPaths: string[] = []
+  mediaPaths: string[] = [],
+  topic?: string
 ): Promise<PostResult> {
   const acct = getAccountById(accountId)
   console.log(
     `[scheduleThread] START account=${accountId} scheduledAt=${scheduledAt.toISOString()} ` +
-    `proxy=${acct?.proxy_url ?? 'none'}`
+    `proxy=${acct?.proxy_url ?? 'none'} topic=${topic ?? 'none'}`
   )
 
   // 画像パスを事前解決（URL はダウンロード）
@@ -723,9 +852,9 @@ export async function scheduleThread(
 
   const cleanup = () => { for (const tmp of tmpPaths) fs.unlink(tmp, () => {}) }
 
-  // 全体タイムアウト: 120秒
+  // 全体タイムアウト: 180秒（page.goto 60秒 + 各ステップを考慮）
   const makeTimeout = () => new Promise<PostResult>((_, reject) =>
-    setTimeout(() => reject(new Error('タイムアウト: 予約処理が120秒を超えました')), 120_000)
+    setTimeout(() => reject(new Error('接続タイムアウト: 予約処理が180秒を超えました')), 180_000)
   )
 
   try {
@@ -733,7 +862,7 @@ export async function scheduleThread(
     const task = withContext(accountId, async (ctx) => {
       const page = await ctx.newPage()
       try {
-        return await scheduleThreadCore(page, content, scheduledAt, resolvedMedia, 'proxy')
+        return await scheduleThreadCore(page, content, scheduledAt, resolvedMedia, 'proxy', topic)
       } finally {
         await page.close().catch(() => {})
       }
@@ -751,7 +880,7 @@ export async function scheduleThread(
       const directTask = withContextDirect(accountId, async (ctx) => {
         const page = await ctx.newPage()
         try {
-          return await scheduleThreadCore(page, content, scheduledAt, resolvedMedia, 'direct')
+          return await scheduleThreadCore(page, content, scheduledAt, resolvedMedia, 'direct', topic)
         } finally {
           await page.close().catch(() => {})
         }

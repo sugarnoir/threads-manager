@@ -153,6 +153,8 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
   const [username, setUsername]   = useState('')
   const [password, setPassword]   = useState('')
   const [presets, setPresets]     = useState<ProxyPreset[]>([])
+  const [currentIp, setCurrentIp] = useState<string | null>(null)
+  const [checkingIp, setCheckingIp] = useState(false)
 
   useEffect(() => {
     api.proxyPresets.list().then(setPresets).catch(() => {})
@@ -168,6 +170,25 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
       }
     }).catch(() => {})
   }, [])
+
+  // プロキシ設定が確定したときにIPチェック
+  useEffect(() => {
+    if (proxyType === 'none') {
+      setCurrentIp('__none__')
+      return
+    }
+    if (!host || !port) {
+      setCurrentIp(null)
+      return
+    }
+    setCheckingIp(true)
+    setCurrentIp(null)
+    const proxyUrl = `${proxyType}://${host}:${port}`
+    api.accounts.checkIp({ proxy_url: proxyUrl, proxy_username: username || undefined, proxy_password: password || undefined })
+      .then(r => setCurrentIp(r.ip ?? 'エラー'))
+      .catch(() => setCurrentIp('エラー'))
+      .finally(() => setCheckingIp(false))
+  }, [proxyType, host, port, username, password])
 
   const buildProxy = (): ProxyOptions | null => {
     if (proxyType === 'none' || !host || !port) return null
@@ -247,6 +268,19 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
           password={password} setPassword={setPassword}
           presets={presets}
         />
+
+        {/* IP表示 */}
+        <div className="flex items-center gap-2 px-3 py-2 bg-zinc-800 rounded-lg text-xs">
+          <span className="text-zinc-400">現在のIP:</span>
+          {checkingIp && <span className="text-zinc-500">確認中...</span>}
+          {!checkingIp && currentIp === '__none__' && <span className="text-zinc-500">プロキシなし</span>}
+          {!checkingIp && currentIp && currentIp !== '__none__' && (
+            <span className={currentIp === 'エラー' ? 'text-red-400' : 'text-emerald-400 font-mono'}>{currentIp}</span>
+          )}
+          {!checkingIp && currentIp === null && proxyType !== 'none' && (
+            <span className="text-zinc-600">ホスト/ポートを入力してください</span>
+          )}
+        </div>
 
         {/* Actions */}
         <div className="flex gap-2 pt-1">

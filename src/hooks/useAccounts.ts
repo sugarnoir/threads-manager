@@ -23,13 +23,19 @@ export function useAccounts() {
         prev.map((a) => (a.id === account_id ? { ...a, status: 'challenge' as const } : a))
       )
     })
-    const unsub = api.on('accounts:follower-count-updated', (data) => {
+    const unsubFollower = api.on('accounts:follower-count-updated', (data) => {
       const { account_id, follower_count, follower_count_prev } = data as { account_id: number; follower_count: number; follower_count_prev: number | null }
       setAccounts((prev) =>
         prev.map((a) => (a.id === account_id ? { ...a, follower_count, follower_count_prev } : a))
       )
     })
-    return () => { unsubChallenge?.(); unsub?.() }
+    const unsubExpired = api.on('accounts:session-expired', (data) => {
+      const { account_id } = data as { account_id: number }
+      setAccounts((prev) =>
+        prev.map((a) => (a.id === account_id ? { ...a, status: 'needs_login' as const } : a))
+      )
+    })
+    return () => { unsubChallenge?.(); unsubFollower?.(); unsubExpired?.() }
   }, [])
 
   const addAccount = async (options?: {

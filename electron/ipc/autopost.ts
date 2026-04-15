@@ -1,9 +1,11 @@
-import { ipcMain } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import {
   getAutopostConfig,
+  getEnabledAutopostConfigs,
   upsertAutopostConfig,
   resetAutopostNext,
   setAutopostNextAt,
+  getAllAccountAutopostStatuses,
 } from '../db/repositories/autopost'
 import { getDb } from '../db/index'
 import { createPost, updatePostStatus } from '../db/repositories/posts'
@@ -13,6 +15,10 @@ import { resolveImagePaths } from '../utils/image-download'
 export function registerAutopostHandlers(): void {
   ipcMain.handle('autopost:get', (_event, accountId: number) => {
     return getAutopostConfig(accountId)
+  })
+
+  ipcMain.handle('autopost:list-enabled', () => {
+    return getEnabledAutopostConfigs()
   })
 
   ipcMain.handle(
@@ -29,7 +35,12 @@ export function registerAutopostHandlers(): void {
         rewrite_texts: string[]
       }
     ) => {
-      return upsertAutopostConfig(data)
+      const result = upsertAutopostConfig(data)
+      // サイドバーの自動投稿ステータスを即時更新
+      BrowserWindow.getAllWindows().forEach((w) => {
+        if (!w.isDestroyed()) w.webContents.send('autopost:updated')
+      })
+      return result
     }
   )
 
@@ -41,6 +52,10 @@ export function registerAutopostHandlers(): void {
   ipcMain.handle('autopost:set-next-at', (_event, data: { account_id: number; next_at: string }) => {
     setAutopostNextAt(data.account_id, data.next_at)
     return { success: true }
+  })
+
+  ipcMain.handle('autopost:account-statuses', () => {
+    return getAllAccountAutopostStatuses()
   })
 
   // Immediate API post from a stock item

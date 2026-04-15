@@ -17,6 +17,7 @@ export interface Account {
   sort_order: number
   speed_preset: 'slow' | 'normal' | 'fast'
   user_agent: string | null
+  mark: string | null
   created_at: string
   updated_at: string
 }
@@ -76,6 +77,7 @@ export interface Schedule {
   scheduled_at: string
   status: 'pending' | 'posted' | 'failed' | 'cancelled'
   post_id: number | null
+  topic: string | null
   created_at: string
 }
 
@@ -186,6 +188,13 @@ export interface AutopostConfig {
   updated_at:    string
 }
 
+export interface AccountAutopostStatus {
+  account_id:     number
+  last_posted_at: string | null
+  next_at:        string | null
+  enabled:        boolean
+}
+
 export interface AutoEngagementConfig {
   id:               number
   account_id:       number
@@ -288,8 +297,11 @@ declare global {
         updateDisplayName: (data: { id: number; display_name: string | null }) => Promise<{ success: boolean }>
         updateGroup: (data: { id: number; group_name: string | null }) => Promise<{ success: boolean }>
         updateMemo: (data: { id: number; memo: string | null }) => Promise<{ success: boolean }>
+        updateMark: (data: { id: number; mark: string | null }) => Promise<{ success: boolean }>
         updateSpeedPreset: (data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) => Promise<{ success: boolean }>
         updateUserAgent: (data: { id: number; user_agent: string | null }) => Promise<{ success: boolean }>
+        checkIp: (data: { proxy_url: string | null; proxy_username?: string; proxy_password?: string }) => Promise<{ ip: string | null; error?: string }>
+        hasAccessToken: (id: number) => Promise<{ hasToken: boolean }>
         loginInstagram: (id: number) => Promise<{ success: boolean; hasSessionId?: boolean; error?: string }>
         bulkLoginInstagram: (data: { group_name: string | null }) => Promise<{ success: boolean; error?: string }>
         clearCookies: (id: number) => Promise<{ success: boolean }>
@@ -300,6 +312,16 @@ declare global {
         checkAll: () => Promise<{ success: boolean }>
         delete: (id: number) => Promise<{ success: boolean }>
         fingerprint: (id: number) => Promise<FingerprintData | null>
+        proxyUrlCounts: () => Promise<Record<string, number>>
+        proxyPortStats: () => Promise<Array<{
+          host:         string
+          portEntries:  { port: number; count: number }[]
+          usedPortCount: number
+          minPort:      number
+          maxPort:      number
+          totalInRange: number
+          unusedPorts:  number[]
+        }>>
         autoRegister: (data: { name: string; email: string; password: string; proxy_url?: string | null; proxy_username?: string | null; proxy_password?: string | null }) => Promise<{ success: boolean; account?: Account; error?: string }>
       }
       posts: {
@@ -322,6 +344,7 @@ declare global {
           content: string
           media_paths?: string[]
           scheduled_at: string
+          topic?: string | null
         }) => Promise<Schedule>
         delete: (id: number) => Promise<{ success: boolean }>
       }
@@ -346,7 +369,7 @@ declare global {
         back: (accountId: number) => Promise<void>
         forward: (accountId: number) => Promise<void>
         reload: (accountId: number) => Promise<void>
-        openCompose: (accountId: number, content: string, images?: string[]) => Promise<{ success: boolean; error?: string }>
+        openCompose: (accountId: number, content: string, images?: string[], topic?: string) => Promise<{ success: boolean; error?: string }>
         changeProfilePic: (accountId: number, imagePath: string) => Promise<{ success: boolean; error?: string }>
       }
       settings: {
@@ -381,7 +404,7 @@ declare global {
         importCsv: (rows: Array<{ account_id: number; content: string; image_url?: string | null; image_url_2?: string | null }>) => Promise<{ success: boolean; imported: number; errors: string[] }>
         randomizeImages: (accountId: number) => Promise<{ success: boolean; updated?: number; errors?: string[]; error?: string }>
         updateAllTopics: (data: { account_id: number; topic: string | null }) => Promise<{ success: boolean; updated?: number; error?: string }>
-        schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null }) => Promise<{ success: boolean; error?: string }>
+        schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) => Promise<{ success: boolean; error?: string }>
       }
       imageGroups: {
         get:  () => Promise<{ success: boolean; data?: ImageGroups; error?: string }>
@@ -414,7 +437,8 @@ declare global {
         competitive: (data: { accountId: number; keyword: string; minLikes?: number; minReposts?: number; minReplies?: number }) => Promise<{ success: boolean; data: CompetitivePost[]; error?: string }>
       }
       autopost: {
-        get:       (accountId: number) => Promise<AutopostConfig | null>
+        get:             (accountId: number) => Promise<AutopostConfig | null>
+        listEnabled:     () => Promise<AutopostConfig[]>
         save:      (data: {
           account_id:    number
           enabled:       boolean
@@ -424,8 +448,9 @@ declare global {
           max_interval:  number
           rewrite_texts: string[]
         }) => Promise<AutopostConfig>
-        resetNext: (accountId: number) => Promise<{ success: boolean }>
-        setNextAt: (data: { account_id: number; next_at: string }) => Promise<{ success: boolean }>
+        resetNext:        (accountId: number) => Promise<{ success: boolean }>
+        setNextAt:        (data: { account_id: number; next_at: string }) => Promise<{ success: boolean }>
+        accountStatuses:  () => Promise<AccountAutopostStatus[]>
       }
       apiPost: {
         send: (data: { account_id: number; content: string; image_urls?: (string | null)[]; topic?: string }) =>

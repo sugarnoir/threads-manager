@@ -1,7 +1,8 @@
 import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage, powerMonitor } from 'electron'
 import { toRomaji } from 'wanakana'
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
-import { getContextCookiesIfOpen } from '../playwright/browser-manager'
+import { getContextCookiesIfOpen, closeContext } from '../playwright/browser-manager'
+import fs from 'fs'
 import { getSetting, setSetting } from '../db/repositories/settings'
 import { getAccountById, updateAccountStatus } from '../db/repositories/accounts'
 import { sendDiscordNotification } from '../discord'
@@ -16,6 +17,22 @@ const CHALLENGE_URL_PATTERNS = [
 
 function isChallengeUrl(url: string): boolean {
   return CHALLENGE_URL_PATTERNS.some(p => url.includes(p))
+}
+
+/** 「別のアカウントにログイン」など、セッション切れを示すURLパターン */
+const SWITCH_ACCOUNT_PATTERNS = [
+  '/switch_account',
+  'switch_user',
+  '/accounts/login',
+  '/login',
+]
+
+function isSwitchAccountUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    if (!u.hostname.includes('threads.com') && !u.hostname.includes('threads.net')) return false
+    return SWITCH_ACCOUNT_PATTERNS.some(p => u.pathname.startsWith(p))
+  } catch { return false }
 }
 
 const THREADS_URL = 'https://www.threads.com'
@@ -388,6 +405,49 @@ export class ViewManager {
     return false
   }
 
+  /**
+   * セッション切れが確定した際に呼び出す自動リセット処理。
+   * 「別のアカウントにログイン」画面検知時や Cookie 復元失敗時に使用。
+   */
+  private async autoResetSession(accountId: number): Promise<void> {
+    console.warn(`[ViewManager] account-${accountId}: auto-resetting session`)
+
+    // 1. WebContentsView の Electron セッション消去
+    try {
+      const sess = session.fromPartition(`persist:account-${accountId}`)
+      await sess.clearStorageData()
+    } catch { /* ignore */ }
+
+    // 2. Playwright コンテキスト閉じる + session_dir 削除
+    await closeContext(accountId).catch(() => {})
+    const account = getAccountById(accountId)
+    if (account?.session_dir) {
+      try { fs.rmSync(account.session_dir, { recursive: true, force: true }) } catch { /* ignore */ }
+    }
+
+    // 3. DB の Cookie バックアップ削除
+    try { setSetting(`session_cookies_${accountId}`, '') } catch { /* ignore */ }
+
+    // 4. ステータスを needs_login に更新
+    try { updateAccountStatus(accountId, 'needs_login') } catch { /* ignore */ }
+
+    // 5. フロントエンドに通知
+    if (!this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('accounts:session-expired', { account_id: accountId })
+    }
+
+    // 6. Discord 通知
+    const acct = getAccountById(accountId)
+    sendDiscordNotification({
+      event:    'account_error',
+      username: acct?.username ?? String(accountId),
+      message:  'セッションが切れました。再ログインが必要です。',
+    }).catch(() => {})
+
+    // 7. WebContentsView を閉じる（再ログインはフロントエンドから操作）
+    try { this.closeView(accountId) } catch { /* ignore */ }
+  }
+
   // ── View creation ─────────────────────────────────────────────────────────
 
   private makeView(accountId: number): WebContentsView {
@@ -486,6 +546,10 @@ export class ViewManager {
           if (entry) entry.restoringSession = false
           if (restored && this.views.has(accountId) && !view.webContents.isDestroyed()) {
             view.webContents.loadURL(THREADS_URL)
+          } else if (!restored) {
+            // Cookie 復元失敗 = セッション切れ確定 → 自動リセット
+            console.warn(`[did-navigate] account=${accountId} session restore failed, auto-resetting`)
+            this.autoResetSession(accountId).catch(() => {})
           }
         }).catch(() => { if (entry) entry.restoringSession = false })
 
@@ -533,6 +597,19 @@ export class ViewManager {
           username: acct?.username ?? String(accountId),
           message:  '「人間であることを確認してください」のチャレンジページが表示されました。',
           detail:   url,
+        }).catch(() => {})
+        return
+      }
+      // 「別のアカウントにログイン」など login ページへの SPA 遷移検知
+      if (isSwitchAccountUrl(url)) {
+        console.warn(`[did-navigate-in-page] account=${accountId} login page detected (SPA): ${url}`)
+        const sess2 = session.fromPartition(`persist:account-${accountId}`)
+        this.ensureSessionCookies(accountId, sess2).then((restored) => {
+          if (restored && this.views.has(accountId) && !view.webContents.isDestroyed()) {
+            view.webContents.loadURL(THREADS_URL)
+          } else if (!restored) {
+            this.autoResetSession(accountId).catch(() => {})
+          }
         }).catch(() => {})
         return
       }
@@ -817,6 +894,7 @@ export class ViewManager {
   async startLogin(tempKey: string): Promise<{ username: string; displayName: string | null }> {
     const partition = `persist:login-${tempKey}`
 
+    if (this.mainWindow.isDestroyed()) throw new Error('メインウィンドウが破棄されています')
     const mainBounds = this.mainWindow.getBounds()
     const popupW = 820
     const popupH = 640
@@ -832,6 +910,9 @@ export class ViewManager {
       webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
     })
 
+    // session は popup が破棄されても有効なため、先に取得しておく
+    const popupSession = popup.webContents.session
+
     popup.loadURL(LOGIN_URL)
     popup.focus()
 
@@ -841,8 +922,8 @@ export class ViewManager {
 
       const cleanup = () => {
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
-        if (!popup.isDestroyed()) popup.close()
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+        try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
       }
 
       const timer = setTimeout(() => {
@@ -856,7 +937,7 @@ export class ViewManager {
         if (done) return
         done = true
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
         reject(new Error('ログインがキャンセルされました'))
       })
 
@@ -865,8 +946,7 @@ export class ViewManager {
 
         let allCookies: Electron.Cookie[] = []
         try {
-          if (popup.isDestroyed()) return
-          allCookies = await popup.webContents.session.cookies.get({})
+          allCookies = await popupSession.cookies.get({})
           if (done) return
         } catch { return }
 
@@ -880,30 +960,50 @@ export class ViewManager {
 
         done = true
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
 
         // Cookie はすでに取得済み → ポップアップ JS + Threads API でユーザー名取得
-        const wc = popup.isDestroyed() ? undefined : popup.webContents
+        const wc = !popup.isDestroyed() ? popup.webContents : undefined
         const { username, displayName } = await fetchProfileFromInstagram(allCookies, wc)
 
-        if (!popup.isDestroyed()) popup.close()
+        try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
         resolve({ username, displayName })
       }
 
       pollInterval = setInterval(checkCookies, 1000)
-      popup.webContents.on('did-navigate',         () => checkCookies())
-      popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      try {
+        popup.webContents.on('did-navigate',         () => checkCookies())
+        popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      } catch { /* webContents already destroyed */ }
     })
   }
 
   /** instagram.com のログインページを既存アカウントのセッションで開き、sessionid を取得 */
   async startInstagramLogin(accountId: number): Promise<void> {
     const partition = `persist:account-${accountId}`
+    const acct = getAccountById(accountId)
     const mainBounds = this.mainWindow.getBounds()
     const popupW = 820
     const popupH = 640
     const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
     const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
+
+    // アカウントのセッションにプロキシと UA を事前設定
+    const popupSession = session.fromPartition(partition)
+
+    if (acct?.proxy_url) {
+      let proxyRules = acct.proxy_url.trim()
+      if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyRules)) proxyRules = 'http://' + proxyRules
+      console.log(`[InstagramLogin] account=${accountId} setProxy proxyRules=${proxyRules}`)
+      await popupSession.setProxy({ proxyRules }).catch((e) =>
+        console.error(`[InstagramLogin] setProxy failed: ${(e as Error)?.message}`)
+      )
+    }
+
+    // アカウントの iPhone UA を使う（なければフィンガープリントから取得）
+    const ua = acct?.user_agent ?? loadOrCreateFingerprint(accountId).userAgent
+    popupSession.setUserAgent(ua)
+    console.log(`[InstagramLogin] account=${accountId} userAgent=${ua.slice(0, 60)}...`)
 
     const popup = new BrowserWindow({
       width: popupW, height: popupH, x, y,
@@ -911,8 +1011,18 @@ export class ViewManager {
       modal: false,
       title: 'Instagram にログイン',
       titleBarStyle: 'default',
-      webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
+      webPreferences: { session: popupSession, nodeIntegration: false, contextIsolation: true },
     })
+
+    // プロキシ認証が必要な場合に自動応答
+    if (acct?.proxy_username) {
+      popup.webContents.on('login', (event, _details, authInfo, callback) => {
+        if (authInfo.isProxy) {
+          event.preventDefault()
+          callback(acct.proxy_username!, acct.proxy_password ?? '')
+        }
+      })
+    }
 
     popup.loadURL('https://www.instagram.com/accounts/login/')
     popup.focus()
@@ -923,8 +1033,8 @@ export class ViewManager {
 
       const cleanup = () => {
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
-        if (!popup.isDestroyed()) popup.close()
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+        try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
       }
 
       const timer = setTimeout(() => {
@@ -938,31 +1048,35 @@ export class ViewManager {
         if (done) return
         done = true
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
         resolve()  // 手動クローズも成功扱い
       })
 
       const checkCookies = async () => {
         if (done) return
         try {
-          if (popup.isDestroyed()) return
-          const allCookies = await popup.webContents.session.cookies.get({})
+          const allCookies = await popupSession.cookies.get({})
+          if (done) return
           const hasSession = allCookies.some(
             c => c.name === 'sessionid' && c.value.length > 0 && c.domain?.includes('instagram.com')
           )
           if (!hasSession) return
           done = true
           clearTimeout(timer)
-          if (pollInterval) clearInterval(pollInterval)
-          console.log(`[InstagramLogin] account=${accountId} sessionid obtained`)
-          if (!popup.isDestroyed()) popup.close()
+          if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+          console.log(`[InstagramLogin] account=${accountId} sessionid obtained — waiting 7s before closing`)
+          // ログイン検出後すぐに次の操作をするとbot検知されやすいため待機
+          await new Promise(r => setTimeout(r, 7000))
+          try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
           resolve()
         } catch { return }
       }
 
       pollInterval = setInterval(checkCookies, 1000)
-      popup.webContents.on('did-navigate',         () => checkCookies())
-      popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      try {
+        popup.webContents.on('did-navigate',         () => checkCookies())
+        popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      } catch { /* webContents already destroyed */ }
     })
   }
 
@@ -1010,14 +1124,16 @@ export class ViewManager {
     popup.loadURL(INSTAGRAM_SIGNUP_URL)
     popup.focus()
 
+    const registerSession = popup.webContents.session
+
     return new Promise((resolve, reject) => {
       let done = false
       let pollInterval: ReturnType<typeof setInterval> | null = null
 
       const cleanup = () => {
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
-        if (!popup.isDestroyed()) popup.close()
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+        try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
       }
 
       const timer = setTimeout(() => {
@@ -1031,7 +1147,7 @@ export class ViewManager {
         if (done) return
         done = true
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
         reject(new Error('ログインがキャンセルされました'))
       })
 
@@ -1040,8 +1156,7 @@ export class ViewManager {
 
         let allCookies: Electron.Cookie[] = []
         try {
-          if (popup.isDestroyed()) return
-          allCookies = await popup.webContents.session.cookies.get({})
+          allCookies = await registerSession.cookies.get({})
           if (done) return
         } catch { return }
 
@@ -1055,32 +1170,30 @@ export class ViewManager {
 
         done = true
         clearTimeout(timer)
-        if (pollInterval) clearInterval(pollInterval)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
 
-        // Cookie はすでに取得済み → ポップアップ JS + Threads API でユーザー名取得
-        // 新規登録直後は ds_user_id が sessionid より遅れてセットされる場合があるため
-        // username が取得できるまで最大 5 秒リトライする（ポップアップ破棄後もセッションから取得）
         const tempSess = session.fromPartition(partition)
-        const popupWc = popup.isDestroyed() ? undefined : popup.webContents
+        const popupWc = !popup.isDestroyed() ? popup.webContents : undefined
         let { username, displayName } = await fetchProfileFromInstagram(allCookies, popupWc)
         if (username === 'unknown') {
           for (let i = 0; i < 5; i++) {
             await new Promise(r => setTimeout(r, 1000))
             const fresh = await tempSess.cookies.get({}).catch(() => allCookies)
-            // リトライ時はポップアップがまだ生きていれば再利用、閉じていれば cookie のみで試みる
-            const wc = popup.isDestroyed() ? undefined : popup.webContents
+            const wc = !popup.isDestroyed() ? popup.webContents : undefined
             const res = await fetchProfileFromInstagram(fresh, wc)
             if (res.username !== 'unknown') { username = res.username; displayName = res.displayName; break }
           }
         }
 
-        if (!popup.isDestroyed()) popup.close()
+        try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
         resolve({ username, displayName })
       }
 
       pollInterval = setInterval(checkCookies, 1000)
-      popup.webContents.on('did-navigate',         () => checkCookies())
-      popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      try {
+        popup.webContents.on('did-navigate',         () => checkCookies())
+        popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      } catch { /* webContents already destroyed */ }
     })
   }
 
@@ -1095,13 +1208,37 @@ export class ViewManager {
     },
     onStatus: (e: { type: string; detail?: string }) => void,
   ): Promise<{ username: string; displayName: string | null; tempKey: string }> {
-    const SIGNUP_URL = 'https://www.instagram.com/accounts/emailsignup/'
+    const SIGNUP_URL = 'https://www.instagram.com/accounts/signup/email/'
     const tempKey   = `temp-${Date.now()}`
     const partition = `persist:login-${tempKey}`
     const sess      = session.fromPartition(partition)
 
+    // iPhone Safari UA でアクセス（Electron 検出回避 + モバイルUIで認証が通りやすい）
+    {
+      const iOSVersions   = ['16_0', '16_1', '16_2', '16_3', '16_4', '16_5', '16_6',
+                             '17_0', '17_1', '17_2', '17_3', '17_4', '17_5']
+      const safariVersions = ['604.1', '605.1.15', '604.1']
+      const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+      const ios    = pick(iOSVersions)
+      const safari = pick(safariVersions)
+      const ua = `Mozilla/5.0 (iPhone; CPU iPhone OS ${ios} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/${safari}`
+      console.log(`[autoRegister] UA=${ua}`)
+      sess.setUserAgent(ua)
+    }
+
     if (opts.proxyUrl) {
-      await sess.setProxy({ proxyRules: opts.proxyUrl }).catch(() => {})
+      let proxyUrl = opts.proxyUrl.trim()
+      if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
+      if (opts.proxyUsername && !proxyUrl.includes('@')) {
+        // proxyRules はデコード済みの生文字列を渡す必要がある（URLエンコード不可）
+        const user = opts.proxyUsername
+        const pass = opts.proxyPassword ?? ''
+        proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
+      }
+      console.log(`[autoRegister] setProxy START partition=${partition} proxyRules=${proxyUrl}`)
+      await sess.setProxy({ proxyRules: proxyUrl })
+        .then(() => console.log(`[autoRegister] setProxy DONE`))
+        .catch((e) => console.error(`[autoRegister] setProxy FAILED: ${(e as Error)?.message}`))
     }
 
     // Generate a Latin-only username
@@ -1117,20 +1254,49 @@ export class ViewManager {
     const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
     const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
 
+    // iPhone 相当のウィンドウサイズ（モバイルUIに合わせる）
+    const innerW = 390
+    const innerH = 844
+
     const popup = new BrowserWindow({
-      width: popupW, height: popupH, x, y,
+      width: 420, height: 860, x, y,
       parent: this.mainWindow,
       modal: false,
-      title: 'Threadsアカウント作成',
+      title: 'Instagram',
       titleBarStyle: 'default',
       webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
     })
 
-    if (opts.proxyUsername) {
-      popup.webContents.on('login', (event, _d, authInfo, callback) => {
-        if (authInfo.isProxy) { event.preventDefault(); callback(opts.proxyUsername!, opts.proxyPassword ?? '') }
-      })
-    }
+
+    popup.webContents.on('login', (event, _d, authInfo, callback) => {
+      console.log(`[autoRegister] login event isProxy=${authInfo.isProxy} host=${authInfo.host}`)
+      if (authInfo.isProxy && opts.proxyUsername) {
+        event.preventDefault()
+        callback(opts.proxyUsername, opts.proxyPassword ?? '')
+      }
+    })
+
+    popup.webContents.setWindowOpenHandler(({ url }) => {
+      console.log(`[autoRegister] window.open intercepted url=${url}`)
+      popup.loadURL(url)
+      return { action: 'deny' }
+    })
+
+    // ── デバッグログ ──
+    popup.webContents.on('did-start-loading', () =>
+      console.log(`[autoRegister] did-start-loading url=${popup.webContents.getURL()}`))
+    popup.webContents.on('did-finish-load', () =>
+      console.log(`[autoRegister] did-finish-load url=${popup.webContents.getURL()}`))
+    popup.webContents.on('did-fail-load', (_e, code, desc, validatedURL) =>
+      console.error(`[autoRegister] did-fail-load code=${code} desc=${desc} url=${validatedURL}`))
+    popup.webContents.on('did-navigate', (_e, url) =>
+      console.log(`[autoRegister] did-navigate url=${url}`))
+    popup.webContents.on('did-navigate-in-page', (_e, url) =>
+      console.log(`[autoRegister] did-navigate-in-page url=${url}`))
+    popup.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+      if (level >= 2) console.error(`[autoRegister] console[${level}] ${message} (${sourceId}:${line})`)
+    })
+    // ────────────────
 
     popup.loadURL(SIGNUP_URL)
     popup.focus()
@@ -1231,7 +1397,8 @@ export class ViewManager {
       }
     }
 
-    popup.webContents.on('did-finish-load', () => tryFillForm())
+    // モバイルUA（iPhone）使用時はフォーム自動入力をスキップ（手動操作）
+    // popup.webContents.on('did-finish-load', () => tryFillForm())
 
     let codeStepNotified = false
     let codeCheckInterval: ReturnType<typeof setInterval> | null = null
@@ -1741,7 +1908,7 @@ export class ViewManager {
   // ボタンクリック方式は SPA ナビゲーションが発生すると executeJavaScript の
   // コンテキストが消滅するため、loadURL 方式に統一する。
 
-  async openCompose(accountId: number, content: string, images: string[] = []): Promise<{ success: boolean; error?: string }> {
+  async openCompose(accountId: number, content: string, images: string[] = [], topic?: string): Promise<{ success: boolean; error?: string }> {
     console.log(`[openCompose] account=${accountId} content=${content.slice(0, 30)}...`)
 
     // ── Step 1: ビューを取得 or 新規作成 ────────────────────────────────────
@@ -1802,10 +1969,12 @@ export class ViewManager {
       // SPA ルーティングはページ遷移なし（同一 JS コンテキスト）なので
       // executeJavaScript のスクリプトが継続して動作する。
       const contentJson = JSON.stringify(content)
+      const topicJson = JSON.stringify(topic ?? null)
 
       const script = `
         (async function() {
           var text = ${contentJson};
+          var topicVal = ${topicJson};
 
           function waitFor(selectors, timeoutMs) {
             var sel = Array.isArray(selectors) ? selectors.join(', ') : selectors;
@@ -1915,6 +2084,81 @@ export class ViewManager {
           if (area.textContent.trim().length === 0) {
             fillText(area, text);
           }
+
+          // トピック自動入力
+          if (topicVal) {
+            var TOPIC_BTN_SELS = [
+              '[aria-label="トピックを追加"]',
+              '[aria-label="Add topic"]',
+              '[aria-label="Add a topic"]',
+              '[aria-label="トピック"]',
+              '[aria-label="Topic"]',
+              '[aria-label="トピックを選択"]',
+            ];
+            var topicBtn = await waitFor(TOPIC_BTN_SELS, 3000);
+            if (!topicBtn) {
+              var allBtns2 = Array.from(document.querySelectorAll('div[role="button"], button, [role="menuitem"], span'));
+              topicBtn = allBtns2.find(function(el) {
+                var t = (el.textContent || '').trim();
+                return t === 'トピックを追加' || t === 'Add topic' || t === 'Add a topic' || t === 'トピック' || t === 'Topic';
+              }) || null;
+            }
+            console.log('[openCompose] topic btn:', topicBtn ? (topicBtn.getAttribute('aria-label') || topicBtn.textContent.trim()) : 'not found');
+
+            if (topicBtn) {
+              topicBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+              var topicInput = await waitFor([
+                'input[placeholder*="トピック"]',
+                'input[placeholder*="topic"]',
+                'input[placeholder*="Topic"]',
+                'input[placeholder*="Search"]',
+                'input[placeholder*="検索"]',
+                'div[contenteditable="true"][aria-label*="トピック"]',
+                'div[contenteditable="true"][aria-label*="topic"]',
+                'div[contenteditable="true"][aria-label*="Topic"]',
+                'input[type="text"]',
+                'input[type="search"]',
+              ], 4000);
+
+              if (topicInput) {
+                console.log('[openCompose] topic input found: tag=' + topicInput.tagName + ' placeholder="' + topicInput.getAttribute('placeholder') + '"');
+                topicInput.focus();
+                if (topicInput.tagName === 'INPUT') {
+                  var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                  nativeInputValueSetter.call(topicInput, topicVal);
+                  topicInput.dispatchEvent(new Event('input', { bubbles: true }));
+                  topicInput.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                  topicInput.dispatchEvent(new InputEvent('beforeinput', {
+                    inputType: 'insertText',
+                    data: topicVal,
+                    bubbles: true,
+                    cancelable: true,
+                  }));
+                  await new Promise(function(r) { setTimeout(r, 150); });
+                  if (!topicInput.textContent || topicInput.textContent.trim().length === 0) {
+                    document.execCommand('insertText', false, topicVal);
+                  }
+                }
+                // 候補リストからマッチするトピックを選択
+                await new Promise(function(r) { setTimeout(r, 500); });
+                var topicItems = Array.from(document.querySelectorAll('div[role="option"], div[role="listitem"], li'));
+                var matchItem = topicItems.find(function(el) {
+                  return (el.textContent || '').trim().toLowerCase().includes(topicVal.toLowerCase());
+                });
+                if (matchItem) {
+                  console.log('[openCompose] topic candidate matched: ' + matchItem.textContent.trim());
+                  matchItem.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                }
+              } else {
+                console.log('[openCompose] topic input not found after click');
+              }
+            } else {
+              console.log('[openCompose] topic button not found');
+            }
+          }
+
           return { ok: true, len: area.textContent.length };
         })()
       `

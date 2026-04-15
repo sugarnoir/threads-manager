@@ -102,6 +102,12 @@ export function updateAccountMemo(id: number, memo: string | null): void {
     .run(memo, id)
 }
 
+export function updateAccountMark(id: number, mark: string | null): void {
+  getDb()
+    .prepare("UPDATE accounts SET mark = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(mark, id)
+}
+
 export function updateAccountUserAgent(id: number, user_agent: string | null): void {
   getDb()
     .prepare("UPDATE accounts SET user_agent = ?, updated_at = datetime('now') WHERE id = ?")

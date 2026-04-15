@@ -9,6 +9,7 @@ import {
   updateAccountDisplayName,
   updateAccountGroup,
   updateAccountMemo,
+  updateAccountMark,
   updateAccountSpeedPreset,
   updateAccountUserAgent,
   reorderAccounts,
@@ -255,6 +256,11 @@ export function registerAccountHandlers(): void {
     return { success: true }
   })
 
+  ipcMain.handle('accounts:update-mark', (_event, data: { id: number; mark: string | null }) => {
+    updateAccountMark(data.id, data.mark)
+    return { success: true }
+  })
+
   ipcMain.handle('accounts:update-speed-preset', (_event, data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) => {
     updateAccountSpeedPreset(data.id, data.speed_preset)
     return { success: true }
@@ -448,6 +454,46 @@ export function registerAccountHandlers(): void {
     }
   })
 
+  ipcMain.handle('accounts:check-ip', async (_event, data: {
+    proxy_url: string | null
+    proxy_username?: string
+    proxy_password?: string
+  }) => {
+    const { net, session: electronSession } = await import('electron')
+    const partitionKey = `temp:ip-check-${Date.now()}`
+    const sess = electronSession.fromPartition(partitionKey)
+
+    if (data.proxy_url) {
+      let proxyUrl = data.proxy_url.trim()
+      if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
+      if (data.proxy_username && !proxyUrl.includes('@')) {
+        const user = data.proxy_username
+        const pass = data.proxy_password ?? ''
+        proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
+      }
+      await sess.setProxy({ proxyRules: proxyUrl }).catch(() => {})
+    }
+
+    return new Promise<{ ip: string | null; error?: string }>((resolve) => {
+      const req = net.request({ method: 'GET', url: 'https://api.ipify.org', session: sess })
+      const timer = setTimeout(() => req.abort(), 8000)
+      let body = ''
+      req.on('response', (resp) => {
+        resp.on('data', c => { body += c.toString() })
+        resp.on('end', () => { clearTimeout(timer); resolve({ ip: body.trim() }) })
+      })
+      req.on('error', (e) => { clearTimeout(timer); resolve({ ip: null, error: e.message }) })
+      req.end()
+    })
+  })
+
+  ipcMain.handle('accounts:has-access-token', async (_event, accountId: number) => {
+    const sess = session.fromPartition(`persist:account-${accountId}`)
+    const cookies = await sess.cookies.get({})
+    const hasToken = cookies.some(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))
+    return { hasToken }
+  })
+
   ipcMain.handle('accounts:bulk-login-instagram', async (event, data: { group_name: string | null }) => {
     const push = (payload: object) => {
       if (!event.sender.isDestroyed()) event.sender.send('accounts:bulk-login-progress', payload)
@@ -486,6 +532,56 @@ export function registerAccountHandlers(): void {
 
     push({ type: 'done', total, successCount })
     return { success: true }
+  })
+
+  ipcMain.handle('accounts:proxy-url-counts', () => {
+    const rows = getAllAccounts()
+      .filter(a => a.proxy_url)
+      .reduce<Record<string, number>>((acc, a) => {
+        acc[a.proxy_url!] = (acc[a.proxy_url!] ?? 0) + 1
+        return acc
+      }, {})
+    return rows
+  })
+
+  ipcMain.handle('accounts:proxy-port-stats', () => {
+    const rows = getAllAccounts()
+      .filter(a => a.proxy_url)
+      .map(a => {
+        try {
+          const url = new URL(a.proxy_url!)
+          return { host: url.hostname, port: parseInt(url.port, 10) }
+        } catch {
+          return null
+        }
+      })
+      .filter((r): r is { host: string; port: number } => r !== null && !isNaN(r.port))
+
+    // ホストごとにポート→垢数のマップを構築
+    const map = new Map<string, Map<number, number>>()
+    for (const { host, port } of rows) {
+      if (!map.has(host)) map.set(host, new Map())
+      const portMap = map.get(host)!
+      portMap.set(port, (portMap.get(port) ?? 0) + 1)
+    }
+
+    return Array.from(map.entries()).map(([host, portMap]) => {
+      const portEntries = Array.from(portMap.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([port, count]) => ({ port, count }))
+
+      const usedPortCount = portEntries.length
+      const minPort = portEntries[0].port
+      const maxPort = portEntries[portEntries.length - 1].port
+      const totalInRange = maxPort - minPort + 1
+      const usedSet = new Set(portEntries.map(e => e.port))
+      const unusedPorts: number[] = []
+      for (let p = minPort; p <= maxPort; p++) {
+        if (!usedSet.has(p)) unusedPorts.push(p)
+      }
+
+      return { host, portEntries, usedPortCount, minPort, maxPort, totalInRange, unusedPorts }
+    })
   })
 
 }

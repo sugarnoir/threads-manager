@@ -656,6 +656,303 @@ interface BulkProgress {
   error?: string
 }
 
+// ── グループ一括予約モーダル ────────────────────────────────────────────────────
+
+function GroupBulkScheduleModal({ accounts, onClose, onDone }: {
+  accounts: Account[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const HOUR_OPTIONS = [1, 3, 6, 9, 12, 15, 18, 21, 24, 48]
+
+  const [groups, setGroups]           = useState<{ name: string }[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>('__all__')
+  const [selectedHours, setSelectedHours] = useState<number | null>(null)
+  const [contentMode, setContentMode] = useState<'random' | 'number'>('random')
+  const [stockNumber, setStockNumber] = useState(1)
+  const [running, setRunning]         = useState(false)
+  const [progress, setProgress]       = useState<BulkProgress[]>([])
+  const [done, setDone]               = useState(false)
+  const [cancelled, setCancelled]     = useState(false)
+  const cancelledRef                  = useRef(false)
+
+  useEffect(() => {
+    api.groups.list().then((gs) => setGroups(gs))
+  }, [])
+
+  const targets = selectedGroup === '__all__'
+    ? accounts
+    : accounts.filter((a) => a.group_name === selectedGroup)
+
+  const handleCancel = () => {
+    if (running) {
+      cancelledRef.current = true
+    } else {
+      onClose()
+    }
+  }
+
+  const handleRun = async () => {
+    if (selectedHours === null) return
+    const baseDate = new Date(Date.now() + selectedHours * 3600_000)
+    baseDate.setSeconds(0, 0)
+    if (targets.length === 0) { alert('対象アカウントがありません'); return }
+    if (!confirm(`${targets.length}件のアカウントに予約を設定しますか？`)) return
+
+    cancelledRef.current = false
+    setCancelled(false)
+    setRunning(true)
+    setProgress(targets.map(a => ({ account_id: a.id, username: a.username, status: 'pending' })))
+
+    for (let i = 0; i < targets.length; i++) {
+      if (cancelledRef.current) break
+      const acct = targets[i]
+      setProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'processing' } : p))
+
+      try {
+        const stocksResult = await api.stocks.list(acct.id)
+        const stocks: PostStock[] = stocksResult.success ? stocksResult.data : []
+
+        if (stocks.length === 0) {
+          setProgress(prev => prev.map((p, idx) =>
+            idx === i ? { ...p, status: 'skipped', error: 'ストックなし' } : p
+          ))
+          continue
+        }
+
+        let stock: PostStock
+        if (contentMode === 'random') {
+          stock = stocks[Math.floor(Math.random() * stocks.length)]
+        } else {
+          stock = stocks[Math.min(stockNumber - 1, stocks.length - 1)]
+        }
+
+        // ±30分のランダムオフセット
+        const offsetMs = (Math.random() * 2 - 1) * 30 * 60 * 1000
+        const scheduledDate = new Date(baseDate.getTime() + offsetMs)
+        scheduledDate.setSeconds(0, 0)
+
+        const result = await api.stocks.schedulePost({
+          account_id:   acct.id,
+          content:      stock.content,
+          scheduled_at: scheduledDate.toISOString(),
+          image_url:    stock.image_url,
+          image_url_2:  stock.image_url_2,
+          topic:        stock.topic,
+        })
+
+        if (result.success) {
+          setProgress(prev => prev.map((p, idx) =>
+            idx === i ? { ...p, status: 'done', scheduled_at: scheduledDate.toISOString() } : p
+          ))
+        } else {
+          setProgress(prev => prev.map((p, idx) =>
+            idx === i ? { ...p, status: 'error', error: result.error ?? 'エラー' } : p
+          ))
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setProgress(prev => prev.map((p, idx) =>
+          idx === i ? { ...p, status: 'error', error: msg } : p
+        ))
+      }
+    }
+
+    if (cancelledRef.current) {
+      setCancelled(true)
+      setRunning(false)
+    } else {
+      setRunning(false)
+      setDone(true)
+      onDone()
+    }
+  }
+
+  const doneCount      = progress.filter(p => p.status === 'done').length
+  const skippedCount   = progress.filter(p => p.status === 'skipped').length
+  const processedCount = progress.filter(p =>
+    p.status === 'done' || p.status === 'error' || p.status === 'skipped'
+  ).length
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl">
+        {/* ヘッダー */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h3 className="text-base font-bold text-gray-800">グループ一括予約投稿</h3>
+          <button onClick={handleCancel} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {/* グループ選択 */}
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium text-gray-700">対象グループ</p>
+            <select
+              value={selectedGroup}
+              onChange={e => setSelectedGroup(e.target.value)}
+              disabled={running}
+              className="w-full border border-gray-200 rounded-lg p-2 text-sm disabled:opacity-40"
+            >
+              <option value="__all__">すべてのアカウント ({accounts.length}件)</option>
+              {groups.map(g => (
+                <option key={g.name} value={g.name}>
+                  {g.name} ({accounts.filter(a => a.group_name === g.name).length}件)
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-blue-600">
+              対象: {targets.length}アカウント
+            </p>
+          </div>
+
+          {/* 投稿タイミング */}
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium text-gray-700">
+              投稿タイミング
+              <span className="text-xs text-gray-400 font-normal ml-1">（各アカウントごとに±30分ランダム）</span>
+            </p>
+            <div className="grid grid-cols-5 gap-1.5">
+              {HOUR_OPTIONS.map(h => (
+                <button
+                  key={h}
+                  onClick={() => setSelectedHours(h)}
+                  disabled={running}
+                  className={`py-2 rounded-lg text-sm border transition-colors disabled:opacity-40 ${
+                    selectedHours === h
+                      ? 'bg-violet-600 text-white border-violet-600'
+                      : 'bg-white text-gray-600 border-gray-200 hover:border-violet-400'
+                  }`}
+                >
+                  {h}h後
+                </button>
+              ))}
+            </div>
+            {selectedHours !== null && (
+              <p className="text-xs text-gray-400">
+                ベース: {new Date(Date.now() + selectedHours * 3600_000).toLocaleString('ja-JP')} ごろ（各アカウント±30分）
+              </p>
+            )}
+          </div>
+
+          {/* 投稿内容 */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-gray-700">投稿内容（ストック）</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setContentMode('random')}
+                disabled={running}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors disabled:opacity-40 ${
+                  contentMode === 'random'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                ランダム
+              </button>
+              <button
+                onClick={() => setContentMode('number')}
+                disabled={running}
+                className={`flex-1 py-1.5 rounded-lg text-sm border transition-colors disabled:opacity-40 ${
+                  contentMode === 'number'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                番号指定
+              </button>
+            </div>
+            {contentMode === 'number' && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-600">ストック番号：</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={999}
+                  value={stockNumber}
+                  onChange={e => setStockNumber(Math.max(1, Number(e.target.value)))}
+                  disabled={running}
+                  className="w-16 border border-gray-200 rounded-lg p-1.5 text-sm text-center"
+                />
+                <span className="text-xs text-gray-400">番目のストック</span>
+              </div>
+            )}
+          </div>
+
+          {/* 進捗 */}
+          {progress.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-gray-700">
+                進捗
+                <span className="text-xs font-normal text-gray-400 ml-1">
+                  {processedCount}/{targets.length}（完了{doneCount} / スキップ{skippedCount}）
+                </span>
+              </p>
+              <div className="space-y-1 max-h-48 overflow-y-auto border border-gray-100 rounded-lg p-2">
+                {progress.map(p => (
+                  <div key={p.account_id} className="flex items-center gap-2 py-0.5">
+                    <span className={`text-sm w-4 text-center shrink-0 ${
+                      p.status === 'done'       ? 'text-green-500' :
+                      p.status === 'processing' ? 'text-blue-500'  :
+                      p.status === 'error'      ? 'text-red-500'   :
+                      p.status === 'skipped'    ? 'text-amber-500' :
+                      'text-gray-300'
+                    }`}>
+                      {p.status === 'done'       ? '✓' :
+                       p.status === 'processing' ? '⟳' :
+                       p.status === 'error'      ? '✗' :
+                       p.status === 'skipped'    ? '−' : '○'}
+                    </span>
+                    <span className="text-sm text-gray-700 font-medium min-w-0 truncate">@{p.username}</span>
+                    <span className="text-xs ml-auto shrink-0">
+                      {p.status === 'done' && p.scheduled_at && (
+                        <span className="text-green-600">
+                          {new Date(p.scheduled_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                      {p.status === 'processing' && <span className="text-blue-400">処理中...</span>}
+                      {(p.status === 'error' || p.status === 'skipped') && (
+                        <span className={p.status === 'error' ? 'text-red-400' : 'text-amber-500'}>{p.error}</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* フッター */}
+        <div className="px-5 py-4 border-t border-gray-100 flex flex-col gap-2">
+          {cancelled && (
+            <p className="text-xs text-amber-600 text-center">
+              キャンセルしました（{doneCount}/{targets.length}完了）
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={handleCancel}
+              className="flex-1 py-2 border border-gray-200 text-gray-600 rounded-lg text-sm hover:bg-gray-50"
+            >
+              {done || cancelled ? '閉じる' : running ? '中断する' : 'キャンセル'}
+            </button>
+            {!done && !cancelled && (
+              <button
+                onClick={handleRun}
+                disabled={running || selectedHours === null || targets.length === 0}
+                className="flex-1 py-2 bg-violet-600 text-white rounded-lg text-sm hover:bg-violet-700 disabled:opacity-40 font-medium"
+              >
+                {running
+                  ? `処理中... ${processedCount}/${targets.length}`
+                  : `予約設定（${targets.length}アカウント）`}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function BulkScheduleModal({ accounts, onClose, onDone }: {
   accounts: Account[]
   onClose: () => void
@@ -667,13 +964,26 @@ function BulkScheduleModal({ accounts, onClose, onDone }: {
   const [running, setRunning]         = useState(false)
   const [progress, setProgress]       = useState<BulkProgress[]>([])
   const [done, setDone]               = useState(false)
+  const [cancelled, setCancelled]     = useState(false)
+  const cancelledRef                  = useRef(false)
+
+  const handleCancel = () => {
+    if (running) {
+      cancelledRef.current = true
+    } else {
+      onClose()
+    }
+  }
 
   const handleRun = async () => {
     if (baseHours === null) return
+    cancelledRef.current = false
+    setCancelled(false)
     setRunning(true)
     setProgress(accounts.map(a => ({ account_id: a.id, username: a.username, status: 'pending' })))
 
     for (let i = 0; i < accounts.length; i++) {
+      if (cancelledRef.current) break
       const acct = accounts[i]
 
       setProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'processing' } : p))
@@ -706,6 +1016,7 @@ function BulkScheduleModal({ accounts, onClose, onDone }: {
           scheduled_at: scheduledDate.toISOString(),
           image_url:    stock.image_url,
           image_url_2:  stock.image_url_2,
+          topic:        stock.topic,
         })
 
         if (result.success) {
@@ -725,9 +1036,14 @@ function BulkScheduleModal({ accounts, onClose, onDone }: {
       }
     }
 
-    setRunning(false)
-    setDone(true)
-    onDone()
+    if (cancelledRef.current) {
+      setCancelled(true)
+      setRunning(false)
+    } else {
+      setRunning(false)
+      setDone(true)
+      onDone()
+    }
   }
 
   const doneCount    = progress.filter(p => p.status === 'done').length
@@ -742,7 +1058,7 @@ function BulkScheduleModal({ accounts, onClose, onDone }: {
         {/* ヘッダー */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h3 className="text-base font-bold text-gray-800">一括予約投稿</h3>
-          <button onClick={onClose} disabled={running} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+          <button onClick={handleCancel} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
@@ -863,25 +1179,31 @@ function BulkScheduleModal({ accounts, onClose, onDone }: {
         </div>
 
         {/* フッター */}
-        <div className="px-5 py-4 border-t border-gray-100 flex gap-2">
-          <button
-            onClick={onClose}
-            disabled={running}
-            className="flex-1 py-2 border border-gray-200 text-gray-600 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-40"
-          >
-            {done ? '閉じる' : 'キャンセル'}
-          </button>
-          {!done && (
-            <button
-              onClick={handleRun}
-              disabled={running || baseHours === null || accounts.length === 0}
-              className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40 font-medium"
-            >
-              {running
-                ? `処理中... ${processedCount}/${accounts.length}`
-                : `実行（${accounts.length}アカウント）`}
-            </button>
+        <div className="px-5 py-4 border-t border-gray-100 flex flex-col gap-2">
+          {cancelled && (
+            <p className="text-xs text-amber-600 text-center">
+              キャンセルしました（{doneCount}/{accounts.length}完了）
+            </p>
           )}
+          <div className="flex gap-2">
+            <button
+              onClick={handleCancel}
+              className="flex-1 py-2 border border-gray-200 text-gray-600 rounded-lg text-sm hover:bg-gray-50"
+            >
+              {done || cancelled ? '閉じる' : running ? '中断する' : 'キャンセル'}
+            </button>
+            {!done && !cancelled && (
+              <button
+                onClick={handleRun}
+                disabled={running || baseHours === null || accounts.length === 0}
+                className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40 font-medium"
+              >
+                {running
+                  ? `処理中... ${processedCount}/${accounts.length}`
+                  : `実行（${accounts.length}アカウント）`}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -891,10 +1213,11 @@ function BulkScheduleModal({ accounts, onClose, onDone }: {
 // ── Schedule tab ──────────────────────────────────────────────────────────────
 
 function ScheduleTab({ accounts }: { accounts: Account[] }) {
-  const [schedules, setSchedules]         = useState<Schedule[]>([])
-  const [form, setForm]                   = useState({ account_id: '', content: '', scheduled_at: '' })
-  const [saving, setSaving]               = useState(false)
-  const [showBulkModal, setShowBulkModal] = useState(false)
+  const [schedules, setSchedules]               = useState<Schedule[]>([])
+  const [form, setForm]                         = useState({ account_id: '', content: '', scheduled_at: '' })
+  const [saving, setSaving]                     = useState(false)
+  const [showBulkModal, setShowBulkModal]       = useState(false)
+  const [showGroupBulkModal, setShowGroupBulkModal] = useState(false)
 
   const fetchSchedules = async () => {
     const data = await api.schedules.list()
@@ -932,23 +1255,43 @@ function ScheduleTab({ accounts }: { accounts: Account[] }) {
 
   return (
     <div className="space-y-4">
-      {/* 一括予約投稿ボタン */}
-      <button
-        onClick={() => setShowBulkModal(true)}
-        disabled={accounts.length === 0}
-        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
-        </svg>
-        一括予約投稿
-      </button>
+      {/* ボタン行 */}
+      <div className="flex gap-2">
+        <button
+          onClick={() => setShowBulkModal(true)}
+          disabled={accounts.length === 0}
+          className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          一括予約
+        </button>
+        <button
+          onClick={() => setShowGroupBulkModal(true)}
+          disabled={accounts.length === 0}
+          className="flex-1 py-2.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          グループ一括予約
+        </button>
+      </div>
 
       {showBulkModal && (
         <BulkScheduleModal
           accounts={accounts}
           onClose={() => setShowBulkModal(false)}
           onDone={fetchSchedules}
+        />
+      )}
+
+      {showGroupBulkModal && (
+        <GroupBulkScheduleModal
+          accounts={accounts}
+          onClose={() => setShowGroupBulkModal(false)}
+          onDone={() => { setShowGroupBulkModal(false); fetchSchedules() }}
         />
       )}
 

@@ -1,4 +1,13 @@
 import { ipcMain, BrowserWindow } from 'electron'
+import { appendFileSync } from 'fs'
+
+const AUTOPOST_LOG = '/tmp/tm-autopost.log'
+function logAutopost(msg: string): void {
+  console.log(msg)
+  try {
+    appendFileSync(AUTOPOST_LOG, msg + '\n')
+  } catch { /* ignore */ }
+}
 import Anthropic from '@anthropic-ai/sdk'
 import {
   getAllSchedules,
@@ -7,7 +16,7 @@ import {
   updateScheduleStatus,
   deleteSchedule,
 } from '../db/repositories/schedules'
-import { createPost, updatePostStatus } from '../db/repositories/posts'
+import { createPost, updatePostStatus, getLastPostedAt } from '../db/repositories/posts'
 import { getStocksByAccount } from '../db/repositories/post_stocks'
 import {
   getEnabledAutopostConfigs,
@@ -211,7 +220,7 @@ async function executeAutopost(
 
     let result: { success: boolean; error?: string }
     if (config.use_api) {
-      console.log(`[Autopost] stock.topic=${JSON.stringify(stock.topic)}`)
+      logAutopost(`[Autopost] stock.topic=${JSON.stringify(stock.topic)}`)
       const { paths: imagePaths, cleanup } = await resolveImagePaths([stock.image_url, stock.image_url_2])
       try {
         if (imagePaths.length > 0) {
@@ -263,12 +272,12 @@ async function executeAutopost(
     const nextIdx = lastIdx + 1 >= stocks.length ? 0 : lastIdx + 1
     const stock = stocks[nextIdx]
 
-    console.log(`[Autopost] rewrite: account=${config.account_id} stock.id=${stock.id} text="${stock.content.slice(0, 50)}..."`)
+    logAutopost(`[Autopost] rewrite: account=${config.account_id} stock.id=${stock.id} text="${stock.content.slice(0, 50)}..."`)
 
     const rewritten = await rewriteWithClaude(stock.content)
     if (!rewritten) return { success: false, error: 'AIリライト失敗（APIキー未設定？）' }
 
-    console.log(`[Autopost] rewritten: "${rewritten.slice(0, 80)}..."`)
+    logAutopost(`[Autopost] rewritten: "${rewritten.slice(0, 80)}..."`)
 
     let result: { success: boolean; error?: string }
     if (config.use_api) {
@@ -376,11 +385,18 @@ export function startScheduler(win: BrowserWindow): void {
           content:     schedule.content,
           media_paths: schedule.media_paths,
         })
-        const result = await sendPost(
-          schedule.account_id,
-          schedule.content,
-          schedule.media_paths
-        )
+        console.log(`[Scheduler] executing schedule.id=${schedule.id} account=${schedule.account_id} topic=${JSON.stringify(schedule.topic)}`)
+        let result: { success: boolean; error?: string }
+        if (schedule.media_paths.length > 0) {
+          const { paths: imagePaths, cleanup } = await resolveImagePaths(schedule.media_paths)
+          try {
+            result = await apiPostWithMedia(schedule.account_id, schedule.content, imagePaths, schedule.topic ?? undefined)
+          } finally {
+            cleanup()
+          }
+        } else {
+          result = await apiPostText(schedule.account_id, schedule.content, schedule.topic ?? undefined)
+        }
         updatePostStatus(post.id, result.success ? 'posted' : 'failed', result.error)
         updateScheduleStatus(schedule.id, result.success ? 'posted' : 'failed', post.id)
         if (!win.isDestroyed()) {
@@ -392,20 +408,60 @@ export function startScheduler(win: BrowserWindow): void {
       }
 
       // 2. 自動投稿
+      const MIN_POST_INTERVAL_MS = 260 * 60_000 // 260分
+      const now = new Date()
       const autoConfigs = getEnabledAutopostConfigs()
+      logAutopost(`[Autopost] tick — ${autoConfigs.length} enabled config(s), now=${now.toISOString()}`)
+
       for (const config of autoConfigs) {
-        if (config.next_at && new Date(config.next_at) > new Date()) continue
+        const nextAt = config.next_at ? new Date(config.next_at) : null
+        const remainMs = nextAt ? nextAt.getTime() - now.getTime() : null
+        const remainMin = remainMs !== null ? Math.round(remainMs / 60_000) : null
+
+        // next_at が未来 → スキップ
+        if (nextAt && nextAt > now) {
+          logAutopost(`[Autopost] account=${config.account_id} SKIP — next_at in ${remainMin}m (${config.next_at})`)
+          continue
+        }
+
+        // 再起動時の重複投稿防止: 直近の投稿時刻が最小間隔未満ならスキップ
+        if (config.use_api) {
+          const lastPostedAt = getLastPostedAt(config.account_id)
+          if (lastPostedAt) {
+            const elapsed = Date.now() - new Date(lastPostedAt).getTime()
+            if (elapsed < MIN_POST_INTERVAL_MS) {
+              const remaining = Math.ceil((MIN_POST_INTERVAL_MS - elapsed) / 60_000)
+              logAutopost(`[Autopost] account=${config.account_id} SKIP — last post ${Math.floor(elapsed / 60_000)}m ago, need ${remaining}m more`)
+              continue
+            }
+          }
+        }
 
         try {
+          const execTime = new Date()
           const result = await executeAutopost(config)
-          if (!result) continue
+          if (!result) {
+            logAutopost(`[Autopost] account=${config.account_id} executeAutopost returned null (no stock?)`)
+            continue
+          }
 
           const delayMs =
             (config.min_interval +
               Math.random() * (config.max_interval - config.min_interval)) *
             60_000
           const nextAt = new Date(Date.now() + delayMs).toISOString()
-          updateAutopostState(config.account_id, { next_at: nextAt })
+          updateAutopostState(config.account_id, {
+            next_at:          nextAt,
+            last_executed_at: execTime.toISOString(),
+          })
+
+          const fmt = (d: Date) => d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour12: false })
+          console.log(
+            `[Autopost] 実行 account=${config.account_id} ` +
+            `時刻=${fmt(execTime)} ` +
+            `結果=${result.success ? '成功' : '失敗'}${result.error ? ` (${result.error})` : ''} ` +
+            `次回=${fmt(new Date(nextAt))}`
+          )
 
           if (!win.isDestroyed()) {
             win.webContents.send('autopost:executed', {
@@ -484,6 +540,7 @@ export function registerSchedulerHandlers(): void {
         content:      string
         media_paths?: string[]
         scheduled_at: string
+        topic?:       string | null
       }
     ) => {
       return createSchedule(data)

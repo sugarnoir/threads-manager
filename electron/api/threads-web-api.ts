@@ -58,6 +58,19 @@ async function getSessionInfo(accountId: number): Promise<{
   userId:     string
 } | null> {
   const sess = getAccountSession(accountId)
+  // scrapePageTokens / doRestPost でもプロキシが効くよう事前に設定する
+  // （ensureAccountProxy は冪等なので重複呼び出しは問題ない）
+  const account = getAccountById(accountId)
+  if (account?.proxy_url) {
+    let proxyUrl = account.proxy_url.trim()
+    if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
+    if (account.proxy_username && !proxyUrl.includes('@')) {
+      const user = account.proxy_username
+      const pass = account.proxy_password ?? ''
+      proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
+    }
+    await sess.setProxy({ proxyRules: proxyUrl }).catch(() => {})
+  }
   const all  = await sess.cookies.get({}).catch(() => [])
 
   const threads = all.filter(c => c.domain?.includes('threads.com'))
@@ -512,6 +525,23 @@ function parseJson(raw: string): unknown {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
+/** アカウントのプロキシ設定をセッションに適用する（冪等） */
+async function ensureAccountProxy(accountId: number, sess: Session): Promise<void> {
+  const account = getAccountById(accountId)
+  if (!account?.proxy_url) return
+  let proxyUrl = account.proxy_url.trim()
+  if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
+  // 認証情報をURLに埋め込む（net.request は proxy auth ヘッダーを自動付与しないため）
+  if (account.proxy_username && !proxyUrl.includes('@')) {
+    const user = account.proxy_username
+    const pass = account.proxy_password ?? ''
+    proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
+  }
+  await sess.setProxy({ proxyRules: proxyUrl }).catch((e) => {
+    console.warn(`[WebAPI] ensureAccountProxy account=${accountId} error: ${e?.message}`)
+  })
+}
+
 async function doPost(opts: {
   url:       string
   headers:   Record<string, string>
@@ -521,6 +551,7 @@ async function doPost(opts: {
   // threads.com クッキーのみ取得（instagram.com との重複 sessionid を避ける）
   // 手動 Cookie ヘッダーで設定することで SameSite 制限をバイパスする
   const sess = getAccountSession(opts.accountId)
+  await ensureAccountProxy(opts.accountId, sess)
   const allCookies  = await sess.cookies.get({}).catch(() => [])
   // threads.com クッキーを優先し、同名クッキーが instagram.com にもある場合は除外する
   // （sessionid が2つになると、サーバーが instagram.com の無効な方を使うため）
@@ -536,8 +567,8 @@ async function doPost(opts: {
   console.log(`[WebAPI] doPost cookie names: ${combined.map(c => c.name).join(', ')}`)
 
   return new Promise((resolve, reject) => {
-    // session/useSessionCookies は使わず Cookie ヘッダーを手動設定
-    const req = net.request({ method: 'POST', url: opts.url })
+    // session を渡してプロキシを適用しつつ Cookie ヘッダーは手動設定
+    const req = net.request({ method: 'POST', url: opts.url, session: sess })
     req.setHeader('Cookie', cookieHeader)
     for (const [k, v] of Object.entries(opts.headers)) req.setHeader(k, v)
     let body = ''
@@ -559,6 +590,7 @@ async function doGet(opts: {
   accountId: number
 }): Promise<{ status: number; body: string }> {
   const sess = getAccountSession(opts.accountId)
+  await ensureAccountProxy(opts.accountId, sess)
   const allCookies     = await sess.cookies.get({}).catch(() => [])
   const threadsCookies = allCookies.filter(c => c.domain?.includes('threads.com'))
   const threadsNames   = new Set(threadsCookies.map(c => c.name))
@@ -569,7 +601,7 @@ async function doGet(opts: {
   const cookieHeader = combined.map(c => `${c.name}=${c.value}`).join('; ')
 
   return new Promise((resolve, reject) => {
-    const req = net.request({ method: 'GET', url: opts.url })
+    const req = net.request({ method: 'GET', url: opts.url, session: sess })
     req.setHeader('Cookie', cookieHeader)
     for (const [k, v] of Object.entries(opts.headers)) req.setHeader(k, v)
     let body = ''
@@ -766,15 +798,18 @@ async function getIgCookieHeaders(accountId: number): Promise<{ cookieHeader: st
   }
 }
 
-/** net.request ラッパー（バイナリ / 文字列どちらも対応） */
-function mobileNetRequest(
-  method:  'POST',
-  url:     string,
-  headers: Record<string, string>,
-  body:    Buffer | string,
+/** net.request ラッパー（バイナリ / 文字列どちらも対応）。アカウントのプロキシを適用する */
+async function mobileNetRequest(
+  method:    'POST',
+  url:       string,
+  headers:   Record<string, string>,
+  body:      Buffer | string,
+  accountId: number,
 ): Promise<{ ok: boolean; status: number; raw: string }> {
+  const sess = getAccountSession(accountId)
+  await ensureAccountProxy(accountId, sess)
   return new Promise((resolve) => {
-    const req = net.request({ method, url })
+    const req = net.request({ method, url, session: sess })
     for (const [k, v] of Object.entries(headers)) req.setHeader(k, v)
     let raw = ''
     req.on('response', (resp) => {
@@ -850,6 +885,7 @@ async function mobilePostText(
       'Referer':      'https://www.instagram.com/',
     },
     body,
+    accountId,
   )
   console.log(`[mobilePostText] account=${accountId} status=${result.status} body=${result.raw.slice(0, 400)}`)
   return result.ok
@@ -1039,14 +1075,14 @@ export async function apiPostText(
   text:      string,
   topic?:    string
 ): Promise<ApiPostResult> {
-  // ── 経路0: i.instagram.com Mobile API（instagram.com sessionid がある場合）
+  // ── 経路0: Mobile API (i.instagram.com) ─────────────────────────────────────
   console.log(`[WebAPI] apiPostText account=${accountId} topic=${JSON.stringify(topic)} trying mobile API`)
   const mobileResult = await mobilePostText(accountId, text, topic)
   if (mobileResult.success) {
-    console.log(`[WebAPI] ✓ mobile API post success`)
+    console.log(`[WebAPI] ✓ mobile post success`)
     return { success: true }
   }
-  console.warn(`[WebAPI] mobile API failed (status=${mobileResult.status ?? 'N/A'} error=${mobileResult.error ?? ''}) → fallback REST via view`)
+  console.warn(`[WebAPI] mobile post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch、最も確実）
   console.log(`[WebAPI] apiPostText account=${accountId} topic=${JSON.stringify(topic)} trying REST via view`)
@@ -1168,14 +1204,14 @@ export async function apiPostWithMedia(
   const validPaths = imagePaths.filter(p => fs.existsSync(p))
   if (validPaths.length === 0) return apiPostText(accountId, text, topic)
 
-  // ── 経路0: i.instagram.com Mobile API（instagram.com sessionid がある場合）
+  // ── 経路0: Mobile API (i.instagram.com) ─────────────────────────────────────
   console.log(`[WebAPI] apiPostWithMedia account=${accountId} images=${validPaths.length} topic=${JSON.stringify(topic)} trying mobile API`)
   const mobileResult = await mobilePostWithMedia(accountId, text, validPaths, topic)
   if (mobileResult.success) {
-    console.log(`[WebAPI] ✓ mobile API media post success`)
+    console.log(`[WebAPI] ✓ mobile media post success`)
     return { success: true }
   }
-  console.warn(`[WebAPI] mobile media API failed (status=${mobileResult.status ?? 'N/A'} error=${mobileResult.error ?? ''}) → fallback REST via view`)
+  console.warn(`[WebAPI] mobile media post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch）
   console.log(`[WebAPI] apiPostWithMedia account=${accountId} images=${validPaths.length} trying REST via view`)

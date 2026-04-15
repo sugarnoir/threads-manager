@@ -1216,6 +1216,16 @@ function PresetForm({
   )
 }
 
+type ProxyPortStat = {
+  host: string
+  portEntries:   { port: number; count: number }[]
+  usedPortCount: number
+  minPort:       number
+  maxPort:       number
+  totalInRange:  number
+  unusedPorts:   number[]
+}
+
 export function ProxyPresetsSection() {
   const [presets, setPresets] = useState<ProxyPreset[]>([])
   const [mode, setMode]       = useState<'idle' | 'add' | 'edit'>('idle')
@@ -1223,8 +1233,14 @@ export function ProxyPresetsSection() {
   const [saving, setSaving]   = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
 
+  const [portStats, setPortStats]         = useState<ProxyPortStat[]>([])
+  const [showDetail, setShowDetail]       = useState<string | null>(null)  // host key
+  const [urlCounts, setUrlCounts]         = useState<Record<string, number>>({})
+
   const load = () => api.proxyPresets.list().then(setPresets)
-  useEffect(() => { load() }, [])
+  const loadPortStats = () => api.accounts.proxyPortStats().then(setPortStats)
+  const loadUrlCounts = () => api.accounts.proxyUrlCounts().then(setUrlCounts)
+  useEffect(() => { load(); loadPortStats(); loadUrlCounts() }, [])
 
   const handleAdd = async (v: PresetFormState) => {
     setSaving(true)
@@ -1285,6 +1301,97 @@ export function ProxyPresetsSection() {
         )}
       </div>
 
+      {/* ── ポート使用状況 ── */}
+      {portStats.length > 0 && (
+        <div className="mb-4 space-y-2">
+          <p className="text-zinc-400 text-xs font-semibold uppercase tracking-wide">ポート使用状況</p>
+          {portStats.map((s) => {
+            const pct = Math.round((s.usedPortCount / s.totalInRange) * 100)
+            const isExpanded = showDetail === s.host
+            const barColor = pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-teal-500'
+
+            // 垢数ごとの内訳
+            const count1 = s.portEntries.filter(e => e.count === 1).length
+            const count2 = s.portEntries.filter(e => e.count === 2).length
+            const count3 = s.portEntries.filter(e => e.count >= 3).length
+
+            return (
+              <div key={s.host} className="bg-zinc-800 rounded-xl p-3 border border-zinc-700 space-y-2">
+                {/* ヘッダー行 */}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-white text-xs font-semibold truncate">{s.host}</span>
+                  <span className={`text-xs font-bold shrink-0 ${pct >= 90 ? 'text-red-400' : pct >= 70 ? 'text-amber-400' : 'text-teal-400'}`}>
+                    {s.usedPortCount} / {s.totalInRange} ポート使用中
+                  </span>
+                </div>
+                {/* プログレスバー */}
+                <div className="w-full h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+                </div>
+                {/* 内訳バッジ */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {count1 > 0 && (
+                    <span className="px-2 py-0.5 bg-teal-500/15 text-teal-400 border border-teal-500/30 rounded-md text-[11px] font-medium">
+                      1垢: {count1}ポート
+                    </span>
+                  )}
+                  {count2 > 0 && (
+                    <span className="px-2 py-0.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 rounded-md text-[11px] font-medium">
+                      2垢: {count2}ポート
+                    </span>
+                  )}
+                  {count3 > 0 && (
+                    <span className="px-2 py-0.5 bg-red-500/15 text-red-400 border border-red-500/30 rounded-md text-[11px] font-medium">
+                      3垢以上: {count3}ポート
+                    </span>
+                  )}
+                  {s.unusedPorts.length > 0 && (
+                    <span className="px-2 py-0.5 bg-zinc-700 text-zinc-500 border border-zinc-600 rounded-md text-[11px]">
+                      未使用: {s.unusedPorts.length}ポート
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setShowDetail(isExpanded ? null : s.host)}
+                    className="ml-auto text-[11px] text-zinc-400 hover:text-white transition-colors shrink-0"
+                  >
+                    {isExpanded ? '▲ 閉じる' : '▼ 詳細を表示'}
+                  </button>
+                </div>
+                {/* 詳細一覧 */}
+                {isExpanded && (
+                  <div className="pt-2 border-t border-zinc-700">
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(110px,1fr))] gap-1">
+                      {s.portEntries.map(({ port, count }) => (
+                        <div
+                          key={port}
+                          className={`flex items-center justify-between px-2 py-1 rounded text-[11px] font-mono ${
+                            count >= 3 ? 'bg-red-500/10 text-red-400'
+                            : count === 2 ? 'bg-amber-500/10 text-amber-400'
+                            : 'bg-zinc-700/60 text-zinc-300'
+                          }`}
+                        >
+                          <span>{port}</span>
+                          <span className="font-sans text-[10px] opacity-80">{count}垢</span>
+                        </div>
+                      ))}
+                      {s.unusedPorts.map(port => (
+                        <div
+                          key={`u-${port}`}
+                          className="flex items-center justify-between px-2 py-1 rounded text-[11px] font-mono bg-zinc-800 text-zinc-600"
+                        >
+                          <span>{port}</span>
+                          <span className="font-sans text-[10px]">未使用</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       {/* Preset list */}
       {presets.length > 0 && (
         <div className="space-y-2 mb-3">
@@ -1300,6 +1407,13 @@ export function ProxyPresetsSection() {
                 <p className="text-zinc-400 text-xs font-mono truncate">
                   {p.host}:{p.port}
                   {p.username && <span className="text-zinc-600"> · {p.username}</span>}
+                  {(() => {
+                    const key = `${p.type}://${p.host}:${p.port}`
+                    const count = urlCounts[key] ?? 0
+                    return count > 0
+                      ? <span className="text-zinc-400 not-italic font-sans"> · {count}垢使用中</span>
+                      : <span className="text-zinc-600 not-italic font-sans"> · 未使用</span>
+                  })()}
                 </p>
               </div>
               <div className="flex gap-1 shrink-0">
@@ -1382,8 +1496,10 @@ export function ImageGroupsSection() {
   const [newUrl2, setNewUrl2] = useState('')
   const [csvText, setCsvText] = useState('')
   const [csvOpen, setCsvOpen] = useState(false)
-  const fileRef1 = useRef<HTMLInputElement>(null)
-  const fileRef2 = useRef<HTMLInputElement>(null)
+  const fileRef1       = useRef<HTMLInputElement>(null)
+  const fileRef2       = useRef<HTMLInputElement>(null)
+  const folderRef1     = useRef<HTMLInputElement>(null)
+  const folderRef2     = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     api.imageGroups.get().then((res) => { if (res.success && res.data) setGroups(res.data) })
@@ -1416,14 +1532,18 @@ export function ImageGroupsSection() {
     save(updated)
   }
 
+  const IMAGE_EXTS = /\.(jpe?g|png|gif|webp|avif|bmp|tiff?)$/i
+
   const handleFileSelect = (slot: 1 | 2) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const path = (file as File & { path: string }).path
-    const fileUrl = `file://${path}`
+    const files = Array.from(e.target.files ?? [])
+    if (files.length === 0) return
+    const newUrls = files
+      .filter(f => IMAGE_EXTS.test(f.name))
+      .map(f => `file://${(f as File & { path: string }).path}`)
+    if (newUrls.length === 0) return
     const updated = slot === 1
-      ? { ...groups, group1: [...groups.group1, fileUrl] }
-      : { ...groups, group2: [...groups.group2, fileUrl] }
+      ? { ...groups, group1: [...groups.group1, ...newUrls] }
+      : { ...groups, group2: [...groups.group2, ...newUrls] }
     setGroups(updated)
     save(updated)
     e.target.value = ''
@@ -1525,10 +1645,11 @@ export function ImageGroupsSection() {
 
       <div className="grid grid-cols-2 gap-3">
         {([1, 2] as const).map((slot) => {
-          const urls     = slot === 1 ? groups.group1 : groups.group2
-          const input    = slot === 1 ? newUrl1 : newUrl2
-          const setInput = slot === 1 ? setNewUrl1 : setNewUrl2
-          const fileRef  = slot === 1 ? fileRef1 : fileRef2
+          const urls       = slot === 1 ? groups.group1 : groups.group2
+          const input      = slot === 1 ? newUrl1 : newUrl2
+          const setInput   = slot === 1 ? setNewUrl1 : setNewUrl2
+          const fileRef    = slot === 1 ? fileRef1 : fileRef2
+          const folderRef  = slot === 1 ? folderRef1 : folderRef2
           return (
             <div key={slot} className="space-y-2">
               <p className="text-zinc-400 text-xs font-semibold">
@@ -1567,18 +1688,35 @@ export function ImageGroupsSection() {
                   className="shrink-0 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
                 >追加</button>
               </div>
-              {/* File picker */}
+              {/* File / Folder pickers */}
               <input
                 ref={fileRef}
                 type="file"
                 accept="image/*"
+                multiple
                 className="hidden"
                 onChange={handleFileSelect(slot)}
               />
-              <button
-                onClick={() => fileRef.current?.click()}
-                className="w-full px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors"
-              >📁 ファイルを選択</button>
+              <input
+                ref={folderRef}
+                type="file"
+                accept="image/*"
+                // @ts-expect-error webkitdirectory is not in React types
+                webkitdirectory=""
+                multiple
+                className="hidden"
+                onChange={handleFileSelect(slot)}
+              />
+              <div className="flex gap-1">
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="flex-1 px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors"
+                >📁 ファイルを複数選択</button>
+                <button
+                  onClick={() => folderRef.current?.click()}
+                  className="flex-1 px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs font-semibold rounded-lg transition-colors"
+                >🗂 フォルダを選択</button>
+              </div>
             </div>
           )
         })}

@@ -39,6 +39,14 @@ export function createPost(data: {
   return parsePost(row)
 }
 
+/** アカウントの直近の posted_at を返す（投稿がなければ null） */
+export function getLastPostedAt(accountId: number): string | null {
+  const row = getDb()
+    .prepare("SELECT posted_at FROM posts WHERE account_id = ? AND status = 'posted' AND posted_at IS NOT NULL ORDER BY posted_at DESC LIMIT 1")
+    .get(accountId) as { posted_at: string } | undefined
+  return row?.posted_at ?? null
+}
+
 export function updatePostStatus(
   id: number,
   status: Post['status'],

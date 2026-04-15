@@ -1,19 +1,20 @@
 import { getDb } from '../index'
 
 export interface AutopostConfig {
-  id:            number
-  account_id:    number
-  enabled:       boolean
-  mode:          'stock' | 'rewrite' | 'random'
-  use_api:       boolean
-  min_interval:  number   // minutes
-  max_interval:  number   // minutes
-  next_at:       string | null
-  stock_last_id: number | null
-  rewrite_idx:   number
-  rewrite_texts: string[]
-  created_at:    string
-  updated_at:    string
+  id:               number
+  account_id:       number
+  enabled:          boolean
+  mode:             'stock' | 'rewrite' | 'random'
+  use_api:          boolean
+  min_interval:     number   // minutes
+  max_interval:     number   // minutes
+  next_at:          string | null
+  last_executed_at: string | null
+  stock_last_id:    number | null
+  rewrite_idx:      number
+  rewrite_texts:    string[]
+  created_at:       string
+  updated_at:       string
 }
 
 interface AutopostRow extends Omit<AutopostConfig, 'enabled' | 'use_api' | 'rewrite_texts'> {
@@ -94,7 +95,7 @@ export function upsertAutopostConfig(data: {
 
 export function updateAutopostState(
   accountId: number,
-  data: { next_at?: string | null; stock_last_id?: number | null; rewrite_idx?: number }
+  data: { next_at?: string | null; stock_last_id?: number | null; rewrite_idx?: number; last_executed_at?: string }
 ): void {
   const db = getDb()
   if (data.next_at !== undefined) {
@@ -112,6 +113,11 @@ export function updateAutopostState(
       "UPDATE autopost_configs SET rewrite_idx = ?, updated_at = datetime('now') WHERE account_id = ?"
     ).run(data.rewrite_idx, accountId)
   }
+  if (data.last_executed_at !== undefined) {
+    db.prepare(
+      "UPDATE autopost_configs SET last_executed_at = ?, updated_at = datetime('now') WHERE account_id = ?"
+    ).run(data.last_executed_at, accountId)
+  }
 }
 
 export function resetAutopostNext(accountId: number): void {
@@ -124,4 +130,42 @@ export function setAutopostNextAt(accountId: number, nextAt: string): void {
   getDb()
     .prepare("UPDATE autopost_configs SET next_at = ?, updated_at = datetime('now') WHERE account_id = ?")
     .run(nextAt, accountId)
+}
+
+export interface AccountAutopostStatus {
+  account_id:     number
+  last_posted_at: string | null
+  next_at:        string | null
+  enabled:        boolean
+}
+
+export function getAllAccountAutopostStatuses(): AccountAutopostStatus[] {
+  const rows = getDb().prepare(`
+    SELECT
+      a.id AS account_id,
+      CASE
+        WHEN ac.last_executed_at IS NULL THEN p_max.posted_at
+        WHEN p_max.posted_at IS NULL    THEN ac.last_executed_at
+        WHEN ac.last_executed_at >= p_max.posted_at THEN ac.last_executed_at
+        ELSE p_max.posted_at
+      END AS last_posted_at,
+      ac.next_at,
+      COALESCE(ac.enabled, 0) AS enabled
+    FROM accounts a
+    LEFT JOIN autopost_configs ac ON ac.account_id = a.id
+    LEFT JOIN (
+      SELECT account_id, MAX(posted_at) AS posted_at
+      FROM posts
+      WHERE status = 'posted' AND posted_at IS NOT NULL
+      GROUP BY account_id
+    ) p_max ON p_max.account_id = a.id
+    ORDER BY a.sort_order ASC, a.id ASC
+  `).all() as Array<{ account_id: number; last_posted_at: string | null; next_at: string | null; enabled: number }>
+
+  return rows.map(r => ({
+    account_id:     r.account_id,
+    last_posted_at: r.last_posted_at,
+    next_at:        r.next_at,
+    enabled:        r.enabled === 1,
+  }))
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Account, Group, api } from '../lib/ipc'
+import { Account, Group, AutopostConfig, api } from '../lib/ipc'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 
@@ -180,6 +180,55 @@ export function Sidebar({
   const accountNumberMap = new Map(accounts.map((a, i) => [a.id, i + 1]))
 
   // ── CSV インポート ────────────────────────────────────────────────────────
+  // 自動投稿設定マップ（account_id → config）
+  const [autopostMap, setAutopostMap] = useState<Record<number, AutopostConfig>>({})
+
+  const refreshAutopostMap = () => {
+    api.autopost.listEnabled().then((configs) => {
+      const map: Record<number, AutopostConfig> = {}
+      for (const c of configs) map[c.account_id] = c
+      setAutopostMap(map)
+    }).catch(() => {})
+  }
+
+  useEffect(() => { refreshAutopostMap() }, [accounts])
+
+  useEffect(() => {
+    const off = api.on('autopost:updated', refreshAutopostMap)
+    return off
+  }, [])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedIds(new Set())
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  const calcFreqLabel = (cfg: AutopostConfig): string => {
+    const avg = (cfg.min_interval + cfg.max_interval) / 2
+    if (avg >= 260 && avg <= 310) return '5/日'
+    if (avg >= 330 && avg <= 390) return '4/日'
+    if (avg >= 440 && avg <= 520) return '3/日'
+    if (avg >= 120 && avg <= 180) return '標準'
+    if (avg >= 180 && avg <= 240) return '低'
+    if (avg >=  90 && avg <= 150) return '高'
+    return `${Math.round(1440 / avg)}/日`
+  }
+
+  const MARK_CYCLE = [null, '⭐️', '🔴', '🟢'] as const
+  const [markOverrides, setMarkOverrides] = useState<Record<number, string | null>>({})
+
+  const handleMarkClick = async (e: React.MouseEvent, account: Account) => {
+    e.stopPropagation()
+    const current = markOverrides[account.id] ?? account.mark ?? null
+    const idx = MARK_CYCLE.indexOf(current as typeof MARK_CYCLE[number])
+    const next = MARK_CYCLE[(idx + 1) % MARK_CYCLE.length]
+    setMarkOverrides(prev => ({ ...prev, [account.id]: next }))
+    await api.accounts.updateMark({ id: account.id, mark: next }).catch(() => {})
+  }
+
   const [csvImporting,   setCsvImporting]   = useState(false)
   const [csvToast,       setCsvToast]       = useState<{ msg: string; ok: boolean } | null>(null)
   const [csvPanelOpen,   setCsvPanelOpen]   = useState(false)
@@ -370,6 +419,12 @@ export function Sidebar({
   const [draggingId, setDraggingId] = useState<number | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
 
+  // ── Multi-select state ─────────────────────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const lastSelectedIdRef = useRef<number | null>(null)
+  const draggingIdsRef = useRef<number[]>([])
+  const [draggingIdsSet, setDraggingIdsSet] = useState<Set<number>>(new Set())
+
   // ── Group drag state ──────────────────────────────────────────────────────
   const draggingGroupRef = useRef<string | null>(null)
   const [draggingGroupName, setDraggingGroupName] = useState<string | null>(null)
@@ -456,15 +511,21 @@ export function Sidebar({
   }
 
   const handleDragStart = (e: React.DragEvent, accountId: number) => {
+    // If dragging a selected account, drag all selected; otherwise just this one
+    const ids = selectedIds.has(accountId) ? [...selectedIds] : [accountId]
     draggingIdRef.current = accountId
+    draggingIdsRef.current = ids
     setDraggingId(accountId)
+    setDraggingIdsSet(new Set(ids))
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', String(accountId))
   }
 
   const handleDragEnd = () => {
     draggingIdRef.current = null
+    draggingIdsRef.current = []
     setDraggingId(null)
+    setDraggingIdsSet(new Set())
     setDropTarget(null)
   }
 
@@ -493,46 +554,49 @@ export function Sidebar({
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
-    const dragId = draggingIdRef.current
+    const dragIds = draggingIdsRef.current
     draggingIdRef.current = null
-    setDraggingId(null)  // Reset before state updates to prevent stuck opacity-40
-    if (dragId === null || dropTarget === null) {
+    draggingIdsRef.current = []
+    setDraggingId(null)
+    setDraggingIdsSet(new Set())
+    if (!dragIds.length || dropTarget === null) {
       setDropTarget(null)
       return
     }
 
-    const orderedAccounts = [...accounts]
-    const dragIndex = orderedAccounts.findIndex(a => a.id === dragId)
-    if (dragIndex === -1) { setDropTarget(null); return }
-    const [draggedAccount] = orderedAccounts.splice(dragIndex, 1)
+    const dragIdSet = new Set(dragIds)
+    // Keep original order of dragged accounts
+    const draggedAccounts = accounts.filter(a => dragIdSet.has(a.id))
+    const remaining = accounts.filter(a => !dragIdSet.has(a.id))
 
-    let newGroupName: string | null = draggedAccount.group_name
+    let newGroupName: string | null = draggedAccounts[0]?.group_name ?? null
 
     if (dropTarget.kind === 'group-header') {
       newGroupName = dropTarget.groupName || null
-      const firstInGroup = orderedAccounts.findIndex(a => (a.group_name ?? '') === dropTarget.groupName)
+      const firstInGroup = remaining.findIndex(a => (a.group_name ?? '') === dropTarget.groupName)
       if (firstInGroup === -1) {
-        orderedAccounts.push(draggedAccount)
+        remaining.push(...draggedAccounts)
       } else {
-        orderedAccounts.splice(firstInGroup, 0, draggedAccount)
+        remaining.splice(firstInGroup, 0, ...draggedAccounts)
       }
     } else {
-      const target = orderedAccounts.find(a => a.id === dropTarget.accountId)
+      const target = remaining.find(a => a.id === dropTarget.accountId)
       if (!target) { setDropTarget(null); return }
       newGroupName = target.group_name
-      const targetIndex = orderedAccounts.findIndex(a => a.id === dropTarget.accountId)
+      const targetIndex = remaining.findIndex(a => a.id === dropTarget.accountId)
       const insertAt = dropTarget.position === 'before' ? targetIndex : targetIndex + 1
-      orderedAccounts.splice(insertAt, 0, draggedAccount)
+      remaining.splice(insertAt, 0, ...draggedAccounts)
     }
 
-    const updates = orderedAccounts.map((a, i) => ({
+    const updates = remaining.map((a, i) => ({
       id: a.id,
       sort_order: i * 1000,
-      group_name: a.id === dragId ? newGroupName : a.group_name,
+      group_name: dragIdSet.has(a.id) ? newGroupName : a.group_name,
     }))
 
     onReorderAccounts(updates)
     setDropTarget(null)
+    setSelectedIds(new Set())
   }
 
   const grouped = accounts.reduce<Record<string, Account[]>>((acc, a) => {
@@ -605,6 +669,22 @@ export function Sidebar({
         </div>
       </div>
 
+      {/* ── Multi-select banner ── */}
+      {selectedIds.size > 0 && (
+        <div className="mx-2 mb-1.5 px-2.5 py-1.5 rounded-lg bg-blue-900/50 ring-1 ring-blue-600/40 flex items-center justify-between shrink-0">
+          <span className="text-[11px] text-blue-300 font-medium">
+            {selectedIds.size}垢選択中 · ドラッグでグループ移動
+          </span>
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="text-blue-400 hover:text-blue-200 text-[11px] leading-none ml-2"
+            title="選択解除"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* ── Account list header ── */}
       <div className="flex items-center justify-between px-3 pb-2 shrink-0">
         <span className="text-zinc-500 text-[11px] font-semibold uppercase tracking-wider">
@@ -659,7 +739,7 @@ export function Sidebar({
                         ? 'bg-blue-500/20 ring-1 ring-inset ring-blue-500/40'
                         : groupDropTarget?.name === groupKey
                         ? 'bg-purple-500/10'
-                        : draggingId !== null
+                        : draggingIdsSet.size > 0
                         ? 'bg-zinc-800/40 ring-1 ring-inset ring-zinc-700/60'
                         : ''
                     }`}
@@ -732,7 +812,7 @@ export function Sidebar({
                   className={`flex items-center gap-1.5 px-2 pt-2 pb-1.5 rounded-lg transition-colors ${
                     isGroupDrop('')
                       ? 'bg-blue-500/20 ring-1 ring-inset ring-blue-500/40'
-                      : draggingId !== null
+                      : draggingIdsSet.size > 0
                       ? 'bg-zinc-800/40 ring-1 ring-inset ring-zinc-700/60'
                       : ''
                   }`}
@@ -750,8 +830,9 @@ export function Sidebar({
               )}
 
               {(grouped[groupKey] ?? []).map((account) => {
-                const isActive   = activeAccountId === account.id
-                const isDragging = draggingId === account.id
+                const isActive     = activeAccountId === account.id
+                const isDragging   = draggingIdsSet.has(account.id)
+                const isSelected   = selectedIds.has(account.id)
 
                 return (
                   <div key={account.id}>
@@ -767,15 +848,46 @@ export function Sidebar({
                       className={`group relative w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-all duration-100 cursor-pointer ${
                         isDragging
                           ? 'opacity-40 scale-95'
+                          : isSelected && !isActive
+                          ? 'bg-blue-900/40 ring-1 ring-inset ring-blue-600/50 text-zinc-100'
                           : isActive
                           ? 'bg-zinc-800 text-white'
                           : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'
                       }`}
-                      onClick={() => !isDragging && onOpenAccount(account.id)}
+                      onClick={(e) => {
+                        if (isDragging) return
+                        if (e.metaKey || e.ctrlKey) {
+                          // Toggle selection
+                          setSelectedIds(prev => {
+                            const next = new Set(prev)
+                            if (next.has(account.id)) next.delete(account.id)
+                            else next.add(account.id)
+                            return next
+                          })
+                          lastSelectedIdRef.current = account.id
+                        } else if (e.shiftKey && lastSelectedIdRef.current !== null) {
+                          // Range select based on current display order
+                          const allDisplayed = accounts
+                          const fromIdx = allDisplayed.findIndex(a => a.id === lastSelectedIdRef.current)
+                          const toIdx   = allDisplayed.findIndex(a => a.id === account.id)
+                          if (fromIdx !== -1 && toIdx !== -1) {
+                            const [start, end] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx]
+                            setSelectedIds(new Set(allDisplayed.slice(start, end + 1).map(a => a.id)))
+                          }
+                        } else {
+                          // Normal click: open account, clear selection
+                          setSelectedIds(new Set())
+                          lastSelectedIdRef.current = null
+                          onOpenAccount(account.id)
+                        }
+                      }}
                       onContextMenu={(e) => handleContextMenu(e, account.id)}
                     >
                       {isActive && (
                         <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-blue-500 rounded-r-full" />
+                      )}
+                      {isSelected && !isActive && (
+                        <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-blue-400/70 rounded-r-full" />
                       )}
 
                       <span
@@ -838,7 +950,36 @@ export function Sidebar({
                             </p>
                           )
                         })()}
+                        {/* 自動投稿バッジ */}
+                        {autopostMap[account.id] && (() => {
+                          const cfg = autopostMap[account.id]
+                          const dot = cfg.use_api ? '🟢' : '🟡'
+                          const freq = calcFreqLabel(cfg)
+                          return (
+                            <p className="text-[9px] text-zinc-500 leading-tight">
+                              {dot} 自動 {freq}
+                            </p>
+                          )
+                        })()}
                       </div>
+
+                      {/* Mark button */}
+                      {(() => {
+                        const mark = markOverrides[account.id] ?? account.mark ?? null
+                        return (
+                          <button
+                            onClick={(e) => handleMarkClick(e, account)}
+                            title="マークを切り替え"
+                            className={`shrink-0 w-5 h-5 rounded flex items-center justify-center transition-all text-[11px] leading-none ${
+                              mark
+                                ? 'opacity-100'
+                                : 'opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-white hover:bg-zinc-700'
+                            }`}
+                          >
+                            {mark ?? '○'}
+                          </button>
+                        )
+                      })()}
 
                       {/* Edit button */}
                       <button

@@ -26,10 +26,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:update-group', data),
     updateMemo: (data: { id: number; memo: string | null }) =>
       ipcRenderer.invoke('accounts:update-memo', data),
+    updateMark: (data: { id: number; mark: string | null }) =>
+      ipcRenderer.invoke('accounts:update-mark', data),
     updateSpeedPreset: (data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) =>
       ipcRenderer.invoke('accounts:update-speed-preset', data),
     updateUserAgent: (data: { id: number; user_agent: string | null }) =>
       ipcRenderer.invoke('accounts:update-user-agent', data),
+    checkIp: (data: { proxy_url: string | null; proxy_username?: string; proxy_password?: string }) =>
+      ipcRenderer.invoke('accounts:check-ip', data),
+    hasAccessToken: (id: number) =>
+      ipcRenderer.invoke('accounts:has-access-token', id),
     loginInstagram: (id: number) =>
       ipcRenderer.invoke('accounts:login-instagram', id),
     bulkLoginInstagram: (data: { group_name: string | null }) =>
@@ -50,6 +56,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       name: string; email: string; password: string
       proxy_url?: string | null; proxy_username?: string | null; proxy_password?: string | null
     }) => ipcRenderer.invoke('accounts:auto-register', data),
+    proxyUrlCounts: () => ipcRenderer.invoke('accounts:proxy-url-counts'),
+    proxyPortStats: () => ipcRenderer.invoke('accounts:proxy-port-stats'),
   },
 
   // Posts
@@ -72,6 +80,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       content: string
       media_paths?: string[]
       scheduled_at: string
+      topic?: string | null
     }) => ipcRenderer.invoke('schedules:create', data),
     delete: (id: number) => ipcRenderer.invoke('schedules:delete', id),
   },
@@ -107,8 +116,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     back: (accountId: number)    => ipcRenderer.invoke('browserView:back', accountId),
     forward: (accountId: number) => ipcRenderer.invoke('browserView:forward', accountId),
     reload: (accountId: number)  => ipcRenderer.invoke('browserView:reload', accountId),
-    openCompose: (accountId: number, content: string, images?: string[]) =>
-      ipcRenderer.invoke('browserView:open-compose', accountId, content, images ?? []),
+    openCompose: (accountId: number, content: string, images?: string[], topic?: string) =>
+      ipcRenderer.invoke('browserView:open-compose', accountId, content, images ?? [], topic),
     enableCapture: (accountId: number) =>
       ipcRenderer.invoke('browserView:enableCapture', accountId),
     getCaptured: () =>
@@ -168,9 +177,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Stocks
   stocks: {
     list:   (accountId: number) => ipcRenderer.invoke('stocks:list', accountId),
-    create: (data: { account_id: number; title?: string | null; content: string; image_url?: string | null }) =>
+    create: (data: { account_id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) =>
       ipcRenderer.invoke('stocks:create', data),
-    update: (data: { id: number; title?: string | null; content: string; image_url?: string | null }) =>
+    update: (data: { id: number; title?: string | null; content: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) =>
       ipcRenderer.invoke('stocks:update', data),
     delete:           (id: number)       => ipcRenderer.invoke('stocks:delete', id),
     deleteAll:        (accountId: number) => ipcRenderer.invoke('stocks:deleteAll', accountId),
@@ -180,7 +189,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     randomizeImages: (accountId: number) => ipcRenderer.invoke('stocks:randomize-images', accountId),
     updateAllTopics: (data: { account_id: number; topic: string | null }) =>
       ipcRenderer.invoke('stocks:updateAllTopics', data),
-    schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null }) =>
+    schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) =>
       ipcRenderer.invoke('stocks:schedule-post', data),
   },
 
@@ -230,7 +239,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Autopost
   autopost: {
-    get:       (accountId: number) => ipcRenderer.invoke('autopost:get', accountId),
+    get:          (accountId: number) => ipcRenderer.invoke('autopost:get', accountId),
+    listEnabled:  () => ipcRenderer.invoke('autopost:list-enabled'),
     save:      (data: {
       account_id:    number
       enabled:       boolean
@@ -240,8 +250,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       max_interval:  number
       rewrite_texts: string[]
     }) => ipcRenderer.invoke('autopost:save', data),
-    resetNext: (accountId: number) => ipcRenderer.invoke('autopost:reset-next', accountId),
-    setNextAt: (data: { account_id: number; next_at: string }) => ipcRenderer.invoke('autopost:set-next-at', data),
+    resetNext:        (accountId: number) => ipcRenderer.invoke('autopost:reset-next', accountId),
+    setNextAt:        (data: { account_id: number; next_at: string }) => ipcRenderer.invoke('autopost:set-next-at', data),
+    accountStatuses:  () => ipcRenderer.invoke('autopost:account-statuses'),
   },
 
   // API Post (non-browser immediate post)

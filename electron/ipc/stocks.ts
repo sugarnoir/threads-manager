@@ -12,6 +12,7 @@ import {
 } from '../db/repositories/post_stocks'
 import { getSetting, setSetting } from '../db/repositories/settings'
 import { scheduleThread } from '../playwright/threads-client'
+import { ensureViewLoaded } from '../browser-views/view-manager'
 
 function getImageGroups(): { group1: string[]; group2: string[] } {
   const g1 = getSetting('image_group_1')
@@ -194,17 +195,42 @@ export function registerStockHandlers(): void {
     scheduled_at: string   // ISO 8601
     image_url?:   string | null
     image_url_2?: string | null
+    topic?:       string | null
   }) => {
     try {
       const mediaPaths = [data.image_url, data.image_url_2]
         .filter((p): p is string => typeof p === 'string' && p.length > 0)
-      const result = await scheduleThread(
-        data.account_id,
-        data.content,
-        new Date(data.scheduled_at),
-        mediaPaths,
-      )
-      return result
+
+      // WebContentsView をウォームアップしてセッションが有効か確認
+      console.log(`[stocks:schedule-post] ensureViewLoaded account=${data.account_id}`)
+      await ensureViewLoaded(data.account_id).catch((e) => {
+        console.warn(`[stocks:schedule-post] ensureViewLoaded failed: ${e}`)
+      })
+
+      // 最大3回リトライ
+      const MAX_ATTEMPTS = 3
+      let lastError = 'unknown error'
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        console.log(`[stocks:schedule-post] attempt ${attempt}/${MAX_ATTEMPTS} account=${data.account_id} topic=${JSON.stringify(data.topic)}`)
+        try {
+          const result = await scheduleThread(
+            data.account_id,
+            data.content,
+            new Date(data.scheduled_at),
+            mediaPaths,
+            data.topic ?? undefined,
+          )
+          if (result.success) return result
+          lastError = result.error ?? 'unknown error'
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err)
+        }
+        console.warn(`[stocks:schedule-post] attempt ${attempt} failed: ${lastError}`)
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 3000))
+        }
+      }
+      return { success: false, error: lastError }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }

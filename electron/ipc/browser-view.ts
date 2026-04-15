@@ -36,9 +36,9 @@ export function registerBrowserViewHandlers(win: BrowserWindow, manager: ViewMan
   ipcMain.handle('browserView:forward', (_e, accountId: number) => manager.goForward(accountId))
   ipcMain.handle('browserView:reload',  (_e, accountId: number) => manager.reload(accountId))
 
-  ipcMain.handle('browserView:open-compose', async (_e, accountId: number, content: string, images: string[] = []) => {
-    console.log('[browserView:open-compose] received accountId=', accountId, 'content=', content.slice(0, 30), 'images=', images.length)
-    const result = await manager.openCompose(accountId, content, images)
+  ipcMain.handle('browserView:open-compose', async (_e, accountId: number, content: string, images: string[] = [], topic?: string) => {
+    console.log('[browserView:open-compose] received accountId=', accountId, 'content=', content.slice(0, 30), 'images=', images.length, 'topic=', topic)
+    const result = await manager.openCompose(accountId, content, images, topic)
     console.log('[browserView:open-compose] result=', result)
     return result
   })

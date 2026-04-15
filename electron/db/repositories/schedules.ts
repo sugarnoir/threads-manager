@@ -8,6 +8,7 @@ export interface Schedule {
   scheduled_at: string
   status: 'pending' | 'posted' | 'failed' | 'cancelled'
   post_id: number | null
+  topic: string | null
   created_at: string
 }
 
@@ -40,17 +41,19 @@ export function createSchedule(data: {
   content: string
   media_paths?: string[]
   scheduled_at: string
+  topic?: string | null
 }): Schedule {
   const db = getDb()
   const result = db
     .prepare(
-      'INSERT INTO schedules (account_id, content, media_paths, scheduled_at) VALUES (?, ?, ?, ?)'
+      'INSERT INTO schedules (account_id, content, media_paths, scheduled_at, topic) VALUES (?, ?, ?, ?, ?)'
     )
     .run(
       data.account_id,
       data.content,
       JSON.stringify(data.media_paths ?? []),
-      data.scheduled_at
+      data.scheduled_at,
+      data.topic ?? null
     )
   const row = db
     .prepare('SELECT * FROM schedules WHERE id = ?')

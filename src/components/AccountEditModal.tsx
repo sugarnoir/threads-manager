@@ -20,7 +20,7 @@ interface Props {
   onDelete: () => Promise<unknown>
   onOpenBrowser: () => void
   onClose: () => void
-  onUseStock?: (content: string, images: string[]) => void
+  onUseStock?: (content: string, images: string[], topic?: string | null) => void
 }
 
 type Tab = 'profile' | 'proxy' | 'memo' | 'stocks' | 'fingerprint' | 'danger'
@@ -71,7 +71,7 @@ const STOCK_MAX = 500
 
 // ── StocksTab ─────────────────────────────────────────────────────────────────
 
-function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; groupName: string | null; onUseStock?: (content: string, images: string[]) => void }) {
+function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; groupName: string | null; onUseStock?: (content: string, images: string[], topic?: string | null) => void }) {
   const [stocks, setStocks]     = useState<PostStock[]>([])
   const [loading, setLoading]   = useState(true)
   const [editingId, setEditingId] = useState<number | 'new' | null>(null)
@@ -210,6 +210,26 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
       }
     } catch (err) {
       showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    }
+  }
+
+  const handleClearAllTopics = async () => {
+    if (stocks.length === 0) return
+    if (!window.confirm('全ストックのトピックをクリアしますか？')) return
+    setApplyingTopic(true)
+    try {
+      const res = await api.stocks.updateAllTopics({ account_id: accountId, topic: null })
+      if (res.success) {
+        const listRes = await api.stocks.list(accountId)
+        if (listRes.success) setStocks(listRes.data)
+        showToast(`${res.updated}件のトピックをクリアしました`, true)
+      } else {
+        showToast(`エラー: ${res.error}`, false)
+      }
+    } catch (err) {
+      showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setApplyingTopic(false)
     }
   }
 
@@ -398,6 +418,13 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
         >
           {applyingTopic ? '適用中...' : '全ストックに適用'}
         </button>
+        <button
+          onClick={handleClearAllTopics}
+          disabled={applyingTopic || stocks.length === 0}
+          className="px-3 py-1.5 bg-zinc-600 hover:bg-zinc-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+        >
+          トピックをクリア
+        </button>
       </div>
 
       {/* Stock list */}
@@ -431,7 +458,7 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
               <div className="flex gap-1.5 pt-0.5 flex-wrap">
                 {onUseStock && (
                   <button
-                    onClick={() => { console.log('[Stock] 投稿に使う clicked', s.id); onUseStock(s.content, [s.image_url, s.image_url_2].filter(Boolean) as string[]) }}
+                    onClick={() => { console.log('[Stock] 投稿に使う clicked', s.id); onUseStock(s.content, [s.image_url, s.image_url_2].filter(Boolean) as string[], s.topic) }}
                     className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold rounded-lg transition-colors"
                   >
                     投稿に使う
@@ -564,6 +591,7 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
                     scheduled_at: scheduledDate.toISOString(),
                     image_url:    scheduleTarget.image_url,
                     image_url_2:  scheduleTarget.image_url_2,
+                    topic:        scheduleTarget.topic,
                   })
                   setScheduling(false)
                   if (result.success) {
@@ -792,6 +820,14 @@ export function AccountEditModal({
 }: Props) {
   const [tab, setTab] = useState<Tab>('profile')
 
+  // dangerタブを開いたときに access_token の有無を取得
+  useEffect(() => {
+    if (tab !== 'danger') return
+    api.accounts.hasAccessToken(account.id)
+      .then(r => setHasAccessToken(r.hasToken))
+      .catch(() => setHasAccessToken(false))
+  }, [tab, account.id])
+
   // Profile state
   const [displayName, setDisplayName] = useState(account.display_name ?? '')
   const [savingDisplayName, setSavingDisplayName] = useState(false)
@@ -869,8 +905,41 @@ export function AccountEditModal({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [igLoggingIn, setIgLoggingIn] = useState(false)
   const [igLoginResult, setIgLoginResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [hasAccessToken, setHasAccessToken] = useState<boolean | null>(null)
   const [bulkLoggingIn, setBulkLoggingIn] = useState(false)
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; successCount: number; currentUsername?: string } | null>(null)
+
+  // ── 初期設定フロー ─────────────────────────────────────────────────────────
+  type SetupStep = 'idle' | 'step1_login' | 'step2_profile' | 'step3_threads' | 'done'
+  const [setupStep, setSetupStep] = useState<SetupStep>('idle')
+  const [setupError, setSetupError] = useState<string | null>(null)
+
+  const handleStartSetup = async () => {
+    setSetupStep('step1_login')
+    setSetupError(null)
+    try {
+      const res = await api.accounts.loginInstagram(account.id)
+      if (!res.success) {
+        setSetupError(res.error ?? 'ログインに失敗しました')
+        setSetupStep('idle')
+        return
+      }
+      // ログイン完了後、即座に遷移するとbot検知リスクがあるため追加で待機
+      await new Promise(r => setTimeout(r, 5000))
+      // ブラウザを開いてプロフィール編集画面へ遷移
+      onOpenBrowser()
+      await api.browserView.navigate(account.id, 'https://www.instagram.com/accounts/edit/')
+      setSetupStep('step2_profile')
+    } catch (e) {
+      setSetupError(e instanceof Error ? e.message : String(e))
+      setSetupStep('idle')
+    }
+  }
+
+  const handleSetupNextToThreads = async () => {
+    await api.browserView.navigate(account.id, 'https://www.threads.net/')
+    setSetupStep('step3_threads')
+  }
 
   const handleSaveProxy = async () => {
     setSavingProxy(true)
@@ -907,6 +976,8 @@ export function AccountEditModal({
       const res = await api.accounts.loginInstagram(account.id)
       if (res.success) {
         setIgLoginResult({ ok: true, msg: res.hasSessionId ? 'instagram.com のセッションを取得しました' : 'ウィンドウを閉じました（sessionid未取得）' })
+        // access_token バッジを再確認
+        api.accounts.hasAccessToken(account.id).then(r => setHasAccessToken(r.hasToken)).catch(() => {})
       } else {
         setIgLoginResult({ ok: false, msg: res.error ?? 'エラーが発生しました' })
       }
@@ -1322,9 +1393,105 @@ export function AccountEditModal({
           {/* ── Danger tab ── */}
           {tab === 'danger' && (
             <div className="space-y-3">
+
+              {/* ── 初期設定フロー ── */}
+              <div className="bg-zinc-800 rounded-xl p-4">
+                <p className="text-white text-xs font-semibold mb-1">初期設定</p>
+                <p className="text-zinc-500 text-xs mb-3">
+                  Instagramログイン → プロフィール名変更 → Threadsアカウント作成を順番に実行します。
+                </p>
+
+                {setupError && (
+                  <p className="text-red-400 text-xs font-medium mb-3">✗ {setupError}</p>
+                )}
+
+                {/* idle */}
+                {setupStep === 'idle' && (
+                  <button
+                    onClick={handleStartSetup}
+                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-violet-600 hover:from-blue-500 hover:to-violet-500 text-white rounded-lg text-xs font-semibold transition-all"
+                  >
+                    初期設定を開始
+                  </button>
+                )}
+
+                {/* Step 1: ログイン中 */}
+                {setupStep === 'step1_login' && (
+                  <div className="flex items-center gap-2 text-zinc-300 text-xs">
+                    <span className="w-3.5 h-3.5 border-2 border-zinc-500 border-t-blue-400 rounded-full animate-spin shrink-0" />
+                    <span>Step 1 / 3 — Instagramでログイン中...</span>
+                  </div>
+                )}
+
+                {/* Step 2: プロフィール編集 */}
+                {setupStep === 'step2_profile' && (
+                  <div className="space-y-3">
+                    <div className="flex items-start gap-2">
+                      <span className="mt-0.5 w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] font-bold shrink-0">2</span>
+                      <div>
+                        <p className="text-white text-xs font-medium">プロフィール名を変更してください</p>
+                        <p className="text-zinc-500 text-xs mt-0.5">
+                          ブラウザにInstagramのプロフィール編集画面を開きました。<br />
+                          「名前」を変更・保存したら「次へ」をクリックしてください。
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleSetupNextToThreads}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-colors"
+                    >
+                      次へ →
+                    </button>
+                  </div>
+                )}
+
+                {/* Step 3: Threads作成 */}
+                {setupStep === 'step3_threads' && (
+                  <div className="space-y-3">
+                    <div className="flex items-start gap-2">
+                      <span className="mt-0.5 w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] font-bold shrink-0">3</span>
+                      <div>
+                        <p className="text-white text-xs font-medium">Threadsアカウントを作成してください</p>
+                        <p className="text-zinc-500 text-xs mt-0.5">
+                          ブラウザにThreadsのアカウント作成画面を開きました。<br />
+                          設定が完了したら「完了」をクリックしてください。
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setSetupStep('done')}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors"
+                    >
+                      完了
+                    </button>
+                  </div>
+                )}
+
+                {/* Done */}
+                {setupStep === 'done' && (
+                  <div className="space-y-2">
+                    <p className="text-emerald-400 text-xs font-medium">✓ 初期設定が完了しました</p>
+                    <button
+                      onClick={() => { setSetupStep('idle'); setSetupError(null) }}
+                      className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg text-xs transition-colors"
+                    >
+                      もう一度
+                    </button>
+                  </div>
+                )}
+              </div>
+
               {/* Instagram login */}
               <div className="bg-zinc-800 rounded-xl p-4">
-                <p className="text-white text-xs font-semibold mb-1">Instagramでログイン</p>
+                <div className="flex items-center gap-2 mb-1">
+                  <p className="text-white text-xs font-semibold">Instagramでログイン</p>
+                  {hasAccessToken === true && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-semibold leading-none">セッションあり</span>
+                  )}
+                  {hasAccessToken === false && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400 text-[10px] font-semibold leading-none">未ログイン</span>
+                  )}
+                </div>
                 <p className="text-zinc-500 text-xs mb-3">
                   instagram.com のセッションを取得します。i.instagram.com API を使う場合に必要です。
                 </p>

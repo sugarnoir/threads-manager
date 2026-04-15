@@ -259,6 +259,9 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('user_agent')) {
     db.exec("ALTER TABLE accounts ADD COLUMN user_agent TEXT")
   }
+  if (!colNames.includes('mark')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN mark TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]
@@ -272,6 +275,9 @@ export function initializeSchema(db: Database.Database): void {
   if (!autopostCols.map(c => c.name).includes('use_api')) {
     db.exec("ALTER TABLE autopost_configs ADD COLUMN use_api INTEGER NOT NULL DEFAULT 0")
   }
+  if (!autopostCols.map(c => c.name).includes('last_executed_at')) {
+    db.exec("ALTER TABLE autopost_configs ADD COLUMN last_executed_at TEXT")
+  }
 
   // post_stocks テーブルへの image_url_2 カラム追加
   const stockCols = db.prepare("PRAGMA table_info(post_stocks)").all() as { name: string }[]
@@ -280,6 +286,12 @@ export function initializeSchema(db: Database.Database): void {
   }
   if (!stockCols.map(c => c.name).includes('topic')) {
     db.exec("ALTER TABLE post_stocks ADD COLUMN topic TEXT")
+  }
+
+  // schedules テーブルへの topic カラム追加
+  const scheduleCols = db.prepare("PRAGMA table_info(schedules)").all() as { name: string }[]
+  if (!scheduleCols.map(c => c.name).includes('topic')) {
+    db.exec("ALTER TABLE schedules ADD COLUMN topic TEXT")
   }
 
   // license_keys テーブルへの user_name カラム追加

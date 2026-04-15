@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react'
-import { Account } from '../lib/ipc'
+import { useState, useCallback, useEffect } from 'react'
+import { Account, AccountAutopostStatus, api } from '../lib/ipc'
 
 interface Props {
   accounts: Account[]
@@ -76,6 +76,129 @@ const STATUS_CONFIG: Record<AccountStatus, {
     badge: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
     row: 'bg-yellow-500/5',
   },
+}
+
+// ── Time formatting ───────────────────────────────────────────────────────────
+
+function formatRelativeTime(dateStr: string | null): string {
+  if (!dateStr) return '—'
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+
+  if (diffMin < 1)   return 'たった今'
+  if (diffMin < 60)  return `${diffMin}分前`
+  const diffH = Math.floor(diffMin / 60)
+  if (diffH < 24)    return `${diffH}時間前`
+  const diffD = Math.floor(diffH / 24)
+  if (diffD < 7)     return `${diffD}日前`
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+function formatNextAt(dateStr: string | null, enabled: boolean): string {
+  if (!enabled) return '—'
+  if (!dateStr) return '待機中'
+  const date = new Date(dateStr)
+  const now = new Date()
+  if (date <= now) return 'まもなく'
+  const diffMs = date.getTime() - now.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 60) return `${diffMin}分後`
+  const diffH = Math.floor(diffMin / 60)
+  if (diffH < 24)  return `${diffH}時間後`
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+// ── Post status table ─────────────────────────────────────────────────────────
+
+function PostStatusTable({ accounts }: { accounts: Account[] }) {
+  const [statuses, setStatuses] = useState<AccountAutopostStatus[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    const data = await api.autopost.accountStatuses()
+    setStatuses(data)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const statusMap = new Map(statuses.map(s => [s.account_id, s]))
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-white font-semibold text-sm">投稿状況</p>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-300 text-xs rounded-lg transition-colors"
+        >
+          {loading
+            ? <span className="w-3 h-3 border border-zinc-400 border-t-transparent rounded-full animate-spin" />
+            : '↻'
+          }
+          更新
+        </button>
+      </div>
+
+      {loading && statuses.length === 0 ? (
+        <div className="flex items-center justify-center py-6">
+          <span className="w-4 h-4 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-zinc-800">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-zinc-800 bg-zinc-900/60">
+                <th className="text-left px-3 py-2 text-zinc-500 font-medium">アカウント</th>
+                <th className="text-left px-3 py-2 text-zinc-500 font-medium">最終投稿</th>
+                <th className="text-left px-3 py-2 text-zinc-500 font-medium">次回投稿</th>
+                <th className="text-center px-3 py-2 text-zinc-500 font-medium">自動投稿</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="text-center px-3 py-6 text-zinc-600">アカウントがありません</td>
+                </tr>
+              ) : (
+                accounts.map((account) => {
+                  const s = statusMap.get(account.id)
+                  return (
+                    <tr key={account.id} className="border-b border-zinc-800/60 last:border-0 hover:bg-zinc-800/30 transition-colors">
+                      <td className="px-3 py-2">
+                        <div className="flex flex-col">
+                          <span className="text-white font-medium truncate max-w-[120px]">
+                            {account.display_name ?? account.username}
+                          </span>
+                          <span className="text-zinc-500">@{account.username}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-zinc-300 whitespace-nowrap">
+                        {formatRelativeTime(s?.last_posted_at ?? null)}
+                      </td>
+                      <td className="px-3 py-2 text-zinc-300 whitespace-nowrap">
+                        {s ? formatNextAt(s.next_at, s.enabled) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {s?.enabled
+                          ? <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold">ON</span>
+                          : <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-700 text-zinc-500 border border-zinc-600 font-semibold">OFF</span>
+                        }
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
 }
 
 const GRADIENTS = [
@@ -157,6 +280,11 @@ export function StatusCheck({ accounts, onCheckOne, onCheckAll }: Props) {
 
   return (
     <div className="space-y-4">
+
+      {/* ── Post status table ────────────────────────────────────────────── */}
+      <PostStatusTable accounts={accounts} />
+
+      <div className="border-t border-zinc-800" />
 
       {/* ── Header + check all ───────────────────────────────────────────── */}
       <div className="flex items-center justify-between">

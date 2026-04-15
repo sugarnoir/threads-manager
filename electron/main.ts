@@ -62,6 +62,21 @@ function createWindow(): void {
   })
 }
 
+// シングルインスタンスロック — 2つ目の起動を防ぐ
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    // 2つ目が起動しようとしたら既存ウィンドウにフォーカス
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+  })
+}
+
 app.whenReady().then(() => {
   registerAuthHandlers()
   registerLicenseAdminHandlers()
