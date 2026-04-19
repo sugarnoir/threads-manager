@@ -672,11 +672,13 @@ function AutoRegisterSectionInner({ onAccountAdded }: { onAccountAdded?: () => v
   useEffect(() => {
     const off = api.on('accounts:auto-register-status', (e: unknown) => {
       const ev = e as { type: string; detail?: string }
-      if (ev.type === 'form_filled')    { setStatus('フォーム入力完了'); setStatusType('info') }
-      if (ev.type === 'form_submitted') { setStatus('フォーム送信完了'); setStatusType('info') }
-      if (ev.type === 'waiting_code')   { setStatus(`メール確認コードをブラウザに入力してください\n${ev.detail ?? ''}`.trim()); setStatusType('waiting') }
-      if (ev.type === 'completed')      { setStatus('アカウント作成完了！'); setStatusType('success'); setRunning(false) }
-      if (ev.type === 'error')          { setStatus(`エラー: ${ev.detail ?? '不明'}`); setStatusType('error'); setRunning(false) }
+      if (ev.type === 'form_filled')      { setStatus('フォーム入力完了'); setStatusType('info') }
+      if (ev.type === 'form_submitted')  { setStatus('フォーム送信完了'); setStatusType('info') }
+      if (ev.type === 'waiting_code')    { setStatus(`メール確認コードをブラウザに入力してください\n${ev.detail ?? ''}`.trim()); setStatusType('waiting') }
+      if (ev.type === 'waiting_cooldown') { setStatus(ev.detail ?? '登録完了。ロック防止のため待機中...'); setStatusType('waiting') }
+      if (ev.type === 'saving')          { setStatus(ev.detail ?? 'DB に保存中...'); setStatusType('info') }
+      if (ev.type === 'completed')       { setStatus('アカウント作成完了！（ステータス: 要ログイン）'); setStatusType('success'); setRunning(false) }
+      if (ev.type === 'error')           { setStatus(`エラー: ${ev.detail ?? '不明'}`); setStatusType('error'); setRunning(false) }
     })
     return off
   }, [])
@@ -935,6 +937,7 @@ function AutoRegisterSectionInner({ onAccountAdded }: { onAccountAdded?: () => v
             ) : 'アカウント作成'}
           </button>
         </div>
+
       </div>
     </div>
   )
@@ -1237,10 +1240,21 @@ export function ProxyPresetsSection() {
   const [showDetail, setShowDetail]       = useState<string | null>(null)  // host key
   const [urlCounts, setUrlCounts]         = useState<Record<string, number>>({})
 
+  // ポート範囲設定
+  const [portRangeStart, setPortRangeStart] = useState('')
+  const [portRangeEnd,   setPortRangeEnd]   = useState('')
+  const [portRangeSaved, setPortRangeSaved] = useState(false)
+
   const load = () => api.proxyPresets.list().then(setPresets)
   const loadPortStats = () => api.accounts.proxyPortStats().then(setPortStats)
   const loadUrlCounts = () => api.accounts.proxyUrlCounts().then(setUrlCounts)
-  useEffect(() => { load(); loadPortStats(); loadUrlCounts() }, [])
+  useEffect(() => {
+    load(); loadPortStats(); loadUrlCounts()
+    api.settings.getAll().then(s => {
+      setPortRangeStart(s['proxy_port_range_start'] ?? '')
+      setPortRangeEnd(s['proxy_port_range_end'] ?? '')
+    })
+  }, [])
 
   const handleAdd = async (v: PresetFormState) => {
     setSaving(true)
@@ -1299,6 +1313,45 @@ export function ProxyPresetsSection() {
             className="ml-auto px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold rounded-lg transition-colors"
           >+ 追加</button>
         )}
+      </div>
+
+      {/* ── ポート範囲設定 ── */}
+      <div className="mb-4 p-3 bg-zinc-800 rounded-xl border border-zinc-700 space-y-2">
+        <p className="text-zinc-400 text-[11px] font-semibold">ポート範囲</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            value={portRangeStart}
+            onChange={e => setPortRangeStart(e.target.value)}
+            placeholder="開始 (例: 10001)"
+            className="flex-1 bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono"
+          />
+          <span className="text-zinc-500 text-xs">〜</span>
+          <input
+            type="number"
+            value={portRangeEnd}
+            onChange={e => setPortRangeEnd(e.target.value)}
+            placeholder="終了 (例: 10050)"
+            className="flex-1 bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono"
+          />
+          <button
+            onClick={async () => {
+              await api.settings.setMany({
+                proxy_port_range_start: portRangeStart.trim(),
+                proxy_port_range_end:   portRangeEnd.trim(),
+              })
+              setPortRangeSaved(true)
+              loadPortStats()
+              setTimeout(() => setPortRangeSaved(false), 2000)
+            }}
+            className="px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >
+            {portRangeSaved ? '✓ 保存' : '保存'}
+          </button>
+        </div>
+        <p className="text-zinc-600 text-[9px] leading-tight">
+          ポート使用状況・自動割り当ての範囲を指定。空欄の場合は既存アカウントから自動算出。
+        </p>
       </div>
 
       {/* ── ポート使用状況 ── */}

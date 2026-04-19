@@ -170,6 +170,16 @@ export function Sidebar({
     () => localStorage.getItem('showAccountNumbers') === 'true'
   )
 
+  // ── 垢数制限チェック ──────────────────────────────────────────────────
+  const [maxAccounts, setMaxAccounts] = useState<number | null>(null)
+  useEffect(() => {
+    api.settings.getAll().then(s => {
+      const v = parseInt(s['license_max_accounts'] ?? '', 10)
+      setMaxAccounts(Number.isFinite(v) && v > 0 ? v : null)
+    })
+  }, [accounts.length])  // アカウント数が変わったら再取得
+  const accountLimitReached = maxAccounts !== null && accounts.length >= maxAccounts
+
   useEffect(() => {
     const handler = () => setShowNumbers(localStorage.getItem('showAccountNumbers') === 'true')
     window.addEventListener('showAccountNumbersChanged', handler)
@@ -236,6 +246,24 @@ export function Sidebar({
   const [csvNewGrpName,  setCsvNewGrpName]  = useState('')
   // handleSidebarCsvFile は onChange コールバックのため ref 経由でグループ選択を受け渡す
   const csvGroupRef = useRef<string>('__all__')
+
+  // CSVインポートのモード（ストック or アカウント）
+  const [csvMode, setCsvMode] = useState<'stock' | 'account' | 'cookie' | 'topic'>('stock')
+  // アカウント一括インポート用: 連番ポート
+  const [acctSequentialPort,    setAcctSequentialPort]    = useState(false)
+  const [acctSequentialStart,   setAcctSequentialStart]   = useState('')
+  const [acctGroupSel,          setAcctGroupSel]          = useState<string>('__none__')
+  const [acctNewGroupName,      setAcctNewGroupName]      = useState('')
+  // Cookieログインインポート用
+  const [cookieText,         setCookieText]         = useState('')
+  const [cookieGroupSel,     setCookieGroupSel]     = useState<string>('__none__')
+  const [cookieNewGroupName, setCookieNewGroupName] = useState('')
+  const [cookieProxyMode,    setCookieProxyMode]    = useState<'auto' | 'manual' | 'none'>('auto')
+  const [cookieProxyStart,   setCookieProxyStart]   = useState('')
+  // トピック XLSX 一括追加用
+  const [topicGroupSel,     setTopicGroupSel]     = useState<string>('__all__')
+  const [topicImporting,    setTopicImporting]    = useState(false)
+  const [topicResult,       setTopicResult]       = useState<Array<{ username: string; added: number }> | null>(null)
 
   const showCsvToast = (msg: string, ok: boolean) => {
     setCsvToast({ msg, ok })
@@ -341,8 +369,215 @@ export function Sidebar({
     }
   }
 
+  // ── アカウント一括インポート (CSV) ───────────────────────────────────────
+  const handleAccountBulkImport = async () => {
+    const fileResult = await api.dialog.openFile()
+    if (!fileResult) return
+
+    // グループ決定
+    let targetGroup: string | null = null
+    if (acctGroupSel === '__new__') {
+      const name = acctNewGroupName.trim()
+      if (!name) { showCsvToast('新規グループ名を入力してください', false); return }
+      const r = await api.groups.create(name)
+      if (r.success) setGroups(prev => [...prev, r.group])
+      targetGroup = name
+    } else if (acctGroupSel !== '__none__') {
+      targetGroup = acctGroupSel
+    }
+
+    setCsvImporting(true)
+    try {
+      let matrix: string[][]
+      const buf = new Uint8Array(fileResult.data)
+
+      if (fileResult.name.endsWith('.xlsx')) {
+        const wb = XLSX.read(buf, { type: 'array' })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        matrix = (XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][])
+          .filter(row => row.some(cell => String(cell).trim() !== ''))
+          .map(row => row.map(cell => String(cell)))
+      } else {
+        const text = new TextDecoder().decode(buf)
+        const result = Papa.parse(text, { delimiter: ',', skipEmptyLines: true })
+        matrix = result.data as string[][]
+      }
+      if (matrix.length === 0) { showCsvToast('空のCSVです', false); return }
+
+      // 1行目がヘッダーの場合は除外
+      const firstRow = matrix[0].map(c => c.trim().toLowerCase())
+      const hasHeader = firstRow.includes('username') || firstRow[0] === 'username'
+      const dataRows = hasHeader ? matrix.slice(1) : matrix
+
+      // 連番ポート
+      const seqStartPort = acctSequentialPort ? parseInt(acctSequentialStart, 10) : NaN
+      if (acctSequentialPort && (!Number.isFinite(seqStartPort) || seqStartPort <= 0)) {
+        showCsvToast('連番の開始ポートが無効です', false)
+        return
+      }
+
+      const payload = dataRows.map((row, i) => {
+        const username = (row[0] ?? '').trim()
+        const password = (row[1] ?? '').trim() || null
+        const proxy_host = (row[2] ?? '').trim() || null
+        let proxy_port: number | null = null
+        if (acctSequentialPort && proxy_host) {
+          proxy_port = seqStartPort + i
+        } else {
+          const p = parseInt((row[3] ?? '').trim(), 10)
+          proxy_port = Number.isFinite(p) && p > 0 ? p : null
+        }
+        const proxy_user = (row[4] ?? '').trim() || null
+        const proxy_pass = (row[5] ?? '').trim() || null
+        return {
+          username,
+          password,
+          proxy_host,
+          proxy_port,
+          proxy_user,
+          proxy_pass,
+          group_name: targetGroup,
+        }
+      }).filter(r => r.username)
+
+      if (payload.length === 0) { showCsvToast('インポート対象の行がありません', false); return }
+
+      const res = await api.accounts.bulkImport(payload)
+      const parts = [`${res.imported}件追加`]
+      if (res.skipped > 0)       parts.push(`スキップ(重複): ${res.skipped}件`)
+      if (res.errors.length > res.skipped) parts.push(`エラー: ${res.errors.length - res.skipped}件`)
+      showCsvToast(parts.join(' / '), res.imported > 0)
+      setCsvPanelOpen(false)
+      if (res.imported > 0) window.dispatchEvent(new CustomEvent('accounts-changed'))
+    } catch (err) {
+      showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setCsvImporting(false)
+    }
+  }
+
+  // ── Cookie ログインインポート ────────────────────────────────────────
+  const handleCookieLoginImport = async () => {
+    const text = cookieText.trim()
+    if (!text) { showCsvToast('テキストを入力してください', false); return }
+
+    // グループ決定
+    let targetGroup: string | null = null
+    if (cookieGroupSel === '__new__') {
+      const name = cookieNewGroupName.trim()
+      if (!name) { showCsvToast('グループ名を入力してください', false); return }
+      const r = await api.groups.create(name)
+      if (r.success) setGroups(prev => [...prev, r.group])
+      targetGroup = name
+    } else if (cookieGroupSel !== '__none__') {
+      targetGroup = cookieGroupSel
+    }
+
+    setCsvImporting(true)
+    try {
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+      // フォーマット: username|password|token|[cookiesJSON]|email
+      const payload = lines.map((line) => {
+        // パイプ区切りだが cookies JSON 内に | が含まれる可能性は低い
+        // [cookies] の部分を安全に抽出: 最初の [ から最後の ] まで
+        const bracketStart = line.indexOf('[')
+        const bracketEnd   = line.lastIndexOf(']')
+
+        let username = '', password = '', token = '', email = ''
+        let cookies: unknown[] = []
+
+        if (bracketStart !== -1 && bracketEnd !== -1 && bracketEnd > bracketStart) {
+          const before = line.slice(0, bracketStart).replace(/\|$/, '')
+          const cookieStr = line.slice(bracketStart, bracketEnd + 1)
+          const after  = line.slice(bracketEnd + 1).replace(/^\|/, '')
+
+          const beforeParts = before.split('|')
+          username = (beforeParts[0] ?? '').trim()
+          password = (beforeParts[1] ?? '').trim()
+          token    = (beforeParts[2] ?? '').trim()
+          email    = after.split('|').filter(Boolean).pop()?.trim() ?? ''
+
+          try { cookies = JSON.parse(cookieStr) } catch { cookies = [] }
+        } else {
+          // [ ] がない場合はシンプルにパイプ分割
+          const parts = line.split('|')
+          username = (parts[0] ?? '').trim()
+          password = (parts[1] ?? '').trim()
+          token    = (parts[2] ?? '').trim()
+          email    = (parts[4] ?? '').trim()
+        }
+
+        return { username, password, token, cookies, email, group_name: targetGroup }
+      }).filter(r => r.username)
+
+      if (payload.length === 0) { showCsvToast('有効な行がありません', false); return }
+
+      console.log(`[CookieImport] payload count=${payload.length}`)
+      payload.forEach((p, i) => console.log(`[CookieImport] [${i}] user=${p.username} pw=${p.password?.slice(0,4)}... cookies=${p.cookies?.length} email=${p.email}`))
+
+      const res = await api.accounts.importCookieLogin(payload, {
+        proxyMode:      cookieProxyMode,
+        proxyStartPort: cookieProxyMode === 'manual' ? parseInt(cookieProxyStart, 10) : undefined,
+      })
+      const parts = [`${res.imported}件追加`]
+      if (res.skipped > 0) parts.push(`スキップ(重複): ${res.skipped}件`)
+      if (res.errors.length > res.skipped) parts.push(`エラー: ${res.errors.length - res.skipped}件`)
+      showCsvToast(parts.join(' / '), res.imported > 0)
+      if (res.imported > 0) {
+        setCookieText('')
+        setCsvPanelOpen(false)
+        // サイドバーのアカウント一覧を更新するためカスタムイベントを発火
+        window.dispatchEvent(new CustomEvent('accounts-changed'))
+      }
+    } catch (err) {
+      showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setCsvImporting(false)
+    }
+  }
+
+  // ── トピック XLSX 一括追加 ──────────────────────────────────────────
+  const handleTopicXlsxImport = async () => {
+    const fileResult = await api.dialog.openFile()
+    if (!fileResult) return
+    if (!fileResult.name.endsWith('.xlsx')) {
+      showCsvToast('xlsx ファイルを選択してください', false)
+      return
+    }
+    setTopicImporting(true)
+    setTopicResult(null)
+    try {
+      const buf = new Uint8Array(fileResult.data)
+      const wb = XLSX.read(buf, { type: 'array' })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const matrix = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][]
+      if (matrix.length === 0) { showCsvToast('空のXLSXです', false); return }
+
+      const numCols = Math.max(...matrix.map(r => r.length))
+      const columns: string[][] = []
+      for (let col = 0; col < numCols; col++) {
+        columns.push(matrix.map(row => String(row[col] ?? '').trim()).filter(Boolean))
+      }
+
+      const targetGroup = topicGroupSel === '__all__' ? null : topicGroupSel
+      const res = await api.stocks.bulkAddTopics({ group_name: targetGroup, columns })
+      if (res.success && res.results) {
+        setTopicResult(res.results)
+        const totalAdded = res.results.reduce((s, r) => s + r.added, 0)
+        showCsvToast(`${totalAdded}件のトピックを追加（${res.results.length}垢）`, totalAdded > 0)
+      } else {
+        showCsvToast('トピック追加に失敗しました', false)
+      }
+    } catch (err) {
+      showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setTopicImporting(false)
+    }
+  }
+
   const [groupEdit, setGroupEdit] = useState<GroupEditState | null>(null)
-  const groupInputRef = useRef<HTMLInputElement>(null)
+  const [newGroupInlineInput, setNewGroupInlineInput] = useState(false)
+  const [newGroupInlineValue, setNewGroupInlineValue] = useState('')
 
   // ── グループ一括メンバー編集 ───────────────────────────────────────────────
   const [groupMemberEdit, setGroupMemberEdit] = useState<{ groupName: string; checkedIds: Set<number> } | null>(null)
@@ -480,9 +715,6 @@ export function Sidebar({
     setGroupDropTarget(null)
   }
 
-  useEffect(() => {
-    if (groupEdit) groupInputRef.current?.focus()
-  }, [groupEdit])
 
   useEffect(() => {
     const unsub = api.on('accounts:action', (data) => {
@@ -732,7 +964,7 @@ export function Sidebar({
                       if (draggingIdRef.current !== null) handleDrop(e)
                       else handleGroupDrop(e)
                     }}
-                    className={`group/header flex items-center gap-1.5 px-2 pt-3 pb-1.5 cursor-default transition-colors rounded-lg ${
+                    className={`group/header flex items-center gap-1.5 px-2 pt-3 pb-1.5 mt-2 cursor-default transition-colors rounded-lg border-t border-zinc-700/80 ${
                       draggingGroupName === groupKey
                         ? 'opacity-40'
                         : isGroupDrop(groupKey)
@@ -765,17 +997,20 @@ export function Sidebar({
                       />
                     ) : (
                       <span
-                        className={`text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer hover:text-zinc-300 ${
-                          isGroupDrop(groupKey) ? 'text-blue-400' : 'text-zinc-600'
+                        className={`text-[11px] font-bold uppercase tracking-wider whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer hover:text-white ${
+                          isGroupDrop(groupKey) ? 'text-blue-300' : 'text-zinc-200'
                         }`}
                         title="クリックしてメンバーを一括設定"
                         onClick={(e) => { e.stopPropagation(); if (!draggingId) openGroupMemberModal(groupKey) }}
                       >
                         <span className="opacity-60">▾</span>
                         {groupKey}
+                        <span className="ml-1 text-[9px] font-normal text-zinc-500 normal-case tracking-normal">
+                          ({grouped[groupKey]?.length ?? 0})
+                        </span>
                       </span>
                     )}
-                    <div className={`h-px flex-1 transition-colors ${isGroupDrop(groupKey) ? 'bg-blue-500/50' : 'bg-zinc-800'}`} />
+                    <div className={`h-px flex-1 transition-colors ${isGroupDrop(groupKey) ? 'bg-blue-500/60' : 'bg-zinc-600/70'}`} />
                     <div className="flex gap-0.5 opacity-0 group-hover/header:opacity-100 transition-opacity">
                       <button
                         onClick={(e) => { e.stopPropagation(); openGroupMemberModal(groupKey) }}
@@ -809,7 +1044,7 @@ export function Sidebar({
               {/* Ungrouped label */}
               {groupKey === '' && allGroupNames.length > 0 && (
                 <div
-                  className={`flex items-center gap-1.5 px-2 pt-2 pb-1.5 rounded-lg transition-colors ${
+                  className={`flex items-center gap-1.5 px-2 pt-2 pb-1.5 mt-2 rounded-lg border-t border-zinc-700/80 transition-colors ${
                     isGroupDrop('')
                       ? 'bg-blue-500/20 ring-1 ring-inset ring-blue-500/40'
                       : draggingIdsSet.size > 0
@@ -819,13 +1054,16 @@ export function Sidebar({
                   onDragOver={(e) => handleGroupHeaderDragOver(e, '')}
                   onDrop={handleDrop}
                 >
-                  <span className={`text-[10px] font-semibold uppercase tracking-wider flex items-center gap-1 transition-colors ${
-                    isGroupDrop('') ? 'text-blue-400' : 'text-zinc-700'
+                  <span className={`text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 transition-colors ${
+                    isGroupDrop('') ? 'text-blue-300' : 'text-zinc-300'
                   }`}>
                     <span className="opacity-60">▾</span>
                     グループなし
+                    <span className="ml-1 text-[9px] font-normal text-zinc-500 normal-case tracking-normal">
+                      ({grouped['']?.length ?? 0})
+                    </span>
                   </span>
-                  <div className={`h-px flex-1 transition-colors ${isGroupDrop('') ? 'bg-blue-500/50' : 'bg-zinc-800/60'}`} />
+                  <div className={`h-px flex-1 transition-colors ${isGroupDrop('') ? 'bg-blue-500/60' : 'bg-zinc-600/70'}`} />
                 </div>
               )}
 
@@ -1031,39 +1269,290 @@ export function Sidebar({
               className="text-zinc-500 hover:text-white text-sm leading-none"
             >✕</button>
           </div>
-          <p className="text-zinc-600 text-[10px] mb-2 leading-tight">
-            1行目がグループ名の場合は自動判定
-          </p>
-          <label className="block text-zinc-500 text-[10px] mb-1">対象グループ</label>
-          <select
-            value={csvGroupSel}
-            onChange={e => { setCsvGroupSel(e.target.value); setCsvNewGrpName('') }}
-            className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
-          >
-            <option value="__all__">全アカウント（インデックス順）</option>
-            <option value="__none__">グループなし（未分類）</option>
-            {groups.map(g => (
-              <option key={g.name} value={g.name}>{g.name}（{accounts.filter(a => a.group_name === g.name).length}件）</option>
-            ))}
-            <option value="__new__">＋ 新規グループを作成</option>
-          </select>
-          {csvGroupSel === '__new__' && (
-            <input
-              autoFocus
-              value={csvNewGrpName}
-              onChange={e => setCsvNewGrpName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleCsvModalConfirm() }}
-              placeholder="グループ名を入力..."
-              className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
-            />
+
+          {/* モード切替タブ */}
+          <div className="flex gap-1 mb-3 bg-zinc-800/60 p-0.5 rounded-lg">
+            <button
+              onClick={() => setCsvMode('stock')}
+              className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                csvMode === 'stock' ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              ストック
+            </button>
+            <button
+              onClick={() => setCsvMode('account')}
+              className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                csvMode === 'account' ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              アカウント
+            </button>
+            <button
+              onClick={() => setCsvMode('cookie')}
+              className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                csvMode === 'cookie' ? 'bg-emerald-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              Cookie
+            </button>
+            <button
+              onClick={() => setCsvMode('topic')}
+              className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                csvMode === 'topic' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              トピック
+            </button>
+          </div>
+
+          {csvMode === 'stock' && (
+            <>
+              <p className="text-zinc-600 text-[10px] mb-2 leading-tight">
+                1行目がグループ名の場合は自動判定
+              </p>
+              <label className="block text-zinc-500 text-[10px] mb-1">対象グループ</label>
+              <select
+                value={csvGroupSel}
+                onChange={e => { setCsvGroupSel(e.target.value); setCsvNewGrpName('') }}
+                className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+              >
+                <option value="__all__">全アカウント（インデックス順）</option>
+                <option value="__none__">グループなし（未分類）</option>
+                {groups.map(g => (
+                  <option key={g.name} value={g.name}>{g.name}（{accounts.filter(a => a.group_name === g.name).length}件）</option>
+                ))}
+                <option value="__new__">＋ 新規グループを作成</option>
+              </select>
+              {csvGroupSel === '__new__' && (
+                <input
+                  autoFocus
+                  value={csvNewGrpName}
+                  onChange={e => setCsvNewGrpName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCsvModalConfirm() }}
+                  placeholder="グループ名を入力..."
+                  className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
+                />
+              )}
+              <button
+                onClick={handleCsvModalConfirm}
+                disabled={csvImporting || (csvGroupSel === '__new__' && !csvNewGrpName.trim())}
+                className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {csvImporting ? '読込中...' : 'ファイルを選択'}
+              </button>
+            </>
           )}
-          <button
-            onClick={handleCsvModalConfirm}
-            disabled={csvImporting || (csvGroupSel === '__new__' && !csvNewGrpName.trim())}
-            className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
-          >
-            {csvImporting ? '読込中...' : 'ファイルを選択'}
-          </button>
+
+          {csvMode === 'account' && (
+            <>
+              <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
+                <p className="text-zinc-300 text-[10px] font-semibold mb-1">CSVフォーマット</p>
+                <code className="block text-[9px] leading-tight text-emerald-300 font-mono whitespace-pre">
+                  username,password,{'\n'}proxy_host,proxy_port,{'\n'}proxy_user,proxy_pass
+                </code>
+                <p className="text-zinc-500 text-[9px] leading-tight mt-1.5">
+                  1行目がヘッダー行の場合は自動判定。<br/>
+                  パスワード・プロキシは省略可。
+                </p>
+              </div>
+
+              <label className="block text-zinc-500 text-[10px] mb-1">追加先グループ</label>
+              <select
+                value={acctGroupSel}
+                onChange={e => { setAcctGroupSel(e.target.value); setAcctNewGroupName('') }}
+                className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+              >
+                <option value="__none__">グループなし（未分類）</option>
+                {groups.map(g => (
+                  <option key={g.name} value={g.name}>{g.name}</option>
+                ))}
+                <option value="__new__">＋ 新規グループを作成</option>
+              </select>
+              {acctGroupSel === '__new__' && (
+                <input
+                  autoFocus
+                  value={acctNewGroupName}
+                  onChange={e => setAcctNewGroupName(e.target.value)}
+                  placeholder="グループ名..."
+                  className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
+                />
+              )}
+
+              {/* 連番ポートオプション */}
+              <label className="flex items-center gap-1.5 mb-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={acctSequentialPort}
+                  onChange={e => setAcctSequentialPort(e.target.checked)}
+                  className="accent-blue-500"
+                />
+                <span className="text-zinc-300 text-[10px]">ポートを連番生成（CSVのport列を無視）</span>
+              </label>
+              {acctSequentialPort && (
+                <input
+                  type="number"
+                  value={acctSequentialStart}
+                  onChange={e => setAcctSequentialStart(e.target.value)}
+                  placeholder="開始ポート (例: 10001)"
+                  className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
+                />
+              )}
+
+              <button
+                onClick={handleAccountBulkImport}
+                disabled={
+                  csvImporting ||
+                  (acctGroupSel === '__new__' && !acctNewGroupName.trim()) ||
+                  (acctSequentialPort && !acctSequentialStart.trim())
+                }
+                className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {csvImporting ? '読込中...' : 'ファイルを選択'}
+              </button>
+              <p className="text-zinc-600 text-[9px] mt-1.5 leading-tight">
+                ※ インポートしたアカウントはログイン未完了状態になります。<br/>
+                サイドバーから個別にログインしてください。
+              </p>
+            </>
+          )}
+
+          {csvMode === 'cookie' && (
+            <>
+              <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
+                <p className="text-zinc-300 text-[10px] font-semibold mb-1">フォーマット（1行1垢）</p>
+                <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono whitespace-pre-wrap break-all">
+                  username|password|token|[cookies]|email
+                </code>
+                <p className="text-zinc-500 text-[9px] leading-tight mt-1">
+                  cookies は JSON 配列。sessionid を含む場合は active に設定。
+                </p>
+              </div>
+
+              <textarea
+                value={cookieText}
+                onChange={(e) => setCookieText(e.target.value)}
+                rows={5}
+                placeholder={'user1|pass1|token1|[{"name":"sessionid","value":"...","domain":".instagram.com"}]|email@example.com'}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-[10px] text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 mb-2 resize-none font-mono leading-tight"
+              />
+
+              {/* プロキシ割り当て */}
+              <label className="block text-zinc-500 text-[10px] mb-1">プロキシ割り当て</label>
+              <div className="flex gap-1 mb-2 bg-zinc-800/60 p-0.5 rounded-lg">
+                {([
+                  { id: 'auto'   as const, label: '自動（少順）' },
+                  { id: 'manual' as const, label: '連番' },
+                  { id: 'none'   as const, label: 'なし' },
+                ] as const).map(opt => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setCookieProxyMode(opt.id)}
+                    className={`flex-1 py-1 text-[10px] font-semibold rounded-md transition-colors ${
+                      cookieProxyMode === opt.id
+                        ? 'bg-blue-600 text-white'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {cookieProxyMode === 'manual' && (
+                <input
+                  type="number"
+                  value={cookieProxyStart}
+                  onChange={e => setCookieProxyStart(e.target.value)}
+                  placeholder="開始ポート (例: 10028)"
+                  className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600 font-mono"
+                />
+              )}
+              {cookieProxyMode === 'auto' && (
+                <p className="text-zinc-600 text-[9px] mb-2 leading-tight">
+                  既存垢の decodo プロキシから使用数が少ないポート順に割り当て
+                </p>
+              )}
+
+              <label className="block text-zinc-500 text-[10px] mb-1">追加先グループ</label>
+              <select
+                value={cookieGroupSel}
+                onChange={e => { setCookieGroupSel(e.target.value); setCookieNewGroupName('') }}
+                className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+              >
+                <option value="__none__">グループなし</option>
+                {groups.map(g => (
+                  <option key={g.name} value={g.name}>{g.name}</option>
+                ))}
+                <option value="__new__">＋ 新規グループ</option>
+              </select>
+              {cookieGroupSel === '__new__' && (
+                <input
+                  autoFocus
+                  value={cookieNewGroupName}
+                  onChange={e => setCookieNewGroupName(e.target.value)}
+                  placeholder="グループ名..."
+                  className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
+                />
+              )}
+
+              <button
+                onClick={handleCookieLoginImport}
+                disabled={
+                  csvImporting || !cookieText.trim() ||
+                  (cookieGroupSel === '__new__' && !cookieNewGroupName.trim()) ||
+                  (cookieProxyMode === 'manual' && !cookieProxyStart.trim())
+                }
+                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {csvImporting ? '読込中...' : 'Cookieインポート実行'}
+              </button>
+            </>
+          )}
+
+          {csvMode === 'topic' && (
+            <>
+              <p className="text-zinc-500 text-[10px] mb-2 leading-tight">
+                XLSX の A列→グループ内1垢目、B列→2垢目... の順で
+                トピック未設定のストックにのみ追加。
+              </p>
+
+              <label className="block text-zinc-500 text-[10px] mb-1">対象グループ</label>
+              <select
+                value={topicGroupSel}
+                onChange={e => setTopicGroupSel(e.target.value)}
+                className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+              >
+                <option value="__all__">全アカウント（sort順）</option>
+                {groups.map(g => (
+                  <option key={g.name} value={g.name}>
+                    {g.name}（{accounts.filter(a => a.group_name === g.name).length}垢）
+                  </option>
+                ))}
+              </select>
+
+              <button
+                onClick={handleTopicXlsxImport}
+                disabled={topicImporting}
+                className="w-full py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {topicImporting ? '処理中...' : 'XLSXを選択して追加'}
+              </button>
+
+              {topicResult && (
+                <div className="mt-2 text-[10px] text-zinc-400 bg-zinc-950/60 rounded-lg px-2 py-1.5 max-h-28 overflow-y-auto space-y-0.5">
+                  {topicResult.map((r, i) => (
+                    <div key={i}>
+                      <span className="text-zinc-600 font-mono">{String.fromCharCode(65 + i)}列</span>
+                      {' '}@{r.username}:{' '}
+                      <span className={r.added > 0 ? 'text-emerald-400' : 'text-zinc-600'}>
+                        {r.added}件追加
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -1122,14 +1611,23 @@ export function Sidebar({
       <div className="px-3 pt-3 pb-2 shrink-0 flex gap-2">
         <button
           onClick={onAddAccount}
-          disabled={adding}
-          style={{ background: adding ? undefined : 'linear-gradient(135deg, #7c3aed, #4f46e5)' }}
+          disabled={adding || accountLimitReached}
+          title={accountLimitReached ? `アカウント数が上限（${maxAccounts}件）に達しました` : undefined}
+          style={{ background: (adding || accountLimitReached) ? undefined : 'linear-gradient(135deg, #7c3aed, #4f46e5)' }}
           className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl disabled:opacity-50 disabled:bg-zinc-700 text-white text-[13px] font-semibold transition-all hover:brightness-110 active:brightness-90"
         >
           {adding ? (
             <>
               <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               待機中...
+            </>
+          ) : accountLimitReached ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+              上限 {maxAccounts}垢
             </>
           ) : (
             <>
@@ -1238,46 +1736,125 @@ export function Sidebar({
         </div>
       )}
 
-      {/* ── Group edit modal ── */}
-      {groupEdit && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={() => setGroupEdit(null)}
-        >
+      {/* ── Group edit modal (clickable group list) ── */}
+      {groupEdit && (() => {
+        const targetAccount = accounts.find(a => a.id === groupEdit.accountId)
+        const currentGroup = targetAccount?.group_name ?? null
+        return (
           <div
-            className="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 w-72 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+            onClick={() => { setGroupEdit(null); setNewGroupInlineInput(false); setNewGroupInlineValue('') }}
           >
-            <h3 className="text-white font-bold text-sm mb-1">グループ名を設定</h3>
-            <p className="text-zinc-500 text-xs mb-3">空白にすると「未分類」になります</p>
-            <input
-              ref={groupInputRef}
-              value={groupEdit.value}
-              onChange={(e) => setGroupEdit({ ...groupEdit, value: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') { onUpdateGroup(groupEdit.accountId, groupEdit.value || null); setGroupEdit(null) }
-                if (e.key === 'Escape') setGroupEdit(null)
-              }}
-              placeholder="例: メイン, サブ, 仕事..."
-              className="w-full px-3 py-2 bg-zinc-800 text-white rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 text-sm placeholder-zinc-600"
-            />
-            <div className="flex gap-2 mt-3">
-              <button
-                onClick={() => { onUpdateGroup(groupEdit.accountId, groupEdit.value || null); setGroupEdit(null) }}
-                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors"
-              >
-                保存
-              </button>
-              <button
-                onClick={() => setGroupEdit(null)}
-                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-sm rounded-lg transition-colors"
-              >
-                キャンセル
-              </button>
+            <div
+              className="bg-zinc-900 border border-zinc-700 rounded-2xl w-80 shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-5 pt-4 pb-3 border-b border-zinc-800">
+                <h3 className="text-white font-bold text-sm">グループを変更</h3>
+                <p className="text-zinc-500 text-xs mt-0.5">
+                  @{targetAccount?.username} の所属グループを選択
+                </p>
+              </div>
+
+              <div className="max-h-80 overflow-y-auto py-1.5">
+                {/* 未分類 */}
+                <button
+                  onClick={() => { onUpdateGroup(groupEdit.accountId, null); setGroupEdit(null) }}
+                  className={`w-full flex items-center justify-between px-5 py-2 text-sm transition-colors ${
+                    currentGroup === null
+                      ? 'bg-blue-600/20 text-blue-300'
+                      : 'text-zinc-200 hover:bg-zinc-800'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="text-zinc-500">📂</span>
+                    グループなし
+                  </span>
+                  {currentGroup === null && <span className="text-blue-400 text-xs">✓</span>}
+                </button>
+
+                {/* 既存グループ一覧 */}
+                {groups.map((g) => {
+                  const count = accounts.filter(a => a.group_name === g.name).length
+                  const isCurrent = currentGroup === g.name
+                  return (
+                    <button
+                      key={g.id}
+                      onClick={() => { onUpdateGroup(groupEdit.accountId, g.name); setGroupEdit(null) }}
+                      className={`w-full flex items-center justify-between px-5 py-2 text-sm transition-colors ${
+                        isCurrent
+                          ? 'bg-blue-600/20 text-blue-300'
+                          : 'text-zinc-200 hover:bg-zinc-800'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="text-zinc-500">📁</span>
+                        <span className="font-medium">{g.name}</span>
+                        <span className="text-[10px] text-zinc-500">({count})</span>
+                      </span>
+                      {isCurrent && <span className="text-blue-400 text-xs">✓</span>}
+                    </button>
+                  )
+                })}
+
+                {/* 新規グループ */}
+                {!newGroupInlineInput ? (
+                  <button
+                    onClick={() => setNewGroupInlineInput(true)}
+                    className="w-full flex items-center gap-2 px-5 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors border-t border-zinc-800 mt-1.5"
+                  >
+                    <span className="text-zinc-500">＋</span>
+                    新規グループを作成
+                  </button>
+                ) : (
+                  <div className="px-5 py-2 border-t border-zinc-800 mt-1.5 flex gap-1.5">
+                    <input
+                      autoFocus
+                      value={newGroupInlineValue}
+                      onChange={(e) => setNewGroupInlineValue(e.target.value)}
+                      onKeyDown={async (e) => {
+                        if (e.key === 'Enter') {
+                          const name = newGroupInlineValue.trim()
+                          if (!name) return
+                          const r = await api.groups.create(name)
+                          if (r.success) setGroups(prev => [...prev, r.group])
+                          onUpdateGroup(groupEdit.accountId, name)
+                          setGroupEdit(null); setNewGroupInlineInput(false); setNewGroupInlineValue('')
+                        }
+                        if (e.key === 'Escape') { setNewGroupInlineInput(false); setNewGroupInlineValue('') }
+                      }}
+                      placeholder="グループ名..."
+                      className="flex-1 px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 placeholder-zinc-600"
+                    />
+                    <button
+                      onClick={async () => {
+                        const name = newGroupInlineValue.trim()
+                        if (!name) return
+                        const r = await api.groups.create(name)
+                        if (r.success) setGroups(prev => [...prev, r.group])
+                        onUpdateGroup(groupEdit.accountId, name)
+                        setGroupEdit(null); setNewGroupInlineInput(false); setNewGroupInlineValue('')
+                      }}
+                      className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg transition-colors"
+                    >
+                      作成
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="px-5 py-3 border-t border-zinc-800 flex justify-end">
+                <button
+                  onClick={() => { setGroupEdit(null); setNewGroupInlineInput(false); setNewGroupInlineValue('') }}
+                  className="px-3 py-1.5 text-zinc-400 hover:text-white text-xs transition-colors"
+                >
+                  閉じる
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
     </>
   )
 }

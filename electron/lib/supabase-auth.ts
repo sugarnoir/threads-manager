@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import Store from 'electron-store'
 import os from 'os'
+import { setSetting } from '../db/repositories/settings'
 
 const SUPABASE_URL = 'https://pywvrkghavvwdqvefqbh.supabase.co'
 const SUPABASE_KEY  = 'sb_publishable_EPQxxmN_PJzcpbjk43DB4Q_oSzXF1T4'
@@ -65,13 +66,16 @@ export type InvalidReason = 'not_found' | 'inactive' | 'expired' | 'network_erro
 export interface LicenseCheckResult {
   valid: boolean
   reason?: InvalidReason
+  maxAccounts?: number | null  // null = 無制限
 }
 
 interface LicenseRow {
-  key:         string
-  is_active:   boolean
-  expires_at:  string | null
-  mac_address: string | null
+  key:           string
+  is_active:     boolean
+  expires_at:    string | null
+  mac_address:   string | null
+  device_free:   boolean | null
+  max_accounts:  number | null
 }
 
 export async function checkMasterKeyOnline(key: string): Promise<LicenseCheckResult> {
@@ -99,11 +103,30 @@ export async function checkLicenseOnline(key: string): Promise<LicenseCheckResul
 
   try {
     console.log('[License] checking key:', key, 'mac:', currentMac)
-    const { data, error } = await supabase
-      .from('licenses')
-      .select('key, is_active, expires_at, mac_address')
-      .eq('key', key)
-      .maybeSingle()
+    // device_free カラムが存在しない場合に備えて、取得失敗時は device_free なしで再取得
+    let data: Record<string, unknown> | null = null
+    let error: { message: string } | null = null
+    {
+      const res = await supabase
+        .from('licenses')
+        .select('key, is_active, expires_at, mac_address, device_free, max_accounts')
+        .eq('key', key)
+        .maybeSingle()
+      if (res.error?.message?.includes('device_free') || res.error?.message?.includes('max_accounts')) {
+        // カラム未追加 → 最低限のカラムで再取得
+        console.warn('[License] column not found, falling back')
+        const res2 = await supabase
+          .from('licenses')
+          .select('key, is_active, expires_at, mac_address')
+          .eq('key', key)
+          .maybeSingle()
+        data = res2.data as Record<string, unknown> | null
+        error = res2.error
+      } else {
+        data = res.data as Record<string, unknown> | null
+        error = res.error
+      }
+    }
 
     console.log('[License] data:', JSON.stringify(data))
     console.log('[License] error:', JSON.stringify(error))
@@ -111,14 +134,25 @@ export async function checkLicenseOnline(key: string): Promise<LicenseCheckResul
     if (error) return { valid: false, reason: 'network_error' }
     if (!data)  return { valid: false, reason: 'not_found' }
 
-    const row = data as LicenseRow
+    const d = data as Record<string, unknown>
+    const row: LicenseRow = {
+      key:           String(d.key ?? ''),
+      is_active:     Boolean(d.is_active),
+      expires_at:    (d.expires_at as string | null) ?? null,
+      mac_address:   (d.mac_address as string | null) ?? null,
+      device_free:   Boolean(d.device_free),
+      max_accounts:  typeof d.max_accounts === 'number' ? d.max_accounts : null,
+    }
     if (!row.is_active) return { valid: false, reason: 'inactive' }
     if (row.expires_at && new Date(row.expires_at) <= new Date()) {
       return { valid: false, reason: 'expired' }
     }
 
     // ── MACアドレス紐付けチェック ───────────────────────────────────────────────
-    if (!row.mac_address) {
+    // device_free=true の場合は MAC チェックを完全スキップ
+    if (row.device_free) {
+      console.log('[License] device_free=true → skip MAC check')
+    } else if (!row.mac_address) {
       // 初回認証: 現在のMACアドレスをSupabaseに紐付ける
       console.log('[License] first activation → binding mac:', currentMac)
       const { error: updateError } = await supabase
@@ -129,7 +163,6 @@ export async function checkLicenseOnline(key: string): Promise<LicenseCheckResul
 
       if (updateError) {
         console.warn('[License] mac binding update error:', updateError.message)
-        // 更新エラーでも通過させ（楽観的）、次回のチェックで弾く
       }
     } else if (row.mac_address !== currentMac) {
       // 別のMacからのアクセス → 拒否
@@ -137,9 +170,25 @@ export async function checkLicenseOnline(key: string): Promise<LicenseCheckResul
       return { valid: false, reason: 'mac_mismatch' }
     }
 
-    // 認証成功 → MACアドレスをローカルにもキャッシュ
+    // 認証成功 → MACアドレスをローカルにもキャッシュ + maxAccounts をローカル保存
     setStoredMac(currentMac)
-    return { valid: true }
+    console.log(`[License] max_accounts from Supabase: ${JSON.stringify(row.max_accounts)} (type=${typeof row.max_accounts})`)
+    if (row.max_accounts !== null && row.max_accounts !== undefined) {
+      console.log(`[License] saving license_max_accounts=${row.max_accounts}`)
+      try {
+        setSetting('license_max_accounts', String(row.max_accounts))
+      } catch (e) {
+        console.error(`[License] setSetting failed:`, e)
+      }
+    } else {
+      console.log('[License] max_accounts is null/undefined → saving empty (unlimited)')
+      try {
+        setSetting('license_max_accounts', '')
+      } catch (e) {
+        console.error(`[License] setSetting failed:`, e)
+      }
+    }
+    return { valid: true, maxAccounts: row.max_accounts }
   } catch (e) {
     console.log('[License] exception:', e)
     return { valid: false, reason: 'network_error' }

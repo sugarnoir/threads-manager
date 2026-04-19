@@ -12,6 +12,15 @@
 import { net, session, Session } from 'electron'
 import { getSetting, setSetting }       from '../db/repositories/settings'
 import { getAccountById }               from '../db/repositories/accounts'
+
+// ── デバッグ用ファイルロガー ─────────────────────────────────────────────
+const TM_DEBUG_LOG = '/tmp/tm-debug.log'
+function dbgLog(line: string) {
+  try {
+    const ts = new Date().toISOString()
+    fs.appendFileSync(TM_DEBUG_LOG, `[${ts}] ${line}\n`)
+  } catch { /* ignore */ }
+}
 import { extractPageApiTokens, fetchViaView, autoPostViaUI, restPostTextViaView, restPostMediaViaView, configureSidecarViaView, ensureViewLoaded } from '../browser-views/view-manager'
 import { IPHONE_UA_LIST }               from '../utils/iphone-ua'
 import fs from 'fs'
@@ -798,9 +807,16 @@ async function getIgCookieHeaders(accountId: number): Promise<{ cookieHeader: st
   }
 }
 
-/** net.request ラッパー（バイナリ / 文字列どちらも対応）。アカウントのプロキシを適用する */
+/** net.request ラッパー（バイナリ / 文字列どちらも対応）。アカウントのプロキシを適用する。
+ * ※ session.setUserAgent() は Sec-CH-UA / Sec-CH-UA-Platform 等の Client Hints も
+ *   連動して変更してしまい、Instagram 側で「Client Hints の Platform と User-Agent の
+ *   ブラウザ種別が一致しない」と判定されて useragent mismatch になるため、
+ *   セッション側の UA は変更せず、HTTP ヘッダー (req.setHeader) のみで User-Agent を送る。
+ *   さらに Client Hints が iPhone Safari と矛盾しないよう、明示的に空または Safari らしい
+ *   ヒントを送って Chrome 系の Sec-CH-UA が漏れないようにする。
+ */
 async function mobileNetRequest(
-  method:    'POST',
+  method:    'POST' | 'GET',
   url:       string,
   headers:   Record<string, string>,
   body:      Buffer | string,
@@ -808,8 +824,14 @@ async function mobileNetRequest(
 ): Promise<{ ok: boolean; status: number; raw: string }> {
   const sess = getAccountSession(accountId)
   await ensureAccountProxy(accountId, sess)
+
   return new Promise((resolve) => {
-    const req = net.request({ method, url, session: sess })
+    const req = net.request({
+      method,
+      url,
+      session: sess,
+      // useSessionCookies: true  ← 既定でセッションCookieが使われる
+    })
     for (const [k, v] of Object.entries(headers)) req.setHeader(k, v)
     let raw = ''
     req.on('response', (resp) => {
@@ -817,10 +839,141 @@ async function mobileNetRequest(
       resp.on('end', () => resolve({ ok: resp.statusCode >= 200 && resp.statusCode < 300, status: resp.statusCode, raw }))
     })
     req.on('error', e => resolve({ ok: false, status: 0, raw: e instanceof Error ? e.message : String(e) }))
-    if (Buffer.isBuffer(body)) req.write(body)
-    else if (body) req.write(body)
+    if (method === 'POST') {
+      if (Buffer.isBuffer(body)) req.write(body)
+      else if (body) req.write(body)
+    }
     req.end()
   })
+}
+
+// ── Display Name Change (i.instagram.com/api/v1/accounts/edit_profile/) ─────
+
+/** ランダムな日本人女性名 */
+const JP_FEMALE_NAMES = [
+  'ゆき', 'はな', 'さくら', 'あおい', 'ひより',
+  'なな', 'りん', 'みお', 'ことは', 'ゆな',
+  'かな', 'れな', 'もも', 'あかり', 'いちか',
+] as const
+
+/**
+ * Instagram Web API で display_name (first_name) を変更する。
+ *
+ * 手法: ブラウザビューの WebContentsView 内で executeJavaScript を実行し、
+ * ページ内の fetch() を使ってリクエストを送る。
+ * これにより Cookie / UA / Origin / Sec-CH-UA が全てブラウザビューと同一になり、
+ * Cookie インポートされたセッションでも "useragent mismatch" が発生しない。
+ *
+ * 前提: 対象アカウントのブラウザビューが開いている必要がある。
+ */
+export async function changeDisplayNameMobile(
+  accountId: number,
+  newName:   string,
+): Promise<{ success: boolean; status?: number; newName?: string; error?: string }> {
+  dbgLog(`==================== changeDisplayName START ====================`)
+  dbgLog(`account=${accountId} newName=${newName}`)
+
+  // ブラウザビューの WebContents を取得
+  const { getViewWebContents } = await import('../browser-views/view-manager')
+  const wc = getViewWebContents(accountId)
+  if (!wc || wc.isDestroyed()) {
+    dbgLog(`==================== changeDisplayName END (no view) ====================`)
+    return { success: false, error: 'ブラウザビューが開いていません。先に対象アカウントをサイドバーで選択してブラウザを表示してください。' }
+  }
+
+  dbgLog(`view found, url=${wc.getURL()}`)
+
+  // instagram.com にいない場合は遷移
+  const currentUrl = wc.getURL()
+  if (!currentUrl.includes('instagram.com') && !currentUrl.includes('threads.com') && !currentUrl.includes('threads.net')) {
+    dbgLog(`navigating to instagram.com...`)
+    await wc.loadURL('https://www.instagram.com/').catch(() => {})
+    await new Promise(r => setTimeout(r, 3000))
+  }
+
+  // ページ内 JS で fetch を実行（Cookie / UA / Origin が自動で一致）
+  try {
+    const result = await wc.executeJavaScript(`
+      (async () => {
+        try {
+          // csrftoken を cookie から取得
+          const csrf = document.cookie.split(';').map(c => c.trim())
+            .find(c => c.startsWith('csrftoken='))?.split('=')[1] || '';
+
+          const headers = {
+            'X-CSRFToken':      csrf,
+            'X-IG-App-ID':      '936619743392459',
+            'X-Requested-With': 'XMLHttpRequest',
+          };
+
+          // 1) current_user 取得
+          const r1 = await fetch('/api/v1/accounts/current_user/?edit=true', { headers });
+          if (!r1.ok) {
+            const t = await r1.text();
+            return { ok: false, step: 'current_user', status: r1.status, error: t.slice(0, 300) };
+          }
+          const d1 = await r1.json();
+          const u = d1.user;
+          if (!u || !u.username) {
+            return { ok: false, step: 'current_user', status: r1.status, error: 'no user in response' };
+          }
+
+          // 2) edit
+          const body = new URLSearchParams({
+            first_name:   ${JSON.stringify(newName)},
+            username:     u.username,
+            email:        u.email || '',
+            phone_number: u.phone_number || '',
+            gender:       String(u.gender ?? 0),
+            biography:    u.biography || '',
+            external_url: u.external_url || '',
+          });
+
+          const r2 = await fetch('/api/v1/web/accounts/edit/', {
+            method:  'POST',
+            headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body:    body.toString(),
+          });
+          const t2 = await r2.text();
+          if (!r2.ok) {
+            return { ok: false, step: 'edit', status: r2.status, error: t2.slice(0, 300) };
+          }
+
+          let appliedName = ${JSON.stringify(newName)};
+          try {
+            const j = JSON.parse(t2);
+            if (j.user && j.user.full_name) appliedName = j.user.full_name;
+          } catch {}
+
+          return { ok: true, status: r2.status, appliedName };
+        } catch (e) {
+          return { ok: false, step: 'exception', error: String(e) };
+        }
+      })()
+    `) as { ok: boolean; step?: string; status?: number; appliedName?: string; error?: string }
+
+    dbgLog(`result=${JSON.stringify(result)}`)
+    console.log(`[changeDisplayName] result=${JSON.stringify(result)}`)
+    dbgLog(`==================== changeDisplayName END ====================`)
+
+    if (!result.ok) {
+      return { success: false, status: result.status, error: `${result.step}: ${result.error}` }
+    }
+    return { success: true, status: result.status, newName: result.appliedName }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    dbgLog(`executeJavaScript EXCEPTION: ${msg}`)
+    dbgLog(`==================== changeDisplayName END ====================`)
+    return { success: false, error: `JS実行エラー: ${msg}` }
+  }
+}
+
+/** ランダムな日本人女性名で display_name を変更 */
+export async function autoRenameJapaneseFemale(
+  accountId: number,
+): Promise<{ success: boolean; status?: number; newName?: string; error?: string }> {
+  const newName = JP_FEMALE_NAMES[Math.floor(Math.random() * JP_FEMALE_NAMES.length)]
+  return changeDisplayNameMobile(accountId, newName)
 }
 
 async function mobilePostText(

@@ -16,6 +16,13 @@ export function useAccounts() {
     refresh()
   }, [refresh])
 
+  // Sidebar の CSV/Cookie インポートからのアカウント一覧更新イベント
+  useEffect(() => {
+    const handler = () => { refresh() }
+    window.addEventListener('accounts-changed', handler)
+    return () => window.removeEventListener('accounts-changed', handler)
+  }, [refresh])
+
   useEffect(() => {
     const unsubChallenge = api.on('accounts:challenge-detected', (data) => {
       const { account_id } = data as { account_id: number }

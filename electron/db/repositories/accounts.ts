@@ -17,6 +17,7 @@ export interface Account {
   sort_order: number
   speed_preset: 'slow' | 'normal' | 'fast'
   user_agent: string | null
+  ig_password: string | null
   created_at: string
   updated_at: string
 }
@@ -29,6 +30,11 @@ export function getAccountById(id: number): Account | undefined {
   return getDb().prepare('SELECT * FROM accounts WHERE id = ?').get(id) as Account | undefined
 }
 
+export function getAccountCount(): number {
+  const { c } = getDb().prepare('SELECT COUNT(*) as c FROM accounts').get() as { c: number }
+  return c
+}
+
 export function createAccount(data: {
   username: string
   display_name?: string
@@ -37,14 +43,39 @@ export function createAccount(data: {
   proxy_username?: string
   proxy_password?: string
   user_agent?: string
+  ig_password?: string
 }): Account {
   const db = getDb()
+
+  // ライセンスの max_accounts 制限チェック（認証時に app_settings に保存済み）
+  try {
+    const row = db.prepare("SELECT value FROM app_settings WHERE key = 'license_max_accounts'").get() as { value: string } | undefined
+    const maxStr = row?.value?.trim()
+    const { c } = db.prepare('SELECT COUNT(*) as c FROM accounts').get() as { c: number }
+    console.log(`[createAccount] license_max_accounts="${maxStr ?? '(not set)'}" current=${c}`)
+    if (maxStr) {
+      const max = parseInt(maxStr, 10)
+      if (Number.isFinite(max) && max > 0) {
+        console.log(`[createAccount] limit=${max} current=${c} → ${c >= max ? 'BLOCKED' : 'OK'}`)
+        if (c >= max) {
+          throw new Error(
+            `アカウント数が上限（${max}件）に達しました。\n` +
+            `本ツールはサーバーへの負荷を考慮し、1ライセンスにつき最大${max}アカウントまでの利用に制限しております。` +
+            `100アカウントを超えてのご利用は現在対応しておりません。ご了承ください。`
+          )
+        }
+      }
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.includes('上限')) throw e
+  }
+
   const maxRow = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM accounts').get() as { m: number }
   const nextOrder = maxRow.m + 1000
   const result = db
     .prepare(
-      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order, user_agent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order, user_agent, ig_password)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       data.username,
@@ -55,6 +86,7 @@ export function createAccount(data: {
       data.proxy_password ?? null,
       nextOrder,
       data.user_agent ?? null,
+      data.ig_password ?? null,
     )
   return getAccountById(result.lastInsertRowid as number)!
 }
@@ -82,6 +114,12 @@ export function updateAccountProxy(
        updated_at = datetime('now') WHERE id = ?`
     )
     .run(proxy.proxy_url, proxy.proxy_username, proxy.proxy_password, id)
+}
+
+export function updateAccountUsername(id: number, username: string): void {
+  getDb()
+    .prepare("UPDATE accounts SET username = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(username, id)
 }
 
 export function updateAccountDisplayName(id: number, display_name: string | null): void {

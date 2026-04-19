@@ -262,6 +262,9 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('mark')) {
     db.exec("ALTER TABLE accounts ADD COLUMN mark TEXT")
   }
+  if (!colNames.includes('ig_password')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN ig_password TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]

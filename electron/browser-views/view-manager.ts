@@ -1,6 +1,7 @@
 import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage, powerMonitor } from 'electron'
 import { toRomaji } from 'wanakana'
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
+import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { getContextCookiesIfOpen, closeContext } from '../playwright/browser-manager'
 import fs from 'fs'
 import { getSetting, setSetting } from '../db/repositories/settings'
@@ -43,7 +44,7 @@ const SIDEBAR_WIDTH = 240
 
 // ── Cookie helpers ─────────────────────────────────────────────────────────────
 
-interface RawCookie {
+export interface RawCookie {
   name: string
   value: string
   domain?: string | null
@@ -61,7 +62,7 @@ function toElectronSameSite(v?: string | null): 'no_restriction' | 'lax' | 'stri
   return 'no_restriction'
 }
 
-async function injectCookies(cookies: RawCookie[], sess: Electron.Session): Promise<boolean> {
+export async function injectCookies(cookies: RawCookie[], sess: Electron.Session): Promise<boolean> {
   const yearFromNow = Math.floor(Date.now() / 1000) + 365 * 24 * 3600
 
   const hasSession = cookies.some(
@@ -70,25 +71,40 @@ async function injectCookies(cookies: RawCookie[], sess: Electron.Session): Prom
       c.value?.length > 0 &&
       (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
   )
+  console.log(`[injectCookies] total=${cookies.length} hasSession=${hasSession}`)
   if (!hasSession) return false
 
+  let setCount = 0
+  let failCount = 0
   await Promise.all(cookies.map(async (c) => {
-    if (!c.value || !c.domain) return
+    if (!c.value || !c.domain) {
+      console.log(`[injectCookies] SKIP name=${c.name} (no value or domain)`)
+      return
+    }
     const expiry = c.expirationDate ?? (c.expires !== undefined && c.expires > 0 ? c.expires : yearFromNow)
+    const url = `https://${c.domain.replace(/^\./, '')}`
+    const sameSite = toElectronSameSite(c.sameSite)
+    // Chromium: SameSite=None (no_restriction) は Secure=true が必須
+    const secure = sameSite === 'no_restriction' ? true : (c.secure ?? true)
     try {
       await sess.cookies.set({
-        url:            `https://${c.domain.replace(/^\./, '')}`,
+        url,
         name:           c.name,
         value:          c.value,
         domain:         c.domain,
         path:           c.path ?? '/',
-        secure:         c.secure  ?? true,
+        secure,
         httpOnly:       c.httpOnly ?? false,
         expirationDate: expiry,
-        sameSite:       toElectronSameSite(c.sameSite),
+        sameSite,
       })
-    } catch { /* skip malformed cookies */ }
+      setCount++
+    } catch (e) {
+      failCount++
+      console.error(`[injectCookies] FAIL name=${c.name} domain=${c.domain} url=${url} secure=${secure} sameSite=${sameSite} error=${(e as Error)?.message}`)
+    }
   }))
+  console.log(`[injectCookies] done: set=${setCount} fail=${failCount}`)
 
   return true
 }
@@ -99,7 +115,7 @@ async function injectCookies(cookies: RawCookie[], sess: Electron.Session): Prom
 // レンダラー側の fetch と違い CORS 制限がないため確実に取得できる。
 // ds_user_id Cookie → /api/v1/users/{id}/info/ → username + full_name
 
-async function fetchProfileFromInstagram(
+export async function fetchProfileFromInstagram(
   cookies: Electron.Cookie[],
   popupWebContents?: Electron.WebContents
 ): Promise<{ username: string; displayName: string | null }> {
@@ -1213,18 +1229,10 @@ export class ViewManager {
     const partition = `persist:login-${tempKey}`
     const sess      = session.fromPartition(partition)
 
-    // iPhone Safari UA でアクセス（Electron 検出回避 + モバイルUIで認証が通りやすい）
-    {
-      const iOSVersions   = ['16_0', '16_1', '16_2', '16_3', '16_4', '16_5', '16_6',
-                             '17_0', '17_1', '17_2', '17_3', '17_4', '17_5']
-      const safariVersions = ['604.1', '605.1.15', '604.1']
-      const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
-      const ios    = pick(iOSVersions)
-      const safari = pick(safariVersions)
-      const ua = `Mozilla/5.0 (iPhone; CPU iPhone OS ${ios} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/${safari}`
-      console.log(`[autoRegister] UA=${ua}`)
-      sess.setUserAgent(ua)
-    }
+    // iPhone Safari UA を固定（セッション全体で一貫性を保つ）
+    const ua = pickRandomIphoneUA()
+    console.log(`[autoRegister] UA=${ua}`)
+    sess.setUserAgent(ua)
 
     if (opts.proxyUrl) {
       let proxyUrl = opts.proxyUrl.trim()
@@ -1250,23 +1258,19 @@ export class ViewManager {
     const username = base + digits + letter  // 例: yuki123456a
 
     const mainBounds = this.mainWindow.getBounds()
-    const popupW = 860, popupH = 700
+    const popupW = 420, popupH = 860
     const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
     const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
 
-    // iPhone 相当のウィンドウサイズ（モバイルUIに合わせる）
-    const innerW = 390
-    const innerH = 844
-
     const popup = new BrowserWindow({
-      width: 420, height: 860, x, y,
+      width: popupW, height: popupH, x, y,
       parent: this.mainWindow,
       modal: false,
+      resizable: false,  // リサイズ禁止（wd cookie が変わらないようにする）
       title: 'Instagram',
       titleBarStyle: 'default',
       webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
     })
-
 
     popup.webContents.on('login', (event, _d, authInfo, callback) => {
       console.log(`[autoRegister] login event isProxy=${authInfo.isProxy} host=${authInfo.host}`)
@@ -1276,9 +1280,19 @@ export class ViewManager {
       }
     })
 
+    // window.open を同じセッション内の新ウィンドウとして開く
+    // popup.loadURL で上書きすると CSRF コンテキストが壊れるため、
+    // 新しいウィンドウを開いて同一セッションを共有する
     popup.webContents.setWindowOpenHandler(({ url }) => {
-      console.log(`[autoRegister] window.open intercepted url=${url}`)
-      popup.loadURL(url)
+      console.log(`[autoRegister] window.open intercepted url=${url} → opening in same session`)
+      const child = new BrowserWindow({
+        width: popupW, height: popupH,
+        parent: popup,
+        modal: false,
+        title: 'Instagram',
+        webPreferences: { partition, nodeIntegration: false, contextIsolation: true },
+      })
+      child.loadURL(url)
       return { action: 'deny' }
     })
 
@@ -1308,97 +1322,184 @@ export class ViewManager {
     const bMonth = 1    + Math.floor(Math.random() * 12)
     const bDay   = 1    + Math.floor(Math.random() * 28)
 
+    // ── フォーム自動入力 ──────────────────────────────────────────────────
+    // Instagram は iPhone UA で表示するとモバイル UI になり、
+    // デスクトップとはフォーム構造・セレクターが大きく異なる。
+    // 複数のセレクター戦略を試し、ページ遷移のたびにリトライする。
     const tryFillForm = async () => {
       if (popup.isDestroyed() || formFilled) return
-      // ページ描画完了まで待機
-      await new Promise(r => setTimeout(r, 2000))
-      if (popup.isDestroyed()) return
+      await new Promise(r => setTimeout(r, 2500 + Math.random() * 1500))
+      if (popup.isDestroyed() || formFilled) return
+
       try {
-        // ── 実際のInstagramフォーム構造（2024年確認済み）──
-        // input[type="text"]       : [0]=メアド/電話, [1]=名前
-        // input[type="password"]   : パスワード
-        // input[type="search"]     : ユーザーネーム (aria-label="ユーザーネーム")
-        // div[role="combobox"]     : [0]=年, [1]=月, [2]=日 (aria-label="年/月/日を選択")
         const result = await popup.webContents.executeJavaScript(`
           (async function() {
-            function rand(min, max) {
-              return Math.floor(Math.random() * (max - min + 1)) + min;
-            }
-            function wait(ms) {
-              return new Promise(r => setTimeout(r, ms));
-            }
-            async function clickAndFill(el, val) {
+            var url = location.href;
+            var rand = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+            var wait = ms => new Promise(r => setTimeout(r, ms));
+
+            // React controlled input に値を設定するヘルパー
+            async function fill(el, val) {
               if (!el) return false;
-              el.click();
-              await wait(rand(100, 300));
-              el.focus();
-              try {
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                setter.call(el, val);
-              } catch(e) { el.value = val; }
-              el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+              el.focus(); el.click();
+              await wait(rand(80, 200));
+              // React の value setter を使って state を更新
+              var nativeSet = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+              );
+              if (nativeSet && nativeSet.set) {
+                nativeSet.set.call(el, val);
+              } else {
+                el.value = val;
+              }
+              el.dispatchEvent(new Event('input',  { bubbles: true }));
               el.dispatchEvent(new Event('change', { bubbles: true }));
+              await wait(rand(100, 300));
               return true;
             }
-            async function clickComboAndSelect(ariaLabel, matchText) {
-              const combo = document.querySelector('div[role="combobox"][aria-label="' + ariaLabel + '"]');
-              if (!combo) return false;
-              combo.click();
-              await wait(rand(600, 900));
-              const opts = Array.from(document.querySelectorAll('[role="option"]'))
-                .filter(el => el.offsetParent !== null);
-              const target = opts.find(el => el.textContent.trim() === matchText);
-              if (target) { target.click(); await wait(rand(300, 500)); return true; }
-              return false;
+
+            // select 要素に値を設定
+            async function selectVal(el, val) {
+              if (!el) return false;
+              el.value = val;
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              await wait(rand(100, 300));
+              return true;
             }
 
-            const textInputs  = document.querySelectorAll('input[type="text"]');
-            const pwInput     = document.querySelector('input[type="password"]');
-            const searchInput = document.querySelector('input[type="search"]');
+            // ── セレクター候補（デスクトップ / モバイル 両対応） ──
+            // name 属性 → aria-label → type+順序 の優先度で検索
+            function findInput(names, ariaLabels, fallbackType, fallbackIdx) {
+              for (var n of names) {
+                var el = document.querySelector('input[name="' + n + '"]');
+                if (el) return el;
+              }
+              for (var a of ariaLabels) {
+                var el2 = document.querySelector('input[aria-label="' + a + '"]');
+                if (el2) return el2;
+              }
+              if (fallbackType != null) {
+                var all = document.querySelectorAll('input[type="' + fallbackType + '"]');
+                if (all[fallbackIdx]) return all[fallbackIdx];
+              }
+              return null;
+            }
 
-            if (!textInputs[0] || !pwInput) return { ok: false, reason: 'form_not_ready' };
+            // ── DOM ダンプ（デバッグ用） ──
+            var inputs = Array.from(document.querySelectorAll('input')).map(function(el) {
+              return { name: el.name, type: el.type, ariaLabel: el.getAttribute('aria-label'), placeholder: el.placeholder };
+            });
+            var selects = Array.from(document.querySelectorAll('select')).map(function(el) {
+              return { name: el.name, ariaLabel: el.getAttribute('aria-label'), title: el.title };
+            });
+            console.log('[autoFill] url=' + url);
+            console.log('[autoFill] inputs=' + JSON.stringify(inputs));
+            console.log('[autoFill] selects=' + JSON.stringify(selects));
 
-            await clickAndFill(textInputs[0], ${JSON.stringify(opts.email)});
-            await wait(rand(100, 300));
-            await clickAndFill(pwInput, ${JSON.stringify(opts.password)});
-            await wait(rand(100, 300));
-            if (textInputs[1]) await clickAndFill(textInputs[1], ${JSON.stringify(opts.name)});
-            await wait(rand(100, 300));
-            if (searchInput)   await clickAndFill(searchInput, ${JSON.stringify(username)});
-            await wait(rand(200, 400));
+            // ── メールフィールド検出 ──
+            var emailEl = findInput(
+              ['emailOrPhone', 'email', 'email_or_phone'],
+              ['メールアドレスまたは携帯電話番号', 'メールアドレス', 'Email or phone number', 'Email', 'Mobile Number or Email'],
+              'text', 0
+            );
+            if (!emailEl) return { ok: false, reason: 'email_not_found', url: url, inputs: inputs };
 
-            // 生年月日
-            await clickComboAndSelect('年を選択', ${JSON.stringify(String(bYear) + '年')});
-            await clickComboAndSelect('月を選択', ${JSON.stringify(String(bMonth) + '月')});
-            await clickComboAndSelect('日を選択', ${JSON.stringify(String(bDay) + '日')});
+            var filled = {};
+            filled.email = await fill(emailEl, ${JSON.stringify(opts.email)});
 
-            await wait(rand(400, 700));
-            const submitBtn = document.querySelector('button[type="submit"]');
-            if (submitBtn) submitBtn.click();
+            // ── 名前 ──
+            var nameEl = findInput(
+              ['fullName', 'full_name'],
+              ['名前', 'Full Name', 'Full name'],
+              'text', 1
+            );
+            if (nameEl) { filled.name = await fill(nameEl, ${JSON.stringify(opts.name)}); }
 
-            return {
-              ok: true,
-              email: !!textInputs[0],
-              name:  !!(textInputs[1]),
-              pw:    !!pwInput,
-              user:  !!searchInput,
-            };
+            // ── ユーザーネーム ──
+            var userEl = findInput(
+              ['username'],
+              ['ユーザーネーム', 'Username'],
+              'search', 0
+            );
+            if (!userEl) userEl = findInput([], [], 'text', 3);
+            if (userEl) { filled.user = await fill(userEl, ${JSON.stringify(username)}); }
+
+            // ── パスワード ──
+            var pwEl = findInput(
+              ['password'],
+              ['パスワード', 'Password'],
+              'password', 0
+            );
+            if (pwEl) { filled.pw = await fill(pwEl, ${JSON.stringify(opts.password)}); }
+
+            // ── 生年月日 (select 要素の場合) ──
+            var monthSel = document.querySelector('select[title="月"]')
+              || document.querySelector('select[title="月:"]')
+              || document.querySelector('select[aria-label="月"]')
+              || document.querySelector('select[title="Month:"]');
+            var daySel = document.querySelector('select[title="日"]')
+              || document.querySelector('select[title="日:"]')
+              || document.querySelector('select[aria-label="日"]')
+              || document.querySelector('select[title="Day:"]');
+            var yearSel = document.querySelector('select[title="年"]')
+              || document.querySelector('select[title="年:"]')
+              || document.querySelector('select[aria-label="年"]')
+              || document.querySelector('select[title="Year:"]');
+
+            if (monthSel && daySel && yearSel) {
+              filled.month = await selectVal(monthSel, ${JSON.stringify(String(bMonth))});
+              filled.day   = await selectVal(daySel,   ${JSON.stringify(String(bDay))});
+              filled.year  = await selectVal(yearSel,  ${JSON.stringify(String(bYear))});
+            }
+
+            // ── 生年月日 (combobox の場合 — デスクトップUI) ──
+            if (!monthSel) {
+              async function comboSelect(label, text) {
+                var combo = document.querySelector('div[role="combobox"][aria-label="' + label + '"]');
+                if (!combo) return false;
+                combo.click();
+                await wait(rand(500, 800));
+                var opts2 = Array.from(document.querySelectorAll('[role="option"]')).filter(function(e) { return e.offsetParent !== null; });
+                var t = opts2.find(function(e) { return e.textContent.trim() === text; });
+                if (t) { t.click(); await wait(rand(200, 400)); return true; }
+                return false;
+              }
+              filled.year  = await comboSelect('年を選択', ${JSON.stringify(String(bYear) + '年')});
+              filled.month = await comboSelect('月を選択', ${JSON.stringify(String(bMonth) + '月')});
+              filled.day   = await comboSelect('日を選択', ${JSON.stringify(String(bDay) + '日')});
+            }
+
+            await wait(rand(500, 1000));
+            // 送信ボタン（submit なかったら「登録する/次へ/Sign up/Next」テキストのボタン）
+            var btn = document.querySelector('button[type="submit"]');
+            if (!btn) {
+              var btns = Array.from(document.querySelectorAll('button'));
+              btn = btns.find(function(b) { return /登録|次へ|Sign up|Next/i.test(b.textContent); });
+            }
+            if (btn) btn.click();
+
+            return { ok: true, url: url, filled: filled };
           })()
         `)
-        if (result?.ok) {
+        console.log('[autoRegister] tryFillForm result:', JSON.stringify(result))
+        if (result?.ok && result.filled?.email) {
           formFilled = true
-          onStatus({ type: 'form_filled',    detail: opts.email })
+          onStatus({ type: 'form_filled',    detail: `${opts.email} (${result.url})` })
           onStatus({ type: 'form_submitted', detail: opts.email })
-        } else {
-          console.log('[autoRegister] tryFillForm result:', result)
         }
       } catch (e) {
         console.error('[autoRegister] tryFillForm error:', e)
       }
     }
 
-    // モバイルUA（iPhone）使用時はフォーム自動入力をスキップ（手動操作）
-    // popup.webContents.on('did-finish-load', () => tryFillForm())
+    // ページ読み込み完了時に自動入力を試みる（リトライ付き）
+    popup.webContents.on('did-finish-load', () => {
+      if (!formFilled) tryFillForm()
+    })
+    // SPA 遷移対応
+    popup.webContents.on('did-navigate-in-page', () => {
+      if (!formFilled) setTimeout(() => tryFillForm(), 1500)
+    })
 
     let codeStepNotified = false
     let codeCheckInterval: ReturnType<typeof setInterval> | null = null
@@ -1460,7 +1561,19 @@ export class ViewManager {
               (c.domain?.includes('threads.com') || c.domain?.includes('instagram.com'))
           )
           if (!hasSession) return
-          done = true; cleanup()
+
+          done = true
+          clearTimeout(timer)
+          if (pollInterval)      clearInterval(pollInterval)
+          if (codeCheckInterval) clearInterval(codeCheckInterval)
+
+          // 登録直後にセッション移行やAPI呼出しをするとアカウントがロックされるため
+          // 30秒以上待機してからウィンドウを閉じる
+          console.log('[autoRegister] sessionid detected — waiting 30s before closing (anti-lock)')
+          onStatus({ type: 'waiting_cooldown', detail: '登録完了。ロック防止のため30秒待機中...' })
+          await new Promise(r => setTimeout(r, 30_000))
+
+          try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
           resolve({ username, displayName: opts.name, tempKey })
         } catch { /* ignore */ }
       }
@@ -2343,6 +2456,15 @@ export function initViewManager(win: BrowserWindow): ViewManager {
 export function getViewManager(): ViewManager {
   if (!_manager) throw new Error('ViewManager not initialized')
   return _manager
+}
+
+/** 指定アカウントのブラウザビューの WebContents を返す（未開放なら null） */
+export function getViewWebContents(accountId: number): Electron.WebContents | null {
+  if (!_manager) return null
+  const entry = (_manager as unknown as { views: Map<number, { view: { webContents: Electron.WebContents } }> })
+    .views.get(accountId)
+  if (!entry || entry.view.webContents.isDestroyed()) return null
+  return entry.view.webContents
 }
 
 /**

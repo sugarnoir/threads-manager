@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxy_url?: string
       proxy_username?: string
       proxy_password?: string
+      login_site?: 'threads' | 'instagram'
     }) => ipcRenderer.invoke('accounts:add', options),
     register: (options?: {
       proxy_url?: string
@@ -58,6 +59,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }) => ipcRenderer.invoke('accounts:auto-register', data),
     proxyUrlCounts: () => ipcRenderer.invoke('accounts:proxy-url-counts'),
     proxyPortStats: () => ipcRenderer.invoke('accounts:proxy-port-stats'),
+    bulkImport: (rows: Array<{
+      username:    string
+      password:    string | null
+      proxy_host:  string | null
+      proxy_port:  number | null
+      proxy_user:  string | null
+      proxy_pass:  string | null
+      proxy_type?: string | null
+      group_name?: string | null
+    }>) => ipcRenderer.invoke('accounts:bulk-import', rows),
+    autoRename: (id: number) => ipcRenderer.invoke('accounts:auto-rename', id),
+    importCookieLogin: (rows: Array<{
+      username:    string
+      password:    string
+      token:       string
+      cookies:     unknown[]
+      email:       string
+      group_name?: string | null
+    }>, options?: {
+      proxyMode?:      'auto' | 'manual' | 'none'
+      proxyStartPort?: number
+    }) => ipcRenderer.invoke('accounts:import-cookie-login', rows, options),
   },
 
   // Posts
@@ -191,6 +214,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('stocks:updateAllTopics', data),
     schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) =>
       ipcRenderer.invoke('stocks:schedule-post', data),
+    bulkAddTopics: (data: { group_name: string | null; columns: string[][] }) =>
+      ipcRenderer.invoke('stocks:bulk-add-topics', data),
   },
 
   // Image Groups

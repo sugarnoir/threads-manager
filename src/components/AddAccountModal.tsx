@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../lib/ipc'
 import type { ProxyPreset } from '../lib/ipc'
 
-type Mode = 'login' | 'register'
+type Mode = 'login' | 'register' | 'setup'
 type ProxyType = 'none' | 'http' | 'https' | 'socks5'
 
 interface ProxyOptions {
@@ -206,7 +206,7 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-[440px] p-6 space-y-5">
+      <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-[460px] p-6 space-y-5">
 
         {/* Header */}
         <div>
@@ -215,33 +215,47 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
         </div>
 
         {/* Mode tabs */}
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-3 gap-2">
           <button
             onClick={() => setMode('login')}
-            className={`flex flex-col items-center gap-2 py-4 px-3 rounded-xl border transition-all ${
+            className={`flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
               mode === 'login'
                 ? 'bg-blue-600/15 border-blue-500 text-blue-400'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
             }`}
           >
-            <span className="text-xl">🔑</span>
+            <span className="text-lg">🔑</span>
             <div className="text-center">
-              <p className="text-xs font-bold">ログイン</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5 leading-tight">既存のアカウントで<br/>ログイン</p>
+              <p className="text-[11px] font-bold leading-tight">ログイン</p>
+              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">既存アカで<br/>即ログイン</p>
             </div>
           </button>
           <button
             onClick={() => setMode('register')}
-            className={`flex flex-col items-center gap-2 py-4 px-3 rounded-xl border transition-all ${
+            className={`flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
               mode === 'register'
                 ? 'bg-emerald-600/15 border-emerald-500 text-emerald-400'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
             }`}
           >
-            <span className="text-xl">✨</span>
+            <span className="text-lg">✨</span>
             <div className="text-center">
-              <p className="text-xs font-bold">新規アカウント作成</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5 leading-tight">Instagramを新規登録して<br/>Threadsに接続</p>
+              <p className="text-[11px] font-bold leading-tight">新規作成</p>
+              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">IG新規登録→<br/>Threads接続</p>
+            </div>
+          </button>
+          <button
+            onClick={() => setMode('setup')}
+            className={`flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
+              mode === 'setup'
+                ? 'bg-violet-600/15 border-violet-500 text-violet-400'
+                : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+            }`}
+          >
+            <span className="text-lg">🧭</span>
+            <div className="text-center">
+              <p className="text-[11px] font-bold leading-tight">既存IG<br/>から作成</p>
+              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">3ステップ<br/>ウィザード</p>
             </div>
           </button>
         </div>
@@ -255,6 +269,18 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
               <li>メール/電話番号でアカウントを作成</li>
               <li>そのままThreadsにログイン</li>
               <li>完了後、自動でリストに追加されます</li>
+            </ol>
+          </div>
+        )}
+
+        {mode === 'setup' && (
+          <div className="bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-3 space-y-1">
+            <p className="text-violet-400 text-xs font-semibold">既存Instagramから作成の流れ</p>
+            <ol className="text-zinc-400 text-[11px] space-y-0.5 list-decimal list-inside">
+              <li>Instagramログインウィンドウが開きます</li>
+              <li>プロフィール編集ページで名前を変更</li>
+              <li>「次へ」でThreadsアカウント作成画面へ</li>
+              <li>「完了」でTMにアカウントが追加されます</li>
             </ol>
           </div>
         )}
@@ -296,10 +322,14 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
             className={`flex-1 py-2 text-white rounded-lg text-sm font-semibold disabled:opacity-40 transition-colors ${
               mode === 'register'
                 ? 'bg-emerald-600 hover:bg-emerald-500'
+                : mode === 'setup'
+                ? 'bg-violet-600 hover:bg-violet-500'
                 : 'bg-blue-600 hover:bg-blue-500'
             }`}
           >
-            {mode === 'login' ? 'ログインウィンドウを開く' : '登録ページを開く'}
+            {mode === 'login'    ? 'ログインウィンドウを開く'
+              : mode === 'register' ? '登録ページを開く'
+              : '初期設定ウィザードを開始'}
           </button>
         </div>
       </div>

@@ -17,6 +17,7 @@ export interface Account {
   sort_order: number
   speed_preset: 'slow' | 'normal' | 'fast'
   user_agent: string | null
+  ig_password: string | null
   mark: string | null
   created_at: string
   updated_at: string
@@ -252,11 +253,13 @@ export interface ImageGroups {
 }
 
 export interface LicenseRow {
-  key:         string
-  is_active:   boolean
-  expires_at:  string | null
-  memo:        string | null
-  mac_address: string | null
+  key:           string
+  is_active:     boolean
+  expires_at:    string | null
+  memo:          string | null
+  mac_address:   string | null
+  device_free:   boolean
+  max_accounts:  number | null
 }
 
 export interface MasterKeyRow {
@@ -265,6 +268,7 @@ export interface MasterKeyRow {
   expires_at: string | null
   memo: string | null
 }
+
 
 declare global {
   interface Window {
@@ -282,6 +286,7 @@ declare global {
           proxy_url?: string
           proxy_username?: string
           proxy_password?: string
+          login_site?: 'threads' | 'instagram'
         }) => Promise<{ success: boolean; account?: Account; error?: string }>
         register: (options?: {
           proxy_url?: string
@@ -323,6 +328,42 @@ declare global {
           unusedPorts:  number[]
         }>>
         autoRegister: (data: { name: string; email: string; password: string; proxy_url?: string | null; proxy_username?: string | null; proxy_password?: string | null }) => Promise<{ success: boolean; account?: Account; error?: string }>
+        bulkImport: (rows: Array<{
+          username:    string
+          password:    string | null
+          proxy_host:  string | null
+          proxy_port:  number | null
+          proxy_user:  string | null
+          proxy_pass:  string | null
+          proxy_type?: string | null
+          group_name?: string | null
+        }>) => Promise<{
+          imported: number
+          skipped:  number
+          errors:   Array<{ username: string; message: string }>
+          accounts: Account[]
+        }>
+        autoRename: (id: number) => Promise<{
+          success: boolean
+          status?: number
+          newName?: string
+          error?:   string
+        }>
+        importCookieLogin: (rows: Array<{
+          username:    string
+          password:    string
+          token:       string
+          cookies:     unknown[]
+          email:       string
+          group_name?: string | null
+        }>, options?: {
+          proxyMode?:      'auto' | 'manual' | 'none'
+          proxyStartPort?: number
+        }) => Promise<{
+          imported: number
+          skipped:  number
+          errors:   Array<{ username: string; message: string }>
+        }>
       }
       posts: {
         list: (accountId: number) => Promise<Post[]>
@@ -405,6 +446,10 @@ declare global {
         randomizeImages: (accountId: number) => Promise<{ success: boolean; updated?: number; errors?: string[]; error?: string }>
         updateAllTopics: (data: { account_id: number; topic: string | null }) => Promise<{ success: boolean; updated?: number; error?: string }>
         schedulePost: (data: { account_id: number; content: string; scheduled_at: string; image_url?: string | null; image_url_2?: string | null; topic?: string | null }) => Promise<{ success: boolean; error?: string }>
+        bulkAddTopics: (data: { group_name: string | null; columns: string[][] }) => Promise<{
+          success: boolean
+          results?: Array<{ accountId: number; username: string; added: number }>
+        }>
       }
       imageGroups: {
         get:  () => Promise<{ success: boolean; data?: ImageGroups; error?: string }>

@@ -64,11 +64,13 @@ export function LicenseAdmin() {
   const [keyMsg,         setKeyMsg]         = useState<string | null>(null)
 
   // 新規追加フォーム
-  const [newKey,       setNewKey]       = useState('')
-  const [newExpires,   setNewExpires]   = useState('')
-  const [newMemo,      setNewMemo]      = useState('')
-  const [adding,       setAdding]       = useState(false)
-  const [addError,     setAddError]     = useState<string | null>(null)
+  const [newKey,        setNewKey]        = useState('')
+  const [newExpires,    setNewExpires]    = useState('')
+  const [newMemo,       setNewMemo]       = useState('')
+  const [newDeviceFree,  setNewDeviceFree]  = useState(false)
+  const [newMaxAccounts, setNewMaxAccounts] = useState('')
+  const [adding,         setAdding]         = useState(false)
+  const [addError,      setAddError]      = useState<string | null>(null)
 
   // ── ロード ──────────────────────────────────────────────────────────────────
 
@@ -133,6 +135,46 @@ export function LicenseAdmin() {
     setLicenses((prev) => prev.filter((r) => r.key !== key))
   }
 
+  // ── 編集モーダル ──────────────────────────────────────────────────────────
+
+  const [editRow, setEditRow] = useState<LicenseRow | null>(null)
+  const [editMemo, setEditMemo] = useState('')
+  const [editMaxAccounts, setEditMaxAccounts] = useState('')
+  const [editDeviceFree, setEditDeviceFree] = useState(false)
+  const [editActive, setEditActive] = useState(true)
+  const [editSaving, setEditSaving] = useState(false)
+
+  const openEdit = (row: LicenseRow) => {
+    setEditRow(row)
+    setEditMemo(row.memo ?? '')
+    setEditMaxAccounts(row.max_accounts != null ? String(row.max_accounts) : '')
+    setEditDeviceFree(row.device_free)
+    setEditActive(row.is_active)
+  }
+
+  const handleEditSave = async () => {
+    if (!editRow) return
+    setEditSaving(true)
+    const maxAcct = editMaxAccounts.trim() ? parseInt(editMaxAccounts.trim(), 10) : null
+    const res = await api.license.update({
+      key:           editRow.key,
+      is_active:     editActive,
+      memo:          editMemo.trim() || null,
+      device_free:   editDeviceFree,
+      max_accounts:  Number.isFinite(maxAcct) && maxAcct! > 0 ? maxAcct : null,
+    })
+    setEditSaving(false)
+    if (!res.success) { alert(res.error); return }
+    setLicenses(prev => prev.map(r => r.key === editRow.key ? {
+      ...r,
+      is_active: editActive,
+      memo: editMemo.trim() || null,
+      device_free: editDeviceFree,
+      max_accounts: Number.isFinite(maxAcct) && maxAcct! > 0 ? maxAcct : null,
+    } : r))
+    setEditRow(null)
+  }
+
   // ── MACアドレスリセット ──────────────────────────────────────────────────
 
   const handleResetMac = async (key: string) => {
@@ -152,12 +194,15 @@ export function LicenseAdmin() {
     if (!newKey.trim()) return
     setAdding(true)
     setAddError(null)
+    const maxAcct = newMaxAccounts.trim() ? parseInt(newMaxAccounts.trim(), 10) : null
     const result = await api.license.create({
-      key:         newKey.trim(),
-      is_active:   true,
-      expires_at:  newExpires ? new Date(newExpires).toISOString() : null,
-      memo:        newMemo.trim() || null,
-      mac_address: null,
+      key:           newKey.trim(),
+      is_active:     true,
+      expires_at:    newExpires ? new Date(newExpires).toISOString() : null,
+      memo:          newMemo.trim() || null,
+      mac_address:   null,
+      device_free:   newDeviceFree,
+      max_accounts:  Number.isFinite(maxAcct) && maxAcct! > 0 ? maxAcct : null,
     })
     if (!result.success) {
       setAddError(result.error ?? '追加に失敗しました')
@@ -165,6 +210,8 @@ export function LicenseAdmin() {
       setNewKey('')
       setNewExpires('')
       setNewMemo('')
+      setNewDeviceFree(false)
+      setNewMaxAccounts('')
       await load()
     }
     setAdding(false)
@@ -249,6 +296,29 @@ export function LicenseAdmin() {
             />
           </div>
         </div>
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label className="text-zinc-500 text-[11px] block mb-1">垢数上限（空白=無制限）</label>
+            <input
+              type="number"
+              value={newMaxAccounts}
+              onChange={(e) => setNewMaxAccounts(e.target.value)}
+              placeholder="例: 100"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
+            />
+          </div>
+          <div className="flex-1 flex items-end pb-1">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={newDeviceFree}
+                onChange={(e) => setNewDeviceFree(e.target.checked)}
+                className="accent-violet-500 w-3.5 h-3.5"
+              />
+              <span className="text-zinc-300 text-xs">デバイスフリー</span>
+            </label>
+          </div>
+        </div>
         {addError && <p className="text-red-400 text-xs">{addError}</p>}
         <button
           type="submit"
@@ -306,7 +376,19 @@ export function LicenseAdmin() {
 
                 {/* Key + meta */}
                 <div className="flex-1 min-w-0">
-                  <code className="text-[11px] font-mono text-zinc-300 block truncate">{row.key}</code>
+                  <div className="flex items-center gap-1.5">
+                    <code className="text-[11px] font-mono text-zinc-300 truncate">{row.key}</code>
+                    {row.device_free && (
+                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-violet-500/20 border border-violet-500/40 text-violet-300 text-[9px] font-bold leading-none">
+                        デバイスフリー
+                      </span>
+                    )}
+                    {row.max_accounts != null && (
+                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[9px] font-bold leading-none">
+                        {row.max_accounts}垢
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                     <span className={`text-[10px] ${expired ? 'text-amber-400' : 'text-zinc-500'}`}>
                       {expired ? '⚠ 期限切れ: ' : '期限: '}
@@ -315,7 +397,9 @@ export function LicenseAdmin() {
                     {row.memo && (
                       <span className="text-zinc-500 text-[10px]">— {row.memo}</span>
                     )}
-                    {row.mac_address ? (
+                    {row.device_free ? (
+                      <span className="text-[10px] text-violet-500">🌐 どのMacでも使用可</span>
+                    ) : row.mac_address ? (
                       <span className="text-[10px] text-emerald-700 font-mono">
                         🔒 {row.mac_address}
                       </span>
@@ -325,7 +409,7 @@ export function LicenseAdmin() {
                   </div>
                 </div>
 
-                {/* Toggle */}
+                {/* Toggle active */}
                 <div className="flex items-center gap-1.5 shrink-0">
                   <span className={`text-[10px] font-semibold w-6 text-right ${row.is_active ? 'text-blue-400' : 'text-zinc-600'}`}>
                     {row.is_active ? 'ON' : 'OFF'}
@@ -333,16 +417,13 @@ export function LicenseAdmin() {
                   <Toggle checked={row.is_active} onChange={() => handleToggle(row)} />
                 </div>
 
-                {/* MAC reset */}
-                {row.mac_address && (
-                  <button
-                    onClick={() => handleResetMac(row.key)}
-                    className="px-1.5 py-1 text-[10px] text-zinc-500 hover:text-amber-400 border border-zinc-700 hover:border-amber-500/40 rounded transition-colors shrink-0"
-                    title="MACアドレス紐付けをリセット"
-                  >
-                    MAC解除
-                  </button>
-                )}
+                {/* Edit */}
+                <button
+                  onClick={() => openEdit(row)}
+                  className="px-2 py-1 text-[10px] text-zinc-400 hover:text-white border border-zinc-700 hover:border-blue-500/50 rounded transition-colors shrink-0"
+                >
+                  編集
+                </button>
 
                 {/* Delete */}
                 <button
@@ -357,6 +438,100 @@ export function LicenseAdmin() {
           })}
         </div>
       </div>
+
+      {/* ── 編集モーダル ── */}
+      {editRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setEditRow(null)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 w-96 shadow-2xl space-y-4" onClick={e => e.stopPropagation()}>
+            <div>
+              <h3 className="text-white font-bold text-sm">キー編集</h3>
+              <code className="text-zinc-400 text-[11px] font-mono block mt-1 truncate">{editRow.key}</code>
+            </div>
+
+            <div className="space-y-3">
+              {/* 有効/無効 */}
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-300 text-xs">ステータス</span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[11px] font-semibold ${editActive ? 'text-blue-400' : 'text-zinc-600'}`}>
+                    {editActive ? 'ON' : 'OFF'}
+                  </span>
+                  <Toggle checked={editActive} onChange={() => setEditActive(!editActive)} />
+                </div>
+              </div>
+
+              {/* デバイスフリー */}
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-300 text-xs">デバイスフリー</span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[11px] ${editDeviceFree ? 'text-violet-400' : 'text-zinc-600'}`}>
+                    {editDeviceFree ? '🌐 Free' : '🔒 Mac紐付け'}
+                  </span>
+                  <Toggle checked={editDeviceFree} onChange={() => setEditDeviceFree(!editDeviceFree)} />
+                </div>
+              </div>
+
+              {/* 垢数上限 */}
+              <div>
+                <label className="text-zinc-400 text-xs block mb-1">垢数上限（空白=無制限）</label>
+                <input
+                  type="number"
+                  value={editMaxAccounts}
+                  onChange={e => setEditMaxAccounts(e.target.value)}
+                  placeholder="無制限"
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+
+              {/* メモ */}
+              <div>
+                <label className="text-zinc-400 text-xs block mb-1">メモ</label>
+                <input
+                  type="text"
+                  value={editMemo}
+                  onChange={e => setEditMemo(e.target.value)}
+                  placeholder="用途など"
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              {/* MAC情報 */}
+              {editRow.mac_address && !editDeviceFree && (
+                <div className="flex items-center justify-between px-3 py-2 bg-zinc-800/60 rounded-lg">
+                  <span className="text-zinc-500 text-[11px] font-mono">🔒 {editRow.mac_address}</span>
+                  <button
+                    onClick={async () => {
+                      await handleResetMac(editRow.key)
+                      setEditRow({ ...editRow, mac_address: null })
+                    }}
+                    className="text-[10px] text-amber-400 hover:text-amber-300 transition-colors"
+                  >
+                    MAC解除
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setEditRow(null)}
+                className="flex-1 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm rounded-lg transition-colors"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={handleEditSave}
+                disabled={editSaving}
+                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+              >
+                {editSaving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }
+

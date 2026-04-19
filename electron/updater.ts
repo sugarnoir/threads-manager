@@ -1,14 +1,13 @@
 import { autoUpdater } from 'electron-updater'
-import { dialog, BrowserWindow } from 'electron'
+import { BrowserWindow } from 'electron'
 import log from 'electron-log'
 
 export function initAutoUpdater(mainWindow: BrowserWindow): void {
-  // electron-log にアップデートログを流す
   autoUpdater.logger = log
   ;(autoUpdater.logger as typeof log).transports.file.level = 'info'
 
-  // dev ビルドではチェックしない
-  autoUpdater.autoDownload = false
+  // 強制アップデート: 自動ダウンロード + 終了時自動インストール
+  autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
 
   // ── イベントハンドラー ────────────────────────────────────────────────────
@@ -23,53 +22,55 @@ export function initAutoUpdater(mainWindow: BrowserWindow): void {
 
   autoUpdater.on('error', (err) => {
     log.error('[Updater] エラー:', err.message)
+    // エラー時はローディングを解除して通常起動させる
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('updater:status', { type: 'error', message: err.message })
+    }
   })
 
-  autoUpdater.on('update-available', async (info) => {
-    log.info('[Updater] 新バージョン検出:', info.version)
-
-    const { response } = await dialog.showMessageBox(mainWindow, {
-      type:    'info',
-      title:   'アップデートがあります',
-      message: `新しいバージョン ${info.version} が利用可能です。\n今すぐダウンロードしますか？`,
-      buttons: ['ダウンロード', '後で'],
-      defaultId: 0,
-      cancelId:  1,
-    })
-
-    if (response === 0) {
-      autoUpdater.downloadUpdate()
+  autoUpdater.on('update-available', (info) => {
+    log.info('[Updater] 新バージョン検出:', info.version, '→ 自動ダウンロード開始')
+    // フロントにアップデート開始を通知 → ローディング画面を表示
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('updater:status', {
+        type:    'downloading',
+        version: info.version,
+        percent: 0,
+      })
     }
   })
 
   autoUpdater.on('download-progress', (progress) => {
-    const msg = `[Updater] ダウンロード中: ${Math.round(progress.percent)}% (${Math.round(progress.bytesPerSecond / 1024)} KB/s)`
-    log.info(msg)
-    mainWindow.setProgressBar(progress.percent / 100)
-  })
-
-  autoUpdater.on('update-downloaded', async (info) => {
-    mainWindow.setProgressBar(-1)
-    log.info('[Updater] ダウンロード完了:', info.version)
-
-    const { response } = await dialog.showMessageBox(mainWindow, {
-      type:    'info',
-      title:   'ダウンロード完了',
-      message: `バージョン ${info.version} の準備ができました。\n再起動してアップデートを適用しますか？`,
-      buttons: ['再起動して適用', '後で適用'],
-      defaultId: 0,
-      cancelId:  1,
-    })
-
-    if (response === 0) {
-      autoUpdater.quitAndInstall()
+    const pct = Math.round(progress.percent)
+    log.info(`[Updater] ダウンロード中: ${pct}% (${Math.round(progress.bytesPerSecond / 1024)} KB/s)`)
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(progress.percent / 100)
+      mainWindow.webContents.send('updater:status', {
+        type:    'downloading',
+        percent: pct,
+      })
     }
   })
 
-  // ── 起動時にチェック（5秒後に実行して起動処理を邪魔しない）─────────────────
+  autoUpdater.on('update-downloaded', (info) => {
+    log.info('[Updater] ダウンロード完了:', info.version, '→ 強制再起動')
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(-1)
+      mainWindow.webContents.send('updater:status', {
+        type:    'installing',
+        version: info.version,
+      })
+    }
+    // 3秒待ってから強制再起動（ユーザーに「インストール中」を見せるため）
+    setTimeout(() => {
+      autoUpdater.quitAndInstall(false, true)  // isSilent=false, isForceRunAfter=true
+    }, 3000)
+  })
+
+  // ── 起動時にチェック（3秒後に実行）─────────────────────────────────────
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((err) => {
       log.warn('[Updater] チェック失敗:', err.message)
     })
-  }, 5000)
+  }, 3000)
 }

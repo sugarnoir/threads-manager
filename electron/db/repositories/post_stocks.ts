@@ -89,3 +89,11 @@ export function updateAllTopics(accountId: number, topic: string | null): number
     .run(topic, accountId)
   return result.changes
 }
+
+/** トピック未設定のストックにのみトピックを設定する（既存トピックは維持） */
+export function addTopicToEmptyStocks(accountId: number, topic: string): number {
+  const result = getDb()
+    .prepare("UPDATE post_stocks SET topic = ?, updated_at = datetime('now') WHERE account_id = ? AND (topic IS NULL OR topic = '')")
+    .run(topic, accountId)
+  return result.changes
+}

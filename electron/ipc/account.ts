@@ -7,6 +7,7 @@ import {
   updateAccountStatus,
   updateAccountProxy,
   updateAccountDisplayName,
+  updateAccountUsername,
   updateAccountGroup,
   updateAccountMemo,
   updateAccountMark,
@@ -18,12 +19,13 @@ import {
   getAccountFingerprint,
 } from '../db/repositories/accounts'
 import { pickRandomIphoneUA } from '../utils/iphone-ua'
-import { setSetting } from '../db/repositories/settings'
+import { getSetting, setSetting } from '../db/repositories/settings'
 import type { StatusCheckResult } from '../browser-views/view-manager'
 import { createAndSaveFingerprint } from '../fingerprint'
 import { closeContext, reloadContext } from '../playwright/browser-manager'
-import { getViewManager } from '../browser-views/view-manager'
+import { getViewManager, fetchProfileFromInstagram, injectCookies, RawCookie } from '../browser-views/view-manager'
 import { sendDiscordNotification } from '../discord'
+import { autoRenameJapaneseFemale } from '../api/threads-web-api'
 
 export function registerAccountHandlers(): void {
   ipcMain.handle('accounts:list', () => getAllAccounts())
@@ -32,8 +34,77 @@ export function registerAccountHandlers(): void {
     'accounts:add',
     async (
       _event,
-      options?: { proxy_url?: string; proxy_username?: string; proxy_password?: string }
+      options?: {
+        proxy_url?:      string
+        proxy_username?: string
+        proxy_password?: string
+        login_site?:     'threads' | 'instagram'
+      }
     ) => {
+      const viewManager = getViewManager()
+
+      // ── login_site === 'instagram' (既存IGから作成) ─────────────────────
+      // 動作確認済みの startInstagramLogin と完全に同じフローで実行するため、
+      // 1) 仮ユーザー名で先にアカウントを作成（プロキシ・UA・フィンガープリントを永続パーティションに反映）
+      // 2) startInstagramLogin(accountId) を呼ぶ（管理タブと同一コードパス）
+      // 3) ログイン完了後、Cookie から実ユーザー名を取得してDB更新
+      if (options?.login_site === 'instagram') {
+        const userAgent  = pickRandomIphoneUA()
+        const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
+        const placeholder = `__pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+        let stubAccountId: number | null = null
+        try {
+          const stub = createAccount({
+            username:       placeholder,
+            session_dir:    sessionDir,
+            proxy_url:      options.proxy_url,
+            proxy_username: options.proxy_username,
+            proxy_password: options.proxy_password,
+            user_agent:     userAgent,
+          })
+          stubAccountId = stub.id
+          createAndSaveFingerprint(stub.id)
+          updateAccountStatus(stub.id, 'needs_login')
+
+          // 動作確認済みのコードを使用
+          await viewManager.startInstagramLogin(stub.id)
+
+          // ログイン後 Cookie から実ユーザー名を取得
+          const sess = session.fromPartition(`persist:account-${stub.id}`)
+          const cookies = await sess.cookies.get({})
+          const hasSessionId = cookies.some(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))
+          if (!hasSessionId) {
+            // ログインが完了せずウィンドウが閉じられた → 仮アカウント削除
+            try { deleteAccount(stub.id) } catch { /* ignore */ }
+            return { success: false, error: 'Instagram ログインが完了しませんでした (sessionid 未取得)' }
+          }
+
+          const { username, displayName } = await fetchProfileFromInstagram(cookies)
+          if (!username || username === 'unknown') {
+            try { deleteAccount(stub.id) } catch { /* ignore */ }
+            return { success: false, error: 'ユーザー名を取得できませんでした' }
+          }
+
+          // 仮ユーザー名 → 実ユーザー名に更新
+          updateAccountUsername(stub.id, username)
+          updateAccountStatus(stub.id, 'active', { display_name: displayName ?? undefined })
+
+          const updated = getAccountById(stub.id)
+          return { success: true, account: updated }
+        } catch (err) {
+          if (stubAccountId !== null) {
+            try { deleteAccount(stubAccountId) } catch { /* ignore */ }
+          }
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('UNIQUE constraint')) {
+            return { success: false, error: 'このアカウントは既に追加されています。' }
+          }
+          return { success: false, error: msg }
+        }
+      }
+
+      // ── 既存フロー (login_site === 'threads' or 未指定) ────────────────
       const tempKey  = `temp-${Date.now()}`
       const sessionDir = path.join(
         app.getPath('userData'),
@@ -42,7 +113,6 @@ export function registerAccountHandlers(): void {
       )
 
       try {
-        const viewManager = getViewManager()
         const { username, displayName } = await viewManager.startLogin(tempKey)
 
         if (!username || username === 'unknown') {
@@ -141,6 +211,82 @@ export function registerAccountHandlers(): void {
         }
         return { success: false, error: msg }
       }
+    }
+  )
+
+  /**
+   * CSVから複数アカウントを一括インポート
+   * 実際のログインは行わず、DB に username/password/proxy 情報のみ登録する。
+   * 後から bulk-login-instagram などで個別ログインする想定。
+   */
+  ipcMain.handle(
+    'accounts:bulk-import',
+    async (
+      _event,
+      rows: Array<{
+        username:    string
+        password:    string | null
+        proxy_host:  string | null
+        proxy_port:  number | null
+        proxy_user:  string | null
+        proxy_pass:  string | null
+        proxy_type?: string | null
+        group_name?: string | null
+      }>
+    ) => {
+      const results = {
+        imported: 0,
+        skipped:  0,
+        errors:   [] as Array<{ username: string; message: string }>,
+        accounts: [] as unknown[],
+      }
+
+      for (const row of rows) {
+        const username = row.username?.trim()
+        if (!username) {
+          results.errors.push({ username: '', message: 'username が空です' })
+          continue
+        }
+
+        let proxyUrl: string | undefined
+        if (row.proxy_host && row.proxy_port) {
+          const type = (row.proxy_type || 'http').toLowerCase()
+          proxyUrl = `${type}://${row.proxy_host}:${row.proxy_port}`
+        }
+
+        const sessionDir = path.join(
+          app.getPath('userData'),
+          'sessions',
+          `account-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        )
+
+        try {
+          const account = createAccount({
+            username,
+            session_dir:    sessionDir,
+            proxy_url:      proxyUrl,
+            proxy_username: row.proxy_user ?? undefined,
+            proxy_password: row.proxy_pass ?? undefined,
+            user_agent:     pickRandomIphoneUA(),
+            ig_password:    row.password ?? undefined,
+          })
+          if (row.group_name) updateAccountGroup(account.id, row.group_name)
+          createAndSaveFingerprint(account.id)
+          updateAccountStatus(account.id, 'needs_login')
+          results.imported++
+          results.accounts.push(account)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('UNIQUE constraint')) {
+            results.skipped++
+            results.errors.push({ username, message: '既に追加済み' })
+          } else {
+            results.errors.push({ username, message: msg })
+          }
+        }
+      }
+
+      return results
     }
   )
 
@@ -387,6 +533,8 @@ export function registerAccountHandlers(): void {
         },
         onStatus,
       )
+      // DB追加前に追加の待機（autoRegisterAccount 内の 30s に加えて）
+      onStatus({ type: 'saving', detail: 'DB に保存中...' })
       const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
       const account = createAccount({
         username,
@@ -396,16 +544,234 @@ export function registerAccountHandlers(): void {
         proxy_username: data.proxy_username ?? undefined,
         proxy_password: data.proxy_password ?? undefined,
         user_agent: pickRandomIphoneUA(),
+        ig_password: data.password,
       })
       createAndSaveFingerprint(account.id)
-      updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
+      // status は needs_login で登録（すぐに active にするとロックリスクがある）
+      updateAccountStatus(account.id, 'needs_login', { display_name: displayName ?? undefined })
       await getViewManager().migrateLoginSession(tempKey, account.id)
       onStatus({ type: 'completed' })
-      return { success: true, account: { ...account, status: 'active' } }
+      return { success: true, account: { ...account, status: 'needs_login' } }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       onStatus({ type: 'error', detail: msg })
       return { success: false, error: msg }
+    }
+  })
+
+  /**
+   * Cookie ログインインポート。
+   * フォーマット: username|password|token|[cookiesJSON]|email
+   * Cookie を Electron パーティションに注入してアカウントを作成する。
+   */
+  ipcMain.handle('accounts:import-cookie-login', async (
+    _event,
+    rows: Array<{
+      username:  string
+      password:  string
+      token:     string
+      cookies:   unknown[]
+      email:     string
+      group_name?: string | null
+    }>,
+    options?: {
+      proxyMode?:      'auto' | 'manual' | 'none'
+      proxyStartPort?: number
+    }
+  ) => {
+    console.log(`[import-cookie-login] START rows=${rows?.length ?? 'undefined'}`)
+    if (!rows || !Array.isArray(rows)) {
+      console.error(`[import-cookie-login] rows is not array:`, typeof rows, rows)
+      return { imported: 0, skipped: 0, errors: [{ username: '', message: 'rows が不正' }] }
+    }
+
+    // ── ISP Dedicated プロキシ自動割り当て準備 ────────────────────────────
+    // 既存アカウントから isp.decodo.com のプロキシ情報を収集
+    const existingAccounts = getAllAccounts()
+    const decodoAccounts = existingAccounts.filter(a =>
+      a.proxy_url && a.proxy_url.includes('decodo')
+    )
+
+    // プロキシ認証情報を既存垢から取得（最初に見つかったもの）
+    let proxyType = 'http'
+    let proxyHost = ''
+    let proxyUsername: string | null = null
+    let proxyPassword: string | null = null
+    if (decodoAccounts.length > 0) {
+      const ref = decodoAccounts[0]
+      try {
+        const url = new URL(ref.proxy_url!)
+        proxyType = url.protocol.replace(':', '')
+        proxyHost = url.hostname
+      } catch { /* ignore */ }
+      proxyUsername = ref.proxy_username
+      proxyPassword = ref.proxy_password
+    }
+
+    // ポートごとの使用垢数を集計
+    const portCountMap = new Map<number, number>()
+    let minPort = Infinity, maxPort = -Infinity
+    for (const a of decodoAccounts) {
+      try {
+        const url = new URL(a.proxy_url!)
+        const p = parseInt(url.port, 10)
+        if (!isNaN(p)) {
+          portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
+          if (p < minPort) minPort = p
+          if (p > maxPort) maxPort = p
+        }
+      } catch { /* ignore */ }
+    }
+
+    // 設定されたポート範囲で上書き（設定がなければ既存アカウントから自動算出）
+    const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
+    const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
+    if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = cfgStart
+    if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = cfgEnd
+
+    // 使用垢数が少ない順にポートをソート（同数はランダム）
+    // 未使用ポート（範囲内で使われていないポート）も count=0 として含める
+    const allPorts: Array<{ port: number; count: number }> = []
+    if (proxyHost && minPort <= maxPort) {
+      for (let p = minPort; p <= maxPort; p++) {
+        allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
+      }
+      allPorts.sort((a, b) => {
+        if (a.count !== b.count) return a.count - b.count
+        return Math.random() - 0.5  // 同数はランダム
+      })
+    }
+    const proxyMode = options?.proxyMode ?? 'auto'
+    console.log(`[import-cookie-login] proxyMode=${proxyMode} host=${proxyHost || 'NONE'} type=${proxyType} ports=${allPorts.length} user=${proxyUsername ?? 'NONE'}`)
+    if (proxyMode === 'auto' && allPorts.length > 0) {
+      console.log(`[import-cookie-login] top 5 least-used ports: ${allPorts.slice(0, 5).map(p => `${p.port}(${p.count}垢)`).join(', ')}`)
+    }
+    if (proxyMode === 'manual') {
+      console.log(`[import-cookie-login] manual start port: ${options?.proxyStartPort}`)
+    }
+
+    const results = {
+      imported: 0,
+      skipped:  0,
+      errors:   [] as Array<{ username: string; message: string }>,
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      console.log(`[import-cookie-login] row[${i}] username=${row.username} password=${row.password?.slice(0, 4)}... cookies.length=${row.cookies?.length ?? 'N/A'} email=${row.email}`)
+      const username = row.username?.trim()
+      if (!username) {
+        console.log(`[import-cookie-login] row[${i}] SKIP: username empty`)
+        results.errors.push({ username: '', message: 'username が空' })
+        continue
+      }
+
+      // プロキシ割り当て
+      let assignedProxyUrl: string | undefined
+      if (proxyMode === 'auto' && proxyHost && allPorts.length > 0) {
+        const portEntry = allPorts[i % allPorts.length]
+        assignedProxyUrl = `${proxyType}://${proxyHost}:${portEntry.port}`
+        console.log(`[import-cookie-login] row[${i}] auto proxy=${assignedProxyUrl} (was ${portEntry.count}垢)`)
+      } else if (proxyMode === 'manual' && proxyHost && options?.proxyStartPort) {
+        const port = options.proxyStartPort + i
+        assignedProxyUrl = `${proxyType}://${proxyHost}:${port}`
+        console.log(`[import-cookie-login] row[${i}] manual proxy=${assignedProxyUrl}`)
+      }
+      // proxyMode === 'none' → assignedProxyUrl は undefined のまま
+
+      const sessionDir = path.join(
+        app.getPath('userData'), 'sessions',
+        `account-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      )
+
+      try {
+        console.log(`[import-cookie-login] row[${i}] creating account...`)
+        const account = createAccount({
+          username,
+          session_dir:    sessionDir,
+          user_agent:     pickRandomIphoneUA(),
+          ig_password:    row.password || undefined,
+          proxy_url:      assignedProxyUrl,
+          proxy_username: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
+          proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
+        })
+        console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
+        if (row.group_name) updateAccountGroup(account.id, row.group_name)
+        createAndSaveFingerprint(account.id)
+
+        // Cookie を永続パーティションに注入
+        const permSess = session.fromPartition(`persist:account-${account.id}`)
+        const rawCookies: RawCookie[] = (row.cookies ?? []).map((c: unknown) => {
+          const o = c as Record<string, unknown>
+          return {
+            name:           String(o.name  ?? ''),
+            value:          String(o.value ?? ''),
+            domain:         (o.domain as string) ?? undefined,
+            path:           (o.path   as string) ?? '/',
+            secure:         o.secure  as boolean | undefined,
+            httpOnly:       o.httpOnly as boolean | undefined,
+            expirationDate: o.expirationDate as number | undefined,
+            expires:        o.expires as number | undefined,
+            sameSite:       o.sameSite as string | undefined,
+          }
+        })
+        console.log(`[import-cookie-login] row[${i}] rawCookies=${rawCookies.length} names=[${rawCookies.map(c => c.name).join(',')}]`)
+
+        const hasSession = await injectCookies(rawCookies, permSess)
+        console.log(`[import-cookie-login] row[${i}] injectCookies hasSession=${hasSession}`)
+
+        // Cookie が実際にパーティションに書き込まれたか読み戻し検証
+        const verify = await permSess.cookies.get({}).catch(() => [])
+        const verifySessionId = verify.find(c => c.name === 'sessionid')
+        const verifyCsrf      = verify.find(c => c.name === 'csrftoken')
+        const verifyDsUser    = verify.find(c => c.name === 'ds_user_id')
+        console.log(`[import-cookie-login] row[${i}] VERIFY: total=${verify.length} sessionid=${verifySessionId ? 'YES val=' + verifySessionId.value.slice(0, 20) + '... domain=' + verifySessionId.domain : 'NO'} csrftoken=${verifyCsrf ? 'YES' : 'NO'} ds_user_id=${verifyDsUser ? verifyDsUser.value : 'NO'}`)
+
+        if (!verifySessionId?.value) {
+          // injectCookies は true を返したが実際にはセットされていない
+          console.error(`[import-cookie-login] row[${i}] ⚠ sessionid NOT persisted! Dumping rawCookies:`)
+          for (const rc of rawCookies) {
+            console.log(`  name=${rc.name} domain=${rc.domain} value=${rc.value?.slice(0, 20)}... secure=${rc.secure} httpOnly=${rc.httpOnly} expiry=${rc.expirationDate ?? rc.expires}`)
+          }
+        }
+
+        updateAccountStatus(account.id, (hasSession && verifySessionId?.value) ? 'active' : 'needs_login')
+
+        results.imported++
+        console.log(`[import-cookie-login] row[${i}] SUCCESS imported=${results.imported}`)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[import-cookie-login] row[${i}] ERROR: ${msg}`)
+        if (msg.includes('UNIQUE constraint')) {
+          results.skipped++
+          results.errors.push({ username, message: '既に追加済み' })
+        } else {
+          results.errors.push({ username, message: msg })
+        }
+      }
+    }
+
+    console.log(`[import-cookie-login] END imported=${results.imported} skipped=${results.skipped} errors=${results.errors.length}`)
+    return results
+  })
+
+  /**
+   * Instagram モバイル API でランダムな日本人女性名に変更する。
+   * その垢の sessionid Cookie・iPhone UA・プロキシを適用。
+   * 成功したら DB の display_name も更新する。
+   */
+  ipcMain.handle('accounts:auto-rename', async (_event, accountId: number) => {
+    try {
+      const acct = getAccountById(accountId)
+      if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+
+      const result = await autoRenameJapaneseFemale(accountId)
+      if (result.success && result.newName) {
+        updateAccountDisplayName(accountId, result.newName)
+      }
+      return result
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
@@ -557,6 +923,10 @@ export function registerAccountHandlers(): void {
       })
       .filter((r): r is { host: string; port: number } => r !== null && !isNaN(r.port))
 
+    // 設定されたポート範囲を取得
+    const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
+    const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
+
     // ホストごとにポート→垢数のマップを構築
     const map = new Map<string, Map<number, number>>()
     for (const { host, port } of rows) {
@@ -571,9 +941,10 @@ export function registerAccountHandlers(): void {
         .map(([port, count]) => ({ port, count }))
 
       const usedPortCount = portEntries.length
-      const minPort = portEntries[0].port
-      const maxPort = portEntries[portEntries.length - 1].port
-      const totalInRange = maxPort - minPort + 1
+      // 設定範囲が有効ならそちらを使用、なければ既存ポートから自動算出
+      const minPort = Number.isFinite(cfgStart) && cfgStart > 0 ? cfgStart : portEntries[0]?.port ?? 0
+      const maxPort = Number.isFinite(cfgEnd)   && cfgEnd   > 0 ? cfgEnd   : portEntries[portEntries.length - 1]?.port ?? 0
+      const totalInRange = maxPort >= minPort ? maxPort - minPort + 1 : 0
       const usedSet = new Set(portEntries.map(e => e.port))
       const unusedPorts: number[] = []
       for (let p = minPort; p <= maxPort; p++) {

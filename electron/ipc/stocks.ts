@@ -9,7 +9,9 @@ import {
   deleteAllStocks,
   deleteAllStocksByGroup,
   updateAllTopics,
+  addTopicToEmptyStocks,
 } from '../db/repositories/post_stocks'
+import { getAllAccounts } from '../db/repositories/accounts'
 import { getSetting, setSetting } from '../db/repositories/settings'
 import { scheduleThread } from '../playwright/threads-client'
 import { ensureViewLoaded } from '../browser-views/view-manager'
@@ -249,5 +251,35 @@ export function registerStockHandlers(): void {
     const filePath = result.filePaths[0]
     const data = Array.from(fs.readFileSync(filePath))
     return { name: path.basename(filePath), data }
+  })
+
+  /**
+   * トピック一括追加（XLSX 列 = 垢、行 = トピック）。
+   * 各垢のトピック未設定ストックにのみ追加する。
+   */
+  ipcMain.handle('stocks:bulk-add-topics', (_e, data: {
+    group_name: string | null
+    columns:    string[][]   // columns[colIdx] = ['topic1', 'topic2', ...]
+  }) => {
+    const groupAccounts = getAllAccounts()
+      .filter(a => (data.group_name === null || data.group_name === '')
+        ? true
+        : a.group_name === data.group_name)
+
+    const results: Array<{ accountId: number; username: string; added: number }> = []
+
+    for (let col = 0; col < data.columns.length; col++) {
+      const acct = groupAccounts[col]
+      if (!acct) break  // 垢数より列が多い場合は無視
+      const topics = data.columns[col].filter(t => t.trim())
+      let added = 0
+      for (const topic of topics) {
+        added += addTopicToEmptyStocks(acct.id, topic.trim())
+      }
+      results.push({ accountId: acct.id, username: acct.username, added })
+    }
+
+    console.log(`[bulk-add-topics] group=${data.group_name} cols=${data.columns.length} results=${JSON.stringify(results)}`)
+    return { success: true, results }
   })
 }

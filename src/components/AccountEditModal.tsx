@@ -92,6 +92,11 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
   const [applyingTopic, setApplyingTopic] = useState(false)
   const [toast, setToast]                 = useState<{ msg: string; ok: boolean } | null>(null)
 
+  // XLSX トピック一括追加
+  const [topicXlsxImporting, setTopicXlsxImporting] = useState(false)
+  const [topicXlsxResult,    setTopicXlsxResult]    = useState<Array<{ username: string; added: number }> | null>(null)
+  const [topicXlsxGroup,     setTopicXlsxGroup]     = useState<string>(groupName ?? '__all__')
+
   // 予約投稿モーダル state
   const [scheduleTarget, setScheduleTarget] = useState<PostStock | null>(null)
   const [selectedHours, setSelectedHours]   = useState<number | null>(null)
@@ -249,6 +254,48 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
       showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
     } finally {
       setApplyingTopic(false)
+    }
+  }
+
+  const handleTopicXlsxImport = async () => {
+    const fileResult = await api.dialog.openFile()
+    if (!fileResult || !fileResult.name.endsWith('.xlsx')) {
+      if (fileResult) showToast('xlsx ファイルを選択してください', false)
+      return
+    }
+    setTopicXlsxImporting(true)
+    setTopicXlsxResult(null)
+    try {
+      const buf = new Uint8Array(fileResult.data)
+      const wb = XLSX.read(buf, { type: 'array' })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const matrix = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][]
+
+      if (matrix.length === 0) { showToast('空のXLSXです', false); return }
+
+      // 列ごとにトピック配列を構築 (A列=0, B列=1, ...)
+      const numCols = Math.max(...matrix.map(r => r.length))
+      const columns: string[][] = []
+      for (let col = 0; col < numCols; col++) {
+        columns.push(matrix.map(row => String(row[col] ?? '').trim()).filter(Boolean))
+      }
+
+      const targetGroup = topicXlsxGroup === '__all__' ? null : topicXlsxGroup
+      const res = await api.stocks.bulkAddTopics({ group_name: targetGroup, columns })
+      if (res.success && res.results) {
+        setTopicXlsxResult(res.results)
+        const totalAdded = res.results.reduce((s, r) => s + r.added, 0)
+        showToast(`${totalAdded}件のトピックを追加しました（${res.results.length}垢）`, true)
+        // ストック再取得
+        const listRes = await api.stocks.list(accountId)
+        if (listRes.success) setStocks(listRes.data)
+      } else {
+        showToast('トピック追加に失敗しました', false)
+      }
+    } catch (err) {
+      showToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    } finally {
+      setTopicXlsxImporting(false)
     }
   }
 
@@ -425,6 +472,43 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
         >
           トピックをクリア
         </button>
+      </div>
+
+      {/* トピック XLSX 一括追加 */}
+      <div className="border border-zinc-700 rounded-xl p-3 space-y-2 bg-zinc-800/40">
+        <p className="text-zinc-300 text-[11px] font-semibold">トピック XLSX 一括追加</p>
+        <p className="text-zinc-500 text-[10px] leading-tight">
+          A列→1垢目、B列→2垢目… 各列の行がトピック。トピック未設定のストックにのみ追加。
+        </p>
+        <div className="flex items-center gap-2">
+          <select
+            value={topicXlsxGroup}
+            onChange={e => setTopicXlsxGroup(e.target.value)}
+            className="flex-1 bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500"
+          >
+            <option value="__all__">全アカウント（sort順）</option>
+            {csvGroupAccounts.length > 0 && groupName && (
+              <option value={groupName}>{groupName}（{csvGroupAccounts.length}垢）</option>
+            )}
+          </select>
+          <button
+            onClick={handleTopicXlsxImport}
+            disabled={topicXlsxImporting}
+            className="px-3 py-1.5 bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >
+            {topicXlsxImporting ? '処理中...' : 'XLSXを選択'}
+          </button>
+        </div>
+        {topicXlsxResult && (
+          <div className="text-[10px] text-zinc-400 bg-zinc-900/60 rounded-lg px-2 py-1.5 max-h-24 overflow-y-auto space-y-0.5">
+            {topicXlsxResult.map((r, i) => (
+              <div key={i}>
+                <span className="text-zinc-500 font-mono">{String.fromCharCode(65 + i)}列</span>
+                {' '}@{r.username}: <span className={r.added > 0 ? 'text-emerald-400' : 'text-zinc-600'}>{r.added}件追加</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Stock list */}
@@ -941,6 +1025,29 @@ export function AccountEditModal({
     setSetupStep('step3_threads')
   }
 
+  // ── 名前を自動変更（Instagram モバイル API） ────────────────────────────
+  const [autoRenaming,     setAutoRenaming]     = useState(false)
+  const [autoRenameResult, setAutoRenameResult] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  const handleAutoRename = async () => {
+    setAutoRenaming(true)
+    setAutoRenameResult(null)
+    try {
+      const res = await api.accounts.autoRename(account.id)
+      if (res.success && res.newName) {
+        setAutoRenameResult({ ok: true, msg: `✓ 「${res.newName}」に変更しました` })
+        setDisplayName(res.newName)
+      } else {
+        setAutoRenameResult({ ok: false, msg: `✗ 失敗: ${res.error ?? `status=${res.status ?? '不明'}`}` })
+      }
+    } catch (e) {
+      setAutoRenameResult({ ok: false, msg: `✗ ${e instanceof Error ? e.message : String(e)}` })
+    } finally {
+      setAutoRenaming(false)
+      setTimeout(() => setAutoRenameResult(null), 8000)
+    }
+  }
+
   const handleSaveProxy = async () => {
     setSavingProxy(true)
     try {
@@ -1150,6 +1257,45 @@ export function AccountEditModal({
                 >
                   {savingDisplayName ? '保存中...' : '保存'}
                 </button>
+              </div>
+
+              {/* 名前を自動変更 */}
+              <div className="border-t border-zinc-800 pt-4">
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <div>
+                    <label className="text-zinc-400 text-xs font-medium block">名前を自動変更</label>
+                    <p className="text-zinc-600 text-xs mt-0.5">
+                      Instagramモバイル API でランダムな日本人女性名に変更します
+                      <br/>
+                      （sessionid・iPhone UA・プロキシ適用）
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleAutoRename}
+                    disabled={autoRenaming}
+                    className="shrink-0 px-3 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5"
+                  >
+                    {autoRenaming && (
+                      <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    )}
+                    {autoRenaming ? '変更中...' : '🎲 自動変更'}
+                  </button>
+                </div>
+                {autoRenameResult && (
+                  <div className={`mt-2 px-3 py-2 rounded-lg text-xs font-medium ${
+                    autoRenameResult.ok
+                      ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
+                      : 'bg-red-500/10 border border-red-500/30 text-red-400'
+                  }`}>
+                    {autoRenameResult.msg}
+                  </div>
+                )}
+                <details className="mt-2 text-zinc-600 text-[10px]">
+                  <summary className="cursor-pointer hover:text-zinc-400">候補一覧 (15名)</summary>
+                  <p className="mt-1 leading-relaxed">
+                    ゆき・はな・さくら・あおい・ひより・なな・りん・みお・ことは・ゆな・かな・れな・もも・あかり・いちか
+                  </p>
+                </details>
               </div>
 
               {/* 操作速度設定 */}

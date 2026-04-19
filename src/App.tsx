@@ -4,6 +4,7 @@ import { ToolPanel } from './components/ToolPanel'
 import { BrowserPage } from './pages/BrowserPage'
 import { AddAccountModal } from './components/AddAccountModal'
 import { AccountEditModal } from './components/AccountEditModal'
+import { SetupWizardOverlay } from './components/SetupWizardOverlay'
 import { useAccounts } from './hooks/useAccounts'
 import { Account, api } from './lib/ipc'
 
@@ -91,8 +92,33 @@ export default function App() {
   const [showAddModal, setShowAddModal]       = useState(false)
   const [adding, setAdding]                   = useState(false)
   const [editTarget, setEditTarget]           = useState<Account | null>(null)
+  // 「既存IGから作成」ウィザード: アクティブ時にプロキシを保持。null は「ウィザード非表示」
+  const [setupWizard, setSetupWizard]         = useState<
+    { proxy: { proxy_url: string; proxy_username: string; proxy_password: string } | null } | null
+  >(null)
 
   const [authState, setAuthState] = useState<AuthState>('loading')
+
+  // ── 強制アップデート ────────────────────────────────────────────────────
+  const [updateStatus, setUpdateStatus] = useState<{
+    type: 'downloading' | 'installing' | 'error'
+    version?: string
+    percent?: number
+    message?: string
+  } | null>(null)
+
+  useEffect(() => {
+    const unsub = api.on('updater:status', (data) => {
+      const d = data as { type: string; version?: string; percent?: number; message?: string }
+      if (d.type === 'error') {
+        // エラー時はローディングを解除
+        setUpdateStatus(null)
+      } else {
+        setUpdateStatus(d as typeof updateStatus)
+      }
+    })
+    return unsub
+  }, [])
 
   // Check auth on mount
   useEffect(() => {
@@ -121,9 +147,16 @@ export default function App() {
 
   const handleAddConfirm = async (
     proxy: { proxy_url: string; proxy_username: string; proxy_password: string } | null,
-    mode: 'login' | 'register'
+    mode: 'login' | 'register' | 'setup'
   ) => {
     setShowAddModal(false)
+
+    // 「既存Instagramから作成」: ウィザードオーバーレイへ
+    if (mode === 'setup') {
+      setSetupWizard({ proxy })
+      return
+    }
+
     setAdding(true)
     const result = mode === 'register'
       ? await registerAccount(proxy ?? undefined)
@@ -137,7 +170,39 @@ export default function App() {
   }
 
   // モーダルが開いている間は WebContentsView を非表示
+  // ※ setup ウィザードは Step 2/3 でブラウザ操作が必要なのでブラウザビューは表示する
   const browserVisible = activeTool === null && editTarget === null && !showAddModal
+
+  // 強制アップデート画面（ダウンロード中 or インストール中）
+  if (updateStatus) {
+    return (
+      <div className="flex h-screen bg-slate-950 flex-col items-center justify-center gap-6">
+        <div className="text-center space-y-3">
+          <div className="w-12 h-12 mx-auto border-4 border-zinc-700 border-t-blue-500 rounded-full animate-spin" />
+          <h2 className="text-white text-lg font-bold">
+            {updateStatus.type === 'installing' ? 'インストール中...' : 'アップデート中...'}
+          </h2>
+          {updateStatus.version && (
+            <p className="text-zinc-400 text-sm">バージョン {updateStatus.version}</p>
+          )}
+          {updateStatus.type === 'downloading' && updateStatus.percent != null && (
+            <>
+              <div className="w-64 h-2 bg-zinc-800 rounded-full overflow-hidden mx-auto">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: `${updateStatus.percent}%` }}
+                />
+              </div>
+              <p className="text-zinc-500 text-xs">{updateStatus.percent}%</p>
+            </>
+          )}
+          {updateStatus.type === 'installing' && (
+            <p className="text-zinc-500 text-xs">まもなく再起動します...</p>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   if (authState === 'loading' || loading) {
     return (
@@ -215,6 +280,29 @@ export default function App() {
             api.browserView.openCompose(accountId, content, images, topic ?? undefined)
               .then((res) => { if (!res.success) alert(`投稿画面を開けませんでした: ${res.error}`) })
               .catch((err) => alert(`エラー: ${err}`))
+          }}
+        />
+      )}
+
+      {/* 既存IGから作成 ウィザード */}
+      {setupWizard && (
+        <SetupWizardOverlay
+          proxy={setupWizard.proxy}
+          onAccountReady={async (newAccountId) => {
+            // ブラウザビューを表示するため activeAccountId を設定（サイドバーにも即時反映）
+            await refresh()
+            setActiveAccountId(newAccountId)
+            setActiveTool(null)
+          }}
+          onComplete={async (newAccountId) => {
+            await refresh()
+            setActiveAccountId(newAccountId)
+            setSetupWizard(null)
+          }}
+          onCancel={async () => {
+            // ウィザードを閉じてもアカウントは保持。サイドバー反映のため refresh
+            await refresh()
+            setSetupWizard(null)
           }}
         />
       )}
