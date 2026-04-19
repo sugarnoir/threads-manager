@@ -7,6 +7,7 @@ import {
   getMacAddress,
   getStoredMac,
 } from '../lib/supabase-auth'
+import { getSetting } from '../db/repositories/settings'
 
 function isProd(): boolean {
   return app.isPackaged
@@ -35,15 +36,18 @@ export function registerAuthHandlers(): void {
       const currentMac = getMacAddress()
       if (storedMac && storedMac === currentMac) {
         console.log('[License] offline fallback: mac matches stored')
-        return { required: true, authenticated: true }
+        // オフライン時はキャッシュ済みの maxAccounts を返す
+        const cachedMax = parseInt(getSetting('license_max_accounts') ?? '', 10)
+        return {
+          required: true, authenticated: true,
+          maxAccounts: Number.isFinite(cachedMax) && cachedMax > 0 ? cachedMax : null,
+        }
       }
-      // MACが未キャッシュ or 不一致ならオフラインでも拒否
       console.warn('[License] offline fallback: mac mismatch or no stored mac')
       clearStoredKey()
       return { required: true, authenticated: false }
     }
 
-    // mac_mismatch は即座にキーを削除して再入力を要求
     if (result.reason === 'mac_mismatch') {
       clearStoredKey()
       return {
@@ -53,13 +57,13 @@ export function registerAuthHandlers(): void {
       }
     }
 
-    // 無効・失効したキーはキャッシュから削除して再入力を求める
     if (!result.valid) {
       clearStoredKey()
       return { required: true, authenticated: false }
     }
 
-    return { required: true, authenticated: true }
+    console.log(`[auth:check] maxAccounts=${result.maxAccounts}`)
+    return { required: true, authenticated: true, maxAccounts: result.maxAccounts ?? null }
   })
 
   // ── キー手動入力での認証 ──────────────────────────────────────────────────────
@@ -78,7 +82,7 @@ export function registerAuthHandlers(): void {
     }
 
     setStoredKey(key.trim())
-    return { ok: true }
+    return { ok: true, maxAccounts: result.maxAccounts ?? null }
   })
 
   // ── ログアウト ────────────────────────────────────────────────────────────────

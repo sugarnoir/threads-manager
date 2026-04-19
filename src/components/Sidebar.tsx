@@ -16,6 +16,7 @@ interface Props {
   onUpdateGroup: (id: number, group: string | null) => void
   onReorderAccounts: (updates: { id: number; sort_order: number; group_name: string | null }[]) => void
   onOpenTool: (tool: ToolType) => void
+  maxAccounts?: number | null
 }
 
 export type ToolType = 'compose' | 'scheduler' | 'engagement' | 'history' | 'auto-register' | 'settings' | 'status' | 'research' | 'templates' | 'proxy' | 'image-list'
@@ -109,18 +110,6 @@ function IconCheck() {
 
 const BOTTOM_TOOLS: { id: ToolType; label: string; icon: JSX.Element }[] = [
   {
-    id: 'auto-register',
-    label: 'secret',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <line x1="19" y1="8" x2="19" y2="14" />
-        <line x1="22" y1="11" x2="16" y2="11" />
-      </svg>
-    ),
-  },
-  {
     id: 'scheduler',
     label: 'secret',
     icon: (
@@ -165,20 +154,14 @@ export function Sidebar({
   onUpdateGroup,
   onReorderAccounts,
   onOpenTool,
+  maxAccounts: maxAccountsProp,
 }: Props) {
   const [showNumbers, setShowNumbers] = useState(
     () => localStorage.getItem('showAccountNumbers') === 'true'
   )
 
-  // ── 垢数制限チェック ──────────────────────────────────────────────────
-  const [maxAccounts, setMaxAccounts] = useState<number | null>(null)
-  useEffect(() => {
-    api.settings.getAll().then(s => {
-      const v = parseInt(s['license_max_accounts'] ?? '', 10)
-      setMaxAccounts(Number.isFinite(v) && v > 0 ? v : null)
-    })
-  }, [accounts.length])  // アカウント数が変わったら再取得
-  const accountLimitReached = maxAccounts !== null && accounts.length >= maxAccounts
+  // ── 垢数制限チェック（auth:check のレスポンスから直接取得）──────────────
+  const accountLimitReached = maxAccountsProp != null && maxAccountsProp > 0 && accounts.length >= maxAccountsProp
 
   useEffect(() => {
     const handler = () => setShowNumbers(localStorage.getItem('showAccountNumbers') === 'true')
@@ -1612,7 +1595,7 @@ export function Sidebar({
         <button
           onClick={onAddAccount}
           disabled={adding || accountLimitReached}
-          title={accountLimitReached ? `アカウント数が上限（${maxAccounts}件）に達しました` : undefined}
+          title={accountLimitReached ? `アカウント数が上限（${maxAccountsProp}件）に達しました` : undefined}
           style={{ background: (adding || accountLimitReached) ? undefined : 'linear-gradient(135deg, #7c3aed, #4f46e5)' }}
           className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl disabled:opacity-50 disabled:bg-zinc-700 text-white text-[13px] font-semibold transition-all hover:brightness-110 active:brightness-90"
         >
@@ -1627,7 +1610,7 @@ export function Sidebar({
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
-              上限 {maxAccounts}垢
+              上限 {maxAccountsProp}垢
             </>
           ) : (
             <>

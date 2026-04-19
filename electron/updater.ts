@@ -9,6 +9,14 @@ export function initAutoUpdater(mainWindow: BrowserWindow): void {
   // 強制アップデート: 自動ダウンロード + 終了時自動インストール
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.allowPrerelease = false
+
+  // GitHub Releases の URL を明示（electron-builder.yml の publish と一致させる）
+  autoUpdater.setFeedURL({
+    provider: 'github',
+    owner:    'sugarnoir',
+    repo:     'threads-manager',
+  })
 
   // ── イベントハンドラー ────────────────────────────────────────────────────
 

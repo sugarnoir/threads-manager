@@ -1,6 +1,6 @@
 {
   "name": "threads-manager",
-  "version": "1.1.1",
+  "version": "1.1.3",
   "description": "Threads multi-account manager for Mac",
   "main": "dist-electron/main.js",
   "scripts": {

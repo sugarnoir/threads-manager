@@ -98,6 +98,7 @@ export default function App() {
   >(null)
 
   const [authState, setAuthState] = useState<AuthState>('loading')
+  const [licenseMaxAccounts, setLicenseMaxAccounts] = useState<number | null>(null)
 
   // ── 強制アップデート ────────────────────────────────────────────────────
   const [updateStatus, setUpdateStatus] = useState<{
@@ -122,9 +123,10 @@ export default function App() {
 
   // Check auth on mount
   useEffect(() => {
-    api.auth.check().then((result) => {
+    api.auth.check().then((result: { required: boolean; authenticated: boolean; maxAccounts?: number | null }) => {
       if (!result.required || result.authenticated) {
         setAuthState('ok')
+        if (result.maxAccounts != null) setLicenseMaxAccounts(result.maxAccounts)
       } else {
         setAuthState('required')
       }
@@ -223,6 +225,7 @@ export default function App() {
         activeAccountId={activeAccountId}
         activeTool={activeTool}
         adding={adding}
+        maxAccounts={licenseMaxAccounts}
         onOpenAccount={(id) => { setActiveAccountId(id); setActiveTool(null) }}
         onEditAccount={setEditTarget}
         onAddAccount={() => setShowAddModal(true)}
