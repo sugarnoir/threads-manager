@@ -250,7 +250,7 @@ export function registerStockHandlers(): void {
     if (result.canceled || result.filePaths.length === 0) return null
     const filePath = result.filePaths[0]
     const data = Array.from(fs.readFileSync(filePath))
-    return { name: path.basename(filePath), data }
+    return { name: path.basename(filePath), path: filePath, data }
   })
 
   /**

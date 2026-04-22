@@ -1584,6 +1584,102 @@ export class ViewManager {
     })
   }
 
+  /** X (Twitter) のログインページを既存アカウントのセッションで開き、auth_token を取得 */
+  async startXLogin(accountId: number): Promise<void> {
+    const partition = `persist:account-${accountId}`
+    const acct = getAccountById(accountId)
+    const mainBounds = this.mainWindow.getBounds()
+    const popupW = 820
+    const popupH = 640
+    const x = Math.round(mainBounds.x + (mainBounds.width  - popupW) / 2)
+    const y = Math.round(mainBounds.y + (mainBounds.height - popupH) / 2)
+
+    const popupSession = session.fromPartition(partition)
+
+    if (acct?.proxy_url) {
+      let proxyRules = acct.proxy_url.trim()
+      if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyRules)) proxyRules = 'http://' + proxyRules
+      await popupSession.setProxy({ proxyRules }).catch(() => {})
+    }
+
+    const ua = acct?.user_agent ?? loadOrCreateFingerprint(accountId).userAgent
+    popupSession.setUserAgent(ua)
+
+    const popup = new BrowserWindow({
+      width: popupW, height: popupH, x, y,
+      parent: this.mainWindow,
+      modal: false,
+      title: 'X にログイン',
+      titleBarStyle: 'default',
+      webPreferences: { session: popupSession, nodeIntegration: false, contextIsolation: true },
+    })
+
+    if (acct?.proxy_username) {
+      popup.webContents.on('login', (event, _details, authInfo, callback) => {
+        if (authInfo.isProxy) {
+          event.preventDefault()
+          callback(acct.proxy_username!, acct.proxy_password ?? '')
+        }
+      })
+    }
+
+    popup.loadURL('https://twitter.com/i/flow/login')
+    popup.focus()
+
+    return new Promise((resolve, reject) => {
+      let done = false
+      let pollInterval: ReturnType<typeof setInterval> | null = null
+
+      const cleanup = () => {
+        clearTimeout(timer)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+        try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
+      }
+
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        cleanup()
+        reject(new Error('X ログインタイムアウト (5分)'))
+      }, 5 * 60 * 1000)
+
+      popup.on('closed', () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+        resolve()
+      })
+
+      const checkCookies = async () => {
+        if (done) return
+        try {
+          const allCookies = await popupSession.cookies.get({})
+          if (done) return
+          const hasAuth = allCookies.some(
+            c => (c.name === 'auth_token' || c.name === 'ct0') &&
+                 c.value.length > 0 &&
+                 (c.domain?.includes('twitter.com') || c.domain?.includes('x.com'))
+          )
+          if (!hasAuth) return
+          done = true
+          clearTimeout(timer)
+          if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+          console.log(`[XLogin] account=${accountId} auth_token obtained — waiting 5s`)
+          await new Promise(r => setTimeout(r, 5000))
+          try { if (!popup.isDestroyed()) popup.close() } catch { /* ignore */ }
+          resolve()
+        } catch { return }
+      }
+
+      pollInterval = setInterval(checkCookies, 1000)
+      try {
+        popup.webContents.on('did-navigate',         () => checkCookies())
+        popup.webContents.on('did-navigate-in-page', () => checkCookies())
+      } catch { /* webContents already destroyed */ }
+    })
+  }
+
   async migrateLoginSession(tempKey: string, accountId: number): Promise<void> {
     const tempSession = session.fromPartition(`persist:login-${tempKey}`)
     const permSession = session.fromPartition(`persist:account-${accountId}`)
@@ -1651,12 +1747,23 @@ export class ViewManager {
 
       // ── URL 状態による分岐 ────────────────────────────────────────────────
       // 1) URL が about:blank (ページ未ロード): loaded フラグをリセットして _bgInitView を再実行
-      // 2) threads.com 以外のURLで停止 (ロード失敗等): threads.com をリロード
+      // 2) 有効なサイトにいない場合: プラットフォームのホームにリロード
       // 3) 正常ロード済み or ロード中: nudgeRepaint で GPU 再描画を強制
       const currentUrl = existing.view.webContents.getURL()
       const isBlank     = !currentUrl || currentUrl === 'about:blank'
       const isLoading   = existing.view.webContents.isLoading()
-      const isOnThreads = currentUrl?.includes('threads.com') && !currentUrl.includes('/login')
+      // アカウントの platform に応じて「有効なサイト」とホーム URL を判定
+      const acctPlatform = getAccountById(accountId)?.platform ?? 'threads'
+      const platformHomeUrl =
+        acctPlatform === 'x'         ? 'https://x.com' :
+        acctPlatform === 'instagram' ? 'https://www.instagram.com' :
+                                       THREADS_URL
+      const isOnValidSite =
+        acctPlatform === 'x'
+          ? (currentUrl?.includes('x.com') || currentUrl?.includes('twitter.com'))
+          : acctPlatform === 'instagram'
+          ? currentUrl?.includes('instagram.com')
+          : (currentUrl?.includes('threads.com') || currentUrl?.includes('threads.net') || currentUrl?.includes('instagram.com'))
 
       if (isBlank && !isLoading) {
         console.log(`[showView] account=${accountId} blank page — re-queuing _bgInitView`)
@@ -1664,9 +1771,9 @@ export class ViewManager {
         this.showQueue = this.showQueue
           .then(() => this._bgInitView(accountId))
           .catch(() => {})
-      } else if (!isBlank && !isOnThreads && !isLoading) {
-        console.log(`[showView] account=${accountId} not on threads (url="${currentUrl}") — reloading`)
-        existing.view.webContents.loadURL(THREADS_URL)
+      } else if (!isBlank && !isOnValidSite && !isLoading) {
+        console.log(`[showView] account=${accountId} not on valid site (url="${currentUrl}") — loading ${platformHomeUrl}`)
+        existing.view.webContents.loadURL(platformHomeUrl)
       } else {
         // ロード中 or 正常表示中: GPU コンポジターの再描画を強制
         // ロード中でも nudge することでロード完了後の黒画面を予防する
@@ -1729,11 +1836,18 @@ export class ViewManager {
     let retryCount = 0
     let loadSucceeded = false
 
+    // platform に応じたホーム URL
+    const acctForUrl = getAccountById(accountId)
+    const homeUrl =
+      acctForUrl?.platform === 'x'         ? 'https://x.com' :
+      acctForUrl?.platform === 'instagram' ? 'https://www.instagram.com' :
+                                             THREADS_URL
+
     const attemptLoad = () => {
       const e = this.views.get(accountId)
       if (!e || e.view.webContents.isDestroyed()) return
-      console.log(`[_bgInitView] loadURL attempt=${retryCount} account=${accountId}`)
-      e.view.webContents.loadURL(THREADS_URL)
+      console.log(`[_bgInitView] loadURL attempt=${retryCount} account=${accountId} url=${homeUrl}`)
+      e.view.webContents.loadURL(homeUrl)
     }
 
     // dom-ready / did-finish-load に成功フラグを立てて nudge する（一度だけ）
@@ -1953,9 +2067,23 @@ export class ViewManager {
 
   navigate(accountId: number, url: string): void {
     const entry = this.views.get(accountId)
-    if (entry && !entry.view.webContents.isDestroyed()) {
-      entry.view.webContents.loadURL(url)
+    if (!entry || entry.view.webContents.isDestroyed()) return
+
+    // Instagram URL の場合は iPhone UA に切り替えてモバイル表示にする
+    if (url.includes('instagram.com')) {
+      const acct = getAccountById(accountId)
+      const mobileUa = acct?.user_agent ?? pickRandomIphoneUA()
+      const sess = entry.view.webContents.session
+      sess.setUserAgent(mobileUa)
+      console.log(`[navigate] account=${accountId} → Instagram mobile UA`)
+    } else if (url.includes('threads.com') || url.includes('threads.net') || url.includes('x.com') || url.includes('twitter.com')) {
+      // Threads/X に戻る場合はフィンガープリント UA に戻す
+      const fp = loadOrCreateFingerprint(accountId)
+      const sess = entry.view.webContents.session
+      sess.setUserAgent(fp.userAgent)
     }
+
+    entry.view.webContents.loadURL(url)
   }
 
   goBack(accountId: number): void {

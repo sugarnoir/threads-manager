@@ -203,6 +203,7 @@ export function LicenseAdmin() {
       mac_address:   null,
       device_free:   newDeviceFree,
       max_accounts:  Number.isFinite(maxAcct) && maxAcct! > 0 ? maxAcct : null,
+      app_version:   null,
     })
     if (!result.success) {
       setAddError(result.error ?? '追加に失敗しました')
@@ -386,6 +387,11 @@ export function LicenseAdmin() {
                     {row.max_accounts != null && (
                       <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[9px] font-bold leading-none">
                         {row.max_accounts}垢
+                      </span>
+                    )}
+                    {row.app_version && (
+                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-300 text-[9px] font-mono leading-none">
+                        v{row.app_version}
                       </span>
                     )}
                   </div>

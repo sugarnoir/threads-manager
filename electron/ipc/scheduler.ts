@@ -49,12 +49,14 @@ import {
   hasRepliedToUsername,
   AutoReplyConfig,
 } from '../db/repositories/auto-reply'
-import { getAllAccounts, updateAccountFollowerCount } from '../db/repositories/accounts'
+import { getAllAccounts, updateAccountFollowerCount, updateReplyBanStatus, getAccountById } from '../db/repositories/accounts'
 
 let schedulerInterval: NodeJS.Timeout | null = null
 let schedulerRunning = false
 let followerCountLastUpdated = 0
 const FOLLOWER_COUNT_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6時間
+let replyBanLastChecked = 0
+const REPLY_BAN_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000 // 24時間
 
 async function refreshFollowerCounts(win: BrowserWindow): Promise<void> {
   if (getSetting('follower_count_auto_fetch') !== 'true') return
@@ -502,7 +504,35 @@ export function startScheduler(win: BrowserWindow): void {
         refreshFollowerCounts(win).catch(e => console.error('[followerCount] periodic error:', e))
       }
 
-      // 5. 自動返信
+      // 5. X リプBANチェック（1日1回）
+      if (Date.now() - replyBanLastChecked >= REPLY_BAN_CHECK_INTERVAL_MS) {
+        replyBanLastChecked = Date.now()
+        const xAccts = getAllAccounts().filter(a => a.platform === 'x' && a.status === 'active')
+        for (const xa of xAccts) {
+          try {
+            const sess = (await import('electron')).session.fromPartition(`persist:account-${xa.id}`)
+            const cookies = await sess.cookies.get({}).catch(() => [])
+            const ct0 = cookies.find(c => c.name === 'ct0' && (c.domain?.includes('x.com') || c.domain?.includes('twitter.com')))?.value ?? ''
+            const authToken = cookies.find(c => c.name === 'auth_token')?.value
+            if (!authToken || !ct0) continue
+            const cookieHeader = cookies.filter(c => c.value && (c.domain?.includes('twitter.com') || c.domain?.includes('x.com'))).map(c => `${c.name}=${c.value}`).join('; ')
+            const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
+            const q = encodeURIComponent(`from:${xa.username} filter:replies`)
+            const resp = await sess.fetch(`https://x.com/i/api/2/search/adaptive.json?q=${q}&count=5&query_source=typed_query&pc=1`, {
+              headers: { 'Authorization': `Bearer ${BEARER}`, 'X-Csrf-Token': ct0 },
+            })
+            if (resp.ok) {
+              const data = await resp.json() as { globalObjects?: { tweets?: Record<string, unknown> } }
+              const banned = Object.keys(data?.globalObjects?.tweets ?? {}).length === 0
+              updateReplyBanStatus(xa.id, banned ? 'banned' : 'ok', new Date().toISOString())
+              if (banned) console.warn(`[scheduler] reply ban detected: @${xa.username}`)
+            }
+          } catch (e) { console.error(`[scheduler] reply ban check error account=${xa.id}:`, e) }
+          await new Promise(r => setTimeout(r, 3000)) // レート制限対策
+        }
+      }
+
+      // 6. 自動返信
       const replyNow = new Date()
       const replyConfigs = getAllEnabledAutoReplyConfigs()
       for (const cfg of replyConfigs) {

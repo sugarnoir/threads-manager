@@ -133,12 +133,14 @@ export default function App() {
     }).catch(() => setAuthState('required'))
   }, [])
 
-  // Auto-select first account on initial load
+  // Auto-select first account on initial load only (not after import)
+  const [initialSelectDone, setInitialSelectDone] = useState(false)
   useEffect(() => {
-    if (!loading && accounts.length > 0 && activeAccountId === null) {
+    if (!loading && accounts.length > 0 && activeAccountId === null && !initialSelectDone) {
       setActiveAccountId(accounts[0].id)
+      setInitialSelectDone(true)
     }
-  }, [loading, accounts, activeAccountId])
+  }, [loading, accounts, activeAccountId, initialSelectDone])
 
   // When an account is deleted, clear it if it was active
   const handleDeleteAccount = async (id: number) => {
@@ -149,23 +151,48 @@ export default function App() {
 
   const handleAddConfirm = async (
     proxy: { proxy_url: string; proxy_username: string; proxy_password: string } | null,
-    mode: 'login' | 'register' | 'setup'
+    mode: 'login' | 'instagram' | 'x'
   ) => {
     setShowAddModal(false)
 
-    // 「既存Instagramから作成」: ウィザードオーバーレイへ
-    if (mode === 'setup') {
-      setSetupWizard({ proxy })
+    // Instagram: login_site='instagram' で accounts:add を呼ぶ
+    if (mode === 'instagram') {
+      setAdding(true)
+      const result = await addAccount({
+        ...(proxy ?? {}),
+        login_site: 'instagram',
+      } as Parameters<typeof addAccount>[0])
+      setAdding(false)
+      if (!result.success) {
+        alert(`追加失敗: ${result.error}`)
+      } else if (result.account) {
+        setActiveAccountId(result.account.id)
+      }
       return
     }
 
+    // X: login_site='x' で accounts:add を呼ぶ
+    if (mode === 'x') {
+      setAdding(true)
+      const result = await addAccount({
+        ...(proxy ?? {}),
+        login_site: 'x',
+      } as Parameters<typeof addAccount>[0])
+      setAdding(false)
+      if (!result.success) {
+        alert(`追加失敗: ${result.error}`)
+      } else if (result.account) {
+        setActiveAccountId(result.account.id)
+      }
+      return
+    }
+
+    // ログイン: 従来のThreads login
     setAdding(true)
-    const result = mode === 'register'
-      ? await registerAccount(proxy ?? undefined)
-      : await addAccount(proxy ?? undefined)
+    const result = await addAccount(proxy ?? undefined)
     setAdding(false)
     if (!result.success) {
-      alert(`${mode === 'register' ? '登録' : '追加'}失敗: ${result.error}`)
+      alert(`追加失敗: ${result.error}`)
     } else if (result.account) {
       setActiveAccountId(result.account.id)
     }
@@ -259,6 +286,23 @@ export default function App() {
       {showAddModal && (
         <AddAccountModal
           onConfirm={handleAddConfirm}
+          onXTokenLogin={async (authToken, proxy) => {
+            setShowAddModal(false)
+            setAdding(true)
+            const result = await api.accounts.xTokenLogin({
+              auth_token:     authToken,
+              proxy_url:      proxy?.proxy_url,
+              proxy_username: proxy?.proxy_username,
+              proxy_password: proxy?.proxy_password,
+            })
+            setAdding(false)
+            if (!result.success) {
+              alert(`X トークンログイン失敗: ${result.error}`)
+            } else {
+              await refresh()
+              if (result.account) setActiveAccountId(result.account.id)
+            }
+          }}
           onCancel={() => setShowAddModal(false)}
         />
       )}

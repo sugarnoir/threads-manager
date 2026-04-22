@@ -28,7 +28,8 @@ import fs from 'fs'
 const THREADS_URL  = 'https://www.threads.com'
 const IG_APP_ID    = '238260118697367'
 const TOKEN_TTL_MS = 25 * 60 * 1000
-const BROWSER_UA   = 'Instagram 279.0.0.21.117 (iPhone14,3; iOS 16_0; ja_JP; ja-JP; scale=3.00; 1284x2778; 463060794)'
+// Instagram iPhone 公式アプリ UA (2026年4月時点の最新)
+const BROWSER_UA   = 'Instagram 355.0.0.24.108 (iPhone16,2; iOS 18_4; ja_JP; ja; scale=3.00; 1320x2868; 620931905)'
 
 const CREATE_TEXT_DOC_IDS = [
   '7783822248314888',
@@ -785,7 +786,8 @@ async function graphqlPost(
 
 const IG_MOBILE_URL    = 'https://i.instagram.com'
 const IG_MOBILE_APP_ID = '238260118697367'  // Threads app ID (text_app)
-const IG_MOBILE_UA     = 'Barcelona 289.0.0.77.109 Android (33/13; 440dpi; 1080x2194; samsung; SM-G991B; o1s; exynos2100; ja_JP; 463060794)'
+// Threads (Barcelona) iPhone 公式アプリ UA (2026年4月時点の最新)
+const IG_MOBILE_UA     = 'Barcelona 355.0.0.24.108 iPhone (iPhone16,2; iOS 18_4; ja_JP; ja; scale=3.00; 1320x2868; 620931905)'
 
 /** アカウントに割り当てられた iPhone UA を返す。未設定の場合はリストから決定論的に選択 */
 function getAccountIphoneUA(accountId: number): string {
@@ -1437,4 +1439,260 @@ export async function apiPostWithMedia(
   }
 
   return { success: false, error: lastError || '画像付き投稿 API が応答しませんでした' }
+}
+
+// ── Instagram Story Post (i.instagram.com) ───────────────────────────────────
+
+export interface StoryLinkSticker {
+  url:       string
+  x?:        number   // 0.0〜1.0, default 0.5
+  y?:        number   // 0.0〜1.0, default 0.5
+  width?:    number   // default 0.3
+  height?:   number   // default 0.1
+  rotation?: number   // default 0.0
+}
+
+/**
+ * Instagram ストーリー投稿（モバイル API）。
+ *
+ * フロー:
+ *   1. rupload_igphoto で画像アップロード
+ *   2. configure_to_story で公開
+ *
+ * @param accountId  対象アカウント
+ * @param imagePath  ローカル画像パス (JPEG/PNG)
+ * @param linkSticker  リンクスタンプ（任意）
+ */
+export async function postStory(
+  accountId:   number,
+  imagePath:   string,
+  linkSticker?: StoryLinkSticker,
+): Promise<{ success: boolean; status?: number; mediaId?: string; error?: string }> {
+  // instagrapi (Python) 経由でストーリー投稿
+  const ig = await getIgCookieHeaders(accountId)
+  if (!ig) return { success: false, error: 'instagram.com sessionid not found' }
+
+  const acct = getAccountById(accountId)
+  if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+
+  const allCookies = await session.fromPartition(`persist:account-${accountId}`).cookies.get({}).catch(() => [])
+  const sessionid = allCookies.find(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))?.value
+  const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('instagram.com'))?.value
+  const dsUserId  = allCookies.find(c => c.name === 'ds_user_id' && c.domain?.includes('instagram.com'))?.value
+
+  if (!sessionid || !csrftoken || !dsUserId) {
+    return { success: false, error: 'Cookie 不足 (sessionid/csrftoken/ds_user_id)' }
+  }
+
+  const { spawn } = await import('child_process')
+  const path = await import('path')
+  const { app } = await import('electron')
+
+  // Python スクリプトのパスを解決（dev: electron/scripts, prod: dist-electron/scripts）
+  const isDev = !app.isPackaged
+  const scriptDir = isDev
+    ? path.join(app.getAppPath(), 'electron', 'scripts')
+    : path.join(app.getAppPath(), 'dist-electron', 'scripts')
+  const scriptPath = path.join(scriptDir, 'story_post.py')
+
+  // 追加 Cookie（mid, ig_did, rur）
+  const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
+  const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
+  const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
+
+  const args = [
+    scriptPath,
+    '--sessionid', sessionid,
+    '--csrftoken', csrftoken,
+    '--ds_user_id', dsUserId,
+    '--image', imagePath,
+  ]
+  if (mid)   args.push('--mid', mid)
+  if (igDid) args.push('--ig_did', igDid)
+  if (rur)   args.push('--rur', rur)
+
+  // プロキシ
+  if (acct.proxy_url) {
+    let proxyForPython = acct.proxy_url
+    if (acct.proxy_username) {
+      const u = new URL(proxyForPython)
+      u.username = acct.proxy_username
+      u.password = acct.proxy_password ?? ''
+      proxyForPython = u.toString()
+    }
+    args.push('--proxy', proxyForPython)
+  }
+
+  // セッション作成時と同じ UA を使う（makeView が設定したフィンガープリント UA）
+  // iPhone UA だと useragent mismatch になるため、セッションの現在の UA を取得
+  const sessUa = getAccountSession(accountId).getUserAgent()
+  args.push('--ua', sessUa)
+
+  // リンクスタンプ
+  if (linkSticker?.url) {
+    args.push('--link_url', linkSticker.url)
+    args.push('--link_x', String(linkSticker.x ?? 0.5))
+    args.push('--link_y', String(linkSticker.y ?? 0.5))
+    args.push('--link_width', String(linkSticker.width ?? 0.3))
+    args.push('--link_height', String(linkSticker.height ?? 0.1))
+  }
+
+  console.log(`[postStory] python3 ${args.join(' ').slice(0, 200)}...`)
+
+  return new Promise((resolve) => {
+    const proc = spawn('python3', args, { timeout: 120_000 })
+    let stdout = ''
+    let stderr = ''
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
+    proc.on('close', (code) => {
+      console.log(`[postStory] python exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
+      try {
+        const result = JSON.parse(stdout.trim())
+        resolve(result)
+      } catch {
+        resolve({ success: false, error: stderr || stdout || `python exit code ${code}` })
+      }
+    })
+    proc.on('error', (err) => {
+      resolve({ success: false, error: `python spawn error: ${err.message}` })
+    })
+  })
+}
+
+// 以下は旧モバイル API 実装（Playwright に移行済みのため未使用）
+async function _postStoryMobileApi_deprecated(
+  accountId:   number,
+  imagePath:   string,
+  linkSticker?: StoryLinkSticker,
+): Promise<{ success: boolean; status?: number; mediaId?: string; error?: string }> {
+  const ig = await getIgCookieHeaders(accountId)
+  if (!ig) return { success: false, error: 'instagram.com sessionid not found' }
+  const { cookieHeader, csrfToken } = ig
+  const ua = BROWSER_UA
+  const sess = getAccountSession(accountId)
+  await ensureAccountProxy(accountId, sess)
+
+  if (!fs.existsSync(imagePath)) return { success: false, error: `画像が見つかりません: ${imagePath}` }
+  const fileData = fs.readFileSync(imagePath)
+  const mime = imagePath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'
+  const uploadId = Date.now().toString()
+
+  dbgLog(`==================== postStory START ====================`)
+  dbgLog(`account=${accountId} image=${imagePath} size=${fileData.length} mime=${mime}`)
+  dbgLog(`ua=${ua.slice(0, 60)}...`)
+
+  // ── Step 1: rupload (session.fetch) ────────────────────────────────────
+  const ruploadParams = JSON.stringify({
+    media_type: 1,
+    upload_id:  uploadId,
+    image_compression: JSON.stringify({ lib_name: 'moz', lib_version: '3.1.m', quality: '80' }),
+  })
+
+  const ruploadUrl = `${IG_MOBILE_URL}/rupload_igphoto/fb_uploader_${uploadId}`
+  dbgLog(`rupload url=${ruploadUrl}`)
+  dbgLog(`rupload params=${ruploadParams}`)
+
+  let upRespStatus = 0
+  let upRespBody = ''
+  try {
+    const upResp = await sess.fetch(ruploadUrl, {
+      method: 'POST',
+      headers: {
+        'Cookie':                       cookieHeader,
+        'X-CSRFToken':                  csrfToken,
+        'X-IG-App-ID':                  IG_MOBILE_APP_ID,
+        'User-Agent':                   ua,
+        'Content-Type':                 'application/octet-stream',
+        'X-Entity-Name':                `fb_uploader_${uploadId}`,
+        'X-Entity-Length':              String(fileData.length),
+        'X-Entity-Type':                mime,
+        'X-Instagram-Rupload-Params':   ruploadParams,
+        'Offset':                       '0',
+      },
+      body: fileData,
+    })
+    upRespStatus = upResp.status
+    upRespBody = await upResp.text().catch(() => '')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    dbgLog(`rupload EXCEPTION: ${msg}`)
+    return { success: false, error: `画像アップロード失敗: ${msg}` }
+  }
+
+  dbgLog(`rupload status=${upRespStatus} body=${upRespBody.slice(0, 400)}`)
+  console.log(`[postStory] rupload status=${upRespStatus} body=${upRespBody.slice(0, 300)}`)
+
+  if (upRespStatus < 200 || upRespStatus >= 300) {
+    dbgLog(`==================== postStory END (rupload fail) ====================`)
+    return { success: false, status: upRespStatus, error: `画像アップロード失敗: ${upRespBody.slice(0, 200)}` }
+  }
+
+  // ── Step 2: configure_to_story (session.fetch) ─────────────────────────
+  await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000))
+
+  const uid = cookieHeader.match(/ds_user_id=(\d+)/)?.[1] ?? ''
+
+  // 最小限のパラメータで configure（余計なパラメータが 500 の原因になりうる）
+  const configureData: Record<string, unknown> = {
+    upload_id:       uploadId,
+    source_type:     '4',
+    configure_mode:  '1',
+  }
+
+  if (linkSticker?.url) {
+    // signed_body 形式ではネイティブ配列として含める（JSON.stringify ではなく）
+    configureData['story_link_stickers'] = [{
+      link_type: 'web',
+      url:       linkSticker.url,
+      x:         linkSticker.x ?? 0.5,
+      y:         linkSticker.y ?? 0.5,
+      width:     linkSticker.width ?? 0.3,
+      height:    linkSticker.height ?? 0.1,
+      rotation:  linkSticker.rotation ?? 0.0,
+    }]
+  }
+
+  // Instagram モバイル API は signed_body=SIGNATURE.{JSON} 形式（JSON 部分は raw）
+  const cfgJson = JSON.stringify(configureData)
+  const cfgBody = `signed_body=SIGNATURE.${cfgJson}`
+  dbgLog(`configure_to_story body=${cfgBody.slice(0, 400)}`)
+
+  let cfgStatus = 0
+  let cfgRaw = ''
+  try {
+    const cfgResp = await sess.fetch(`${IG_MOBILE_URL}/api/v1/media/configure_to_story/`, {
+      method: 'POST',
+      headers: {
+        'Cookie':       cookieHeader,
+        'X-CSRFToken':  csrfToken,
+        'X-IG-App-ID':  IG_MOBILE_APP_ID,
+        'User-Agent':   ua,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: cfgBody,
+    })
+    cfgStatus = cfgResp.status
+    cfgRaw = await cfgResp.text().catch(() => '')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    dbgLog(`configure EXCEPTION: ${msg}`)
+    return { success: false, error: `ストーリー公開失敗: ${msg}` }
+  }
+
+  dbgLog(`configure status=${cfgStatus} body=${cfgRaw.slice(0, 400)}`)
+  console.log(`[postStory] configure status=${cfgStatus} body=${cfgRaw.slice(0, 300)}`)
+  dbgLog(`==================== postStory END ====================`)
+
+  if (cfgStatus < 200 || cfgStatus >= 300) {
+    return { success: false, status: cfgStatus, error: `ストーリー公開失敗: ${cfgRaw.slice(0, 200)}` }
+  }
+
+  let mediaId: string | undefined
+  try {
+    const j = JSON.parse(cfgRaw) as { media?: { pk?: string; id?: string } }
+    mediaId = j.media?.id ?? j.media?.pk
+  } catch { /* ignore */ }
+
+  return { success: true, status: cfgStatus, mediaId }
 }

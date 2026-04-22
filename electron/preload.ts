@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxy_url?: string
       proxy_username?: string
       proxy_password?: string
-      login_site?: 'threads' | 'instagram'
+      login_site?: 'threads' | 'instagram' | 'x'
     }) => ipcRenderer.invoke('accounts:add', options),
     register: (options?: {
       proxy_url?: string
@@ -81,6 +81,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxyMode?:      'auto' | 'manual' | 'none'
       proxyStartPort?: number
     }) => ipcRenderer.invoke('accounts:import-cookie-login', rows, options),
+    checkReplyBan: (id: number) =>
+      ipcRenderer.invoke('accounts:check-reply-ban', id) as Promise<{ success: boolean; status?: string; tweetCount?: number; error?: string }>,
+    getAuthToken: (id: number) =>
+      ipcRenderer.invoke('accounts:get-auth-token', id) as Promise<{ token: string | null }>,
+    saveTotpSecret: (data: { id: number; totp_secret: string | null }) =>
+      ipcRenderer.invoke('accounts:save-totp-secret', data),
+    generateTotp: (secret: string) =>
+      ipcRenderer.invoke('accounts:generate-totp', secret) as Promise<{ success: boolean; code?: string; remaining?: number; error?: string }>,
+    postStory: (data: {
+      account_id:    number
+      image_path:    string
+      link_sticker?: { url: string; x?: number; y?: number; width?: number; height?: number; rotation?: number }
+    }) => ipcRenderer.invoke('accounts:post-story', data),
+    xTokenLogin: (data: {
+      auth_token:      string
+      proxy_url?:      string | null
+      proxy_username?: string | null
+      proxy_password?: string | null
+    }) => ipcRenderer.invoke('accounts:x-token-login', data),
   },
 
   // Posts
@@ -243,6 +262,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     resetMac: (key: string) => ipcRenderer.invoke('license:reset-mac', key),
   },
 
+  // Story Templates
+  storyTemplates: {
+    list:   () => ipcRenderer.invoke('story-templates:list'),
+    create: (data: { name: string; image_path: string; link_url?: string | null; link_x?: number; link_y?: number; link_width?: number; link_height?: number }) =>
+      ipcRenderer.invoke('story-templates:create', data),
+    delete: (id: number) => ipcRenderer.invoke('story-templates:delete', id),
+  },
+
   // Auth
   auth: {
     check:  () => ipcRenderer.invoke('auth:check'),
@@ -331,7 +358,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Dialog
   dialog: {
-    openFile: () => ipcRenderer.invoke('dialog:open-file') as Promise<{ name: string; data: number[] } | null>,
+    openFile: () => ipcRenderer.invoke('dialog:open-file') as Promise<{ name: string; path: string; data: number[] } | null>,
   },
 
   // Debug

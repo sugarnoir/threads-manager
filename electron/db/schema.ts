@@ -265,6 +265,33 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('ig_password')) {
     db.exec("ALTER TABLE accounts ADD COLUMN ig_password TEXT")
   }
+  if (!colNames.includes('platform')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN platform TEXT NOT NULL DEFAULT 'threads'")
+  }
+  if (!colNames.includes('totp_secret')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN totp_secret TEXT")
+  }
+
+  // story_templates テーブル
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS story_templates (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL,
+      image_path  TEXT NOT NULL,
+      link_url    TEXT,
+      link_x      REAL DEFAULT 0.5,
+      link_y      REAL DEFAULT 0.5,
+      link_width  REAL DEFAULT 0.3,
+      link_height REAL DEFAULT 0.1,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `)
+  if (!colNames.includes('reply_ban_status')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN reply_ban_status TEXT")  // 'ok' | 'banned' | null
+  }
+  if (!colNames.includes('reply_ban_checked_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN reply_ban_checked_at TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]

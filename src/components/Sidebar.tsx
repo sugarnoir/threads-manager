@@ -854,7 +854,7 @@ export function Sidebar({
             { id: 'settings'    as ToolType, label: '設定',       Icon: IconProxy, disabled: false },
             { id: 'image-list'  as ToolType, label: '画像リスト', Icon: IconBulk,  disabled: false },
             { id: 'status'      as ToolType, label: 'ステータス', Icon: IconCheck, disabled: false },
-            { id: 'engagement'  as ToolType, label: 'いいね/RT',  Icon: IconHeart, disabled: true  },
+            { id: 'engagement'  as ToolType, label: 'いいね/RT',  Icon: IconHeart, disabled: false },
           ] as const).map(({ id, label, Icon, disabled }) => {
             const isActive = activeTool === id
             return (
@@ -1147,9 +1147,15 @@ export function Sidebar({
                       {/* Info */}
                       <div className="flex-1 min-w-0">
                         <p className={`text-[12px] font-semibold truncate leading-tight flex items-center gap-1 ${isActive ? 'text-white' : 'text-zinc-200 group-hover:text-white'}`}>
+                          {account.platform === 'x' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-zinc-700 text-zinc-300 text-[8px] font-bold leading-tight">𝕏</span>
+                          )}
                           <span className="truncate">{account.display_name ?? account.username}</span>
                           {account.status === 'challenge' && (
                             <span className="shrink-0 text-yellow-400" title="人間確認が必要です">⚠</span>
+                          )}
+                          {account.reply_ban_status === 'banned' && (
+                            <span className="shrink-0 text-red-400" title="リプBAN">⚠️</span>
                           )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">

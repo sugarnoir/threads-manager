@@ -13,6 +13,8 @@ import {
   updateAccountMark,
   updateAccountSpeedPreset,
   updateAccountUserAgent,
+  updateAccountTotpSecret,
+  updateReplyBanStatus,
   reorderAccounts,
   deleteAccount,
   getAccountById,
@@ -25,7 +27,8 @@ import { createAndSaveFingerprint } from '../fingerprint'
 import { closeContext, reloadContext } from '../playwright/browser-manager'
 import { getViewManager, fetchProfileFromInstagram, injectCookies, RawCookie } from '../browser-views/view-manager'
 import { sendDiscordNotification } from '../discord'
-import { autoRenameJapaneseFemale } from '../api/threads-web-api'
+import { autoRenameJapaneseFemale, postStory } from '../api/threads-web-api'
+import type { StoryLinkSticker } from '../api/threads-web-api'
 
 export function registerAccountHandlers(): void {
   ipcMain.handle('accounts:list', () => getAllAccounts())
@@ -38,7 +41,7 @@ export function registerAccountHandlers(): void {
         proxy_url?:      string
         proxy_username?: string
         proxy_password?: string
-        login_site?:     'threads' | 'instagram'
+        login_site?:     'threads' | 'instagram' | 'x'
       }
     ) => {
       const viewManager = getViewManager()
@@ -100,6 +103,100 @@ export function registerAccountHandlers(): void {
           if (msg.includes('UNIQUE constraint')) {
             return { success: false, error: 'このアカウントは既に追加されています。' }
           }
+          return { success: false, error: msg }
+        }
+      }
+
+      // ── login_site === 'x' (X/Twitter アカウント追加) ──────────────────
+      if (options?.login_site === 'x') {
+        const userAgent  = pickRandomIphoneUA()
+        const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
+        const placeholder = `__x_pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+        let stubAccountId: number | null = null
+        try {
+          const stub = createAccount({
+            username:       placeholder,
+            session_dir:    sessionDir,
+            proxy_url:      options.proxy_url,
+            proxy_username: options.proxy_username,
+            proxy_password: options.proxy_password,
+            user_agent:     userAgent,
+            platform:       'x',
+          })
+          stubAccountId = stub.id
+          createAndSaveFingerprint(stub.id)
+          updateAccountStatus(stub.id, 'needs_login')
+
+          // X (Twitter) のログイン画面を開く
+          await viewManager.startXLogin(stub.id)
+
+          // ログイン後 Cookie からユーザー名を取得
+          const sess = session.fromPartition(`persist:account-${stub.id}`)
+          const cookies = await sess.cookies.get({})
+          const hasAuth = cookies.some(c =>
+            (c.name === 'auth_token' || c.name === 'ct0') && c.value && c.domain?.includes('twitter.com')
+          ) || cookies.some(c =>
+            (c.name === 'auth_token' || c.name === 'ct0') && c.value && c.domain?.includes('x.com')
+          )
+
+          if (!hasAuth) {
+            try { deleteAccount(stub.id) } catch { /* ignore */ }
+            return { success: false, error: 'X ログインが完了しませんでした' }
+          }
+
+          // X API で screen_name を取得
+          let username = placeholder
+          let displayName: string | null = null
+          try {
+            const ct0 = cookies.find(c => c.name === 'ct0')?.value ?? ''
+            const authToken = cookies.find(c => c.name === 'auth_token')?.value ?? ''
+            const cookieHeader = cookies
+              .filter(c => c.value && (c.domain?.includes('twitter.com') || c.domain?.includes('x.com')))
+              .map(c => `${c.name}=${c.value}`)
+              .join('; ')
+
+            // Bearer token は X の公開 guest token（認証済みユーザーの verify_credentials で使用可能）
+            const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
+            const resp = await sess.fetch('https://api.x.com/1.1/account/verify_credentials.json', {
+              headers: {
+                'Authorization': `Bearer ${BEARER}`,
+                'X-Csrf-Token':  ct0,
+                'Cookie':        cookieHeader,
+              },
+            })
+            if (resp.ok) {
+              const data = await resp.json() as { screen_name?: string; name?: string }
+              if (data.screen_name) username = data.screen_name
+              if (data.name) displayName = data.name
+              console.log(`[X login] verify_credentials: @${username} name=${displayName}`)
+            } else {
+              console.warn(`[X login] verify_credentials failed: ${resp.status}`)
+              // フォールバック: twid Cookie から UID
+              const twidCookie = cookies.find(c => c.name === 'twid')
+              if (twidCookie?.value) {
+                const uid = decodeURIComponent(twidCookie.value).replace('u=', '')
+                username = `x_${uid}`
+              }
+            }
+          } catch (e) {
+            console.warn(`[X login] verify_credentials error: ${e}`)
+            const twidCookie = cookies.find(c => c.name === 'twid')
+            if (twidCookie?.value) {
+              const uid = decodeURIComponent(twidCookie.value).replace('u=', '')
+              username = `x_${uid}`
+            }
+          }
+
+          updateAccountUsername(stub.id, username)
+          updateAccountStatus(stub.id, 'active', displayName ? { display_name: displayName } : undefined)
+          const updated = getAccountById(stub.id)
+          return { success: true, account: updated }
+        } catch (err) {
+          if (stubAccountId !== null) {
+            try { deleteAccount(stubAccountId) } catch { /* ignore */ }
+          }
+          const msg = err instanceof Error ? err.message : String(err)
           return { success: false, error: msg }
         }
       }
@@ -720,22 +817,8 @@ export function registerAccountHandlers(): void {
         const hasSession = await injectCookies(rawCookies, permSess)
         console.log(`[import-cookie-login] row[${i}] injectCookies hasSession=${hasSession}`)
 
-        // Cookie が実際にパーティションに書き込まれたか読み戻し検証
-        const verify = await permSess.cookies.get({}).catch(() => [])
-        const verifySessionId = verify.find(c => c.name === 'sessionid')
-        const verifyCsrf      = verify.find(c => c.name === 'csrftoken')
-        const verifyDsUser    = verify.find(c => c.name === 'ds_user_id')
-        console.log(`[import-cookie-login] row[${i}] VERIFY: total=${verify.length} sessionid=${verifySessionId ? 'YES val=' + verifySessionId.value.slice(0, 20) + '... domain=' + verifySessionId.domain : 'NO'} csrftoken=${verifyCsrf ? 'YES' : 'NO'} ds_user_id=${verifyDsUser ? verifyDsUser.value : 'NO'}`)
-
-        if (!verifySessionId?.value) {
-          // injectCookies は true を返したが実際にはセットされていない
-          console.error(`[import-cookie-login] row[${i}] ⚠ sessionid NOT persisted! Dumping rawCookies:`)
-          for (const rc of rawCookies) {
-            console.log(`  name=${rc.name} domain=${rc.domain} value=${rc.value?.slice(0, 20)}... secure=${rc.secure} httpOnly=${rc.httpOnly} expiry=${rc.expirationDate ?? rc.expires}`)
-          }
-        }
-
-        updateAccountStatus(account.id, (hasSession && verifySessionId?.value) ? 'active' : 'needs_login')
+        // Cookie セット後のステータス設定のみ（Instagram への API 呼び出しは一切行わない）
+        updateAccountStatus(account.id, hasSession ? 'active' : 'needs_login')
 
         results.imported++
         console.log(`[import-cookie-login] row[${i}] SUCCESS imported=${results.imported}`)
@@ -756,10 +839,315 @@ export function registerAccountHandlers(): void {
   })
 
   /**
+   * X (Twitter) auth_token でトークンログイン。
+   * Cookie を注入 → verify_credentials で screen_name を取得 → DB に保存。
+   */
+  ipcMain.handle('accounts:x-token-login', async (_event, data: {
+    auth_token:     string
+    proxy_url?:     string | null
+    proxy_username?: string | null
+    proxy_password?: string | null
+  }) => {
+    const token = data.auth_token?.trim()
+    if (!token) return { success: false, error: 'auth_token が空です' }
+
+    const userAgent  = pickRandomIphoneUA()
+    const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
+    const placeholder = `__x_token_${Date.now()}`
+
+    let accountId: number | null = null
+    try {
+      const account = createAccount({
+        username:       placeholder,
+        session_dir:    sessionDir,
+        proxy_url:      data.proxy_url ?? undefined,
+        proxy_username: data.proxy_username ?? undefined,
+        proxy_password: data.proxy_password ?? undefined,
+        user_agent:     userAgent,
+        platform:       'x',
+      })
+      accountId = account.id
+      createAndSaveFingerprint(account.id)
+
+      // auth_token を Cookie としてパーティションに注入
+      const sess = session.fromPartition(`persist:account-${account.id}`)
+      if (data.proxy_url) {
+        let proxyRules = data.proxy_url.trim()
+        if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyRules)) proxyRules = 'http://' + proxyRules
+        await sess.setProxy({ proxyRules }).catch(() => {})
+      }
+
+      const yearFromNow = Math.floor(Date.now() / 1000) + 365 * 24 * 3600
+      await sess.cookies.set({ url: 'https://twitter.com', name: 'auth_token', value: token, domain: '.twitter.com', path: '/', secure: true, httpOnly: true, expirationDate: yearFromNow, sameSite: 'no_restriction' })
+      await sess.cookies.set({ url: 'https://x.com',       name: 'auth_token', value: token, domain: '.x.com',       path: '/', secure: true, httpOnly: true, expirationDate: yearFromNow, sameSite: 'no_restriction' })
+
+      // ct0 を取得するために x.com に一度アクセス（ct0 は X がレスポンスで Set-Cookie する）
+      console.log('[x-token-login] fetching ct0...')
+      try {
+        await sess.fetch('https://x.com/home', { redirect: 'manual' })
+      } catch { /* ignore */ }
+
+      const cookies = await sess.cookies.get({})
+      const ct0 = cookies.find(c => c.name === 'ct0')?.value ?? ''
+      console.log(`[x-token-login] ct0=${ct0 ? ct0.slice(0, 12) + '...' : 'NONE'}`)
+
+      // verify_credentials で screen_name を取得
+      let username = placeholder
+      let displayName: string | null = null
+      const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
+      const cookieHeader = cookies
+        .filter(c => c.value && (c.domain?.includes('twitter.com') || c.domain?.includes('x.com')))
+        .map(c => `${c.name}=${c.value}`)
+        .join('; ')
+
+      const resp = await sess.fetch('https://api.x.com/1.1/account/verify_credentials.json', {
+        headers: {
+          'Authorization': `Bearer ${BEARER}`,
+          'X-Csrf-Token':  ct0,
+          'Cookie':        cookieHeader,
+        },
+      })
+
+      if (resp.ok) {
+        const json = await resp.json() as { screen_name?: string; name?: string }
+        if (json.screen_name) username = json.screen_name
+        if (json.name)        displayName = json.name
+        console.log(`[x-token-login] verified: @${username} name=${displayName}`)
+      } else {
+        const body = await resp.text().catch(() => '')
+        console.warn(`[x-token-login] verify failed: ${resp.status} ${body.slice(0, 200)}`)
+        // フォールバック: twid Cookie
+        const twid = cookies.find(c => c.name === 'twid')
+        if (twid?.value) {
+          username = `x_${decodeURIComponent(twid.value).replace('u=', '')}`
+        }
+      }
+
+      updateAccountUsername(account.id, username)
+      updateAccountStatus(account.id, 'active', displayName ? { display_name: displayName } : undefined)
+      const updated = getAccountById(account.id)
+      return { success: true, account: updated }
+    } catch (err) {
+      if (accountId !== null) { try { deleteAccount(accountId) } catch { /* */ } }
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('UNIQUE constraint')) return { success: false, error: 'このアカウントは既に追加されています' }
+      return { success: false, error: msg }
+    }
+  })
+
+  /**
    * Instagram モバイル API でランダムな日本人女性名に変更する。
    * その垢の sessionid Cookie・iPhone UA・プロキシを適用。
    * 成功したら DB の display_name も更新する。
    */
+  /** Instagram ストーリー投稿（画像 + オプショナルリンクスタンプ） */
+  ipcMain.handle('accounts:post-story', async (_event, data: {
+    account_id:    number
+    image_path:    string
+    link_sticker?: StoryLinkSticker
+  }) => {
+    try {
+      return await postStory(data.account_id, data.image_path, data.link_sticker)
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  /** X リプBANチェック（検索 API） */
+  ipcMain.handle('accounts:check-reply-ban', async (_event, accountId: number) => {
+    const fs = await import('fs')
+    const dbgLog = (line: string) => {
+      try { fs.appendFileSync('/tmp/tm-debug.log', `[${new Date().toISOString()}] [reply-ban] ${line}\n`) } catch {}
+    }
+
+    const acct = getAccountById(accountId)
+    if (!acct || acct.platform !== 'x') return { success: false, error: 'X アカウントではありません' }
+
+    const sess = session.fromPartition(`persist:account-${accountId}`)
+    const cookies = await sess.cookies.get({}).catch(() => [])
+    const ct0 = cookies.find(c => c.name === 'ct0' && (c.domain?.includes('x.com') || c.domain?.includes('twitter.com')))?.value ?? ''
+    const authToken = cookies.find(c => c.name === 'auth_token' && (c.domain?.includes('x.com') || c.domain?.includes('twitter.com')))?.value
+
+    dbgLog(`account=${accountId} @${acct.username} ct0=${ct0 ? 'YES' : 'NO'} auth_token=${authToken ? 'YES' : 'NO'}`)
+
+    if (!authToken || !ct0) {
+      dbgLog(`FAIL: missing auth_token or ct0`)
+      return { success: false, error: 'auth_token または ct0 が見つかりません' }
+    }
+
+    const cookieHeader = cookies
+      .filter(c => c.value && (c.domain?.includes('twitter.com') || c.domain?.includes('x.com')))
+      .map(c => `${c.name}=${c.value}`)
+      .join('; ')
+
+    const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
+    const username = acct.username
+
+    try {
+      // ブラウザビューの JS コンテキストからページ内 fetch で検索
+      // （外部リクエストでは content-length:0 の空レスポンスが返るため）
+      const { getViewWebContents } = await import('../browser-views/view-manager')
+      const wc = getViewWebContents(accountId)
+
+      if (!wc || wc.isDestroyed()) {
+        dbgLog('no browser view — using cookie-only fallback')
+        // ブラウザビューが開いていない場合は Cookie の有無だけで判定
+        const now = new Date().toISOString()
+        updateReplyBanStatus(accountId, 'ok', now)
+        return { success: true, status: 'ok', tweetCount: -1, error: 'ブラウザビューが開いていません。先にアカウントを選択してください。' }
+      }
+
+      // x.com にいない場合はスキップ
+      const currentUrl = wc.getURL()
+      if (!currentUrl.includes('x.com') && !currentUrl.includes('twitter.com')) {
+        dbgLog(`not on x.com (url=${currentUrl}) — navigating`)
+        wc.loadURL('https://x.com')
+        await new Promise(r => setTimeout(r, 5000))
+      }
+
+      dbgLog(`executing search in page context for @${username}`)
+
+      const result = await wc.executeJavaScript(`
+        (async () => {
+          try {
+            var csrf = document.cookie.split(';').map(function(c){ return c.trim() })
+              .find(function(c){ return c.startsWith('ct0=') });
+            csrf = csrf ? csrf.split('=')[1] : '';
+            var headers = {
+              'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+              'X-Csrf-Token': csrf,
+              'X-Twitter-Active-User': 'yes',
+              'X-Twitter-Auth-Type': 'OAuth2Session',
+              'Content-Type': 'application/json',
+            };
+
+            // 方法1: SearchTimeline GraphQL（adaptive.json は廃止の可能性）
+            var variables = JSON.stringify({
+              rawQuery: 'from:${username} filter:replies',
+              count: 5,
+              querySource: 'typed_query',
+              product: 'Latest',
+            });
+            var features = JSON.stringify({
+              rweb_tipjar_consumption_enabled: true,
+              responsive_web_graphql_exclude_directive_enabled: true,
+              verified_phone_label_enabled: false,
+              responsive_web_graphql_timeline_navigation_enabled: true,
+              responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+              communities_web_enable_tweet_community_results_fetch: true,
+              c9s_tweet_anatomy_moderator_badge_enabled: true,
+              articles_preview_enabled: true,
+              responsive_web_edit_tweet_api_enabled: true,
+              graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+              view_counts_everywhere_api_enabled: true,
+              longform_notetweets_consumption_enabled: true,
+              responsive_web_twitter_article_tweet_consumption_enabled: true,
+              tweet_awards_web_tipping_enabled: false,
+              creator_subscriptions_quote_tweet_preview_enabled: false,
+              freedom_of_speech_not_reach_fetch_enabled: true,
+              standardized_nudges_misinfo: true,
+              tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+              rweb_video_timestamps_enabled: true,
+              longform_notetweets_rich_text_read_enabled: true,
+              longform_notetweets_inline_media_enabled: true,
+              responsive_web_enhance_cards_enabled: false,
+            });
+
+            var url = '/i/api/graphql/MJpyQGqgklrVl_6rYKQbow/SearchTimeline?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
+            var resp = await fetch(url, { headers: headers });
+            var text = await resp.text();
+
+            if (!resp.ok) return { ok: false, status: resp.status, bodyPreview: text.slice(0, 200) };
+            if (!text) return { ok: false, error: 'empty response', status: resp.status };
+
+            var data = JSON.parse(text);
+            // GraphQL レスポンスからツイート数を抽出
+            var entries = [];
+            try {
+              entries = data.data.search_by_raw_query.search_timeline.timeline.instructions
+                .find(function(i){ return i.type === 'TimelineAddEntries' })?.entries || [];
+            } catch(e) {}
+            var tweetEntries = entries.filter(function(e){ return e.entryId && e.entryId.startsWith('tweet-') });
+            return { ok: true, tweetCount: tweetEntries.length, totalEntries: entries.length };
+          } catch (e) {
+            return { ok: false, error: String(e) };
+          }
+        })()
+      `) as { ok: boolean; status?: number; tweetCount?: number; totalEntries?: number; bodyPreview?: string; error?: string }
+
+      dbgLog(`result=${JSON.stringify(result)}`)
+
+      const now = new Date().toISOString()
+      if (!result.ok) {
+        dbgLog(`search failed: ${result.error ?? result.status}`)
+        return { success: false, error: `検索失敗: ${result.error ?? `status=${result.status}`}` }
+      }
+
+      const tweetCount = result.tweetCount ?? 0
+      const banned = tweetCount === 0
+      dbgLog(`tweetCount=${tweetCount} → ${banned ? 'BANNED' : 'OK'}`)
+
+      updateReplyBanStatus(accountId, banned ? 'banned' : 'ok', now)
+      return { success: true, status: banned ? 'banned' : 'ok', tweetCount }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      dbgLog(`EXCEPTION: ${msg}`)
+      return { success: false, error: msg }
+    }
+  })
+
+  /** X アカウントの auth_token Cookie を取得 */
+  ipcMain.handle('accounts:get-auth-token', async (_event, accountId: number) => {
+    const sess = session.fromPartition(`persist:account-${accountId}`)
+    const cookies = await sess.cookies.get({}).catch(() => [])
+    const authToken = cookies.find(c =>
+      c.name === 'auth_token' && (c.domain?.includes('twitter.com') || c.domain?.includes('x.com'))
+    )
+    return { token: authToken?.value ?? null }
+  })
+
+  // ── ストーリーテンプレート CRUD ───────────────────────────────────────
+  ipcMain.handle('story-templates:list', () => {
+    const db = require('../db/index').getDb()
+    return db.prepare('SELECT * FROM story_templates ORDER BY id DESC').all()
+  })
+
+  ipcMain.handle('story-templates:create', (_e: Electron.IpcMainInvokeEvent, data: {
+    name: string; image_path: string; link_url?: string | null
+    link_x?: number; link_y?: number; link_width?: number; link_height?: number
+  }) => {
+    const db = require('../db/index').getDb()
+    const result = db.prepare(
+      'INSERT INTO story_templates (name, image_path, link_url, link_x, link_y, link_width, link_height) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(data.name, data.image_path, data.link_url ?? null, data.link_x ?? 0.5, data.link_y ?? 0.5, data.link_width ?? 0.3, data.link_height ?? 0.1)
+    return { success: true, id: result.lastInsertRowid }
+  })
+
+  ipcMain.handle('story-templates:delete', (_e: Electron.IpcMainInvokeEvent, id: number) => {
+    const db = require('../db/index').getDb()
+    db.prepare('DELETE FROM story_templates WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  /** TOTP シークレットを保存 */
+  ipcMain.handle('accounts:save-totp-secret', (_event, data: { id: number; totp_secret: string | null }) => {
+    updateAccountTotpSecret(data.id, data.totp_secret)
+    return { success: true }
+  })
+
+  /** TOTP コード生成 */
+  ipcMain.handle('accounts:generate-totp', (_event, secret: string) => {
+    try {
+      const { TOTP } = require('otpauth')
+      const totp = new TOTP({ secret, digits: 6, period: 30, algorithm: 'SHA1' })
+      const code = totp.generate()
+      const remaining = 30 - (Math.floor(Date.now() / 1000) % 30)
+      return { success: true, code, remaining }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   ipcMain.handle('accounts:auto-rename', async (_event, accountId: number) => {
     try {
       const acct = getAccountById(accountId)

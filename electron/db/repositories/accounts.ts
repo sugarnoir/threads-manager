@@ -18,6 +18,10 @@ export interface Account {
   speed_preset: 'slow' | 'normal' | 'fast'
   user_agent: string | null
   ig_password: string | null
+  platform: 'threads' | 'instagram' | 'x'
+  totp_secret: string | null
+  reply_ban_status: 'ok' | 'banned' | null
+  reply_ban_checked_at: string | null
   created_at: string
   updated_at: string
 }
@@ -44,6 +48,7 @@ export function createAccount(data: {
   proxy_password?: string
   user_agent?: string
   ig_password?: string
+  platform?: 'threads' | 'x'
 }): Account {
   const db = getDb()
 
@@ -74,8 +79,8 @@ export function createAccount(data: {
   const nextOrder = maxRow.m + 1000
   const result = db
     .prepare(
-      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order, user_agent, ig_password)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order, user_agent, ig_password, platform)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       data.username,
@@ -87,6 +92,7 @@ export function createAccount(data: {
       nextOrder,
       data.user_agent ?? null,
       data.ig_password ?? null,
+      data.platform ?? 'threads',
     )
   return getAccountById(result.lastInsertRowid as number)!
 }
@@ -150,6 +156,18 @@ export function updateAccountUserAgent(id: number, user_agent: string | null): v
   getDb()
     .prepare("UPDATE accounts SET user_agent = ?, updated_at = datetime('now') WHERE id = ?")
     .run(user_agent, id)
+}
+
+export function updateReplyBanStatus(id: number, status: 'ok' | 'banned', checkedAt: string): void {
+  getDb()
+    .prepare("UPDATE accounts SET reply_ban_status = ?, reply_ban_checked_at = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(status, checkedAt, id)
+}
+
+export function updateAccountTotpSecret(id: number, totp_secret: string | null): void {
+  getDb()
+    .prepare("UPDATE accounts SET totp_secret = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(totp_secret, id)
 }
 
 export function updateAccountSpeedPreset(id: number, speed_preset: 'slow' | 'normal' | 'fast'): void {

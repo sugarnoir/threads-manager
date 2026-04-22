@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { api, Account, ViewInfo } from '../lib/ipc'
+import { StoryPostModal } from '../components/StoryPostModal'
 
 interface Props {
   accounts: Account[]
@@ -10,6 +11,7 @@ interface Props {
 export function BrowserPage({ accounts, activeAccountId, isVisible }: Props) {
   const [viewInfos, setViewInfos] = useState<ViewInfo[]>([])
   const [urlInput, setUrlInput]   = useState('')
+  const [showStoryModal, setShowStoryModal] = useState(false)
   const containerRef   = useRef<HTMLDivElement>(null)
   const setBoundsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -167,11 +169,12 @@ export function BrowserPage({ accounts, activeAccountId, isVisible }: Props) {
           </button>
         ))}
 
-        {/* Threads / Instagram 切り替え（同一セッションなのでログイン状態は維持される） */}
+        {/* Threads / Instagram / X 切り替え */}
         {(() => {
           const url = activeInfo?.url ?? ''
           const isInstagram = url.includes('instagram.com')
           const isThreads   = url.includes('threads.com') || url.includes('threads.net')
+          const isX         = url.includes('x.com') || url.includes('twitter.com')
           return (
             <div className="flex items-center bg-zinc-800 rounded-md p-0.5 ml-1 mr-1">
               <button
@@ -198,6 +201,18 @@ export function BrowserPage({ accounts, activeAccountId, isVisible }: Props) {
               >
                 IG
               </button>
+              <button
+                onClick={() => activeAccountId && api.browserView.navigate(activeAccountId, 'https://x.com/')}
+                disabled={!activeAccountId}
+                title="X に切り替え"
+                className={`px-2 py-1 rounded text-[11px] font-semibold leading-none transition-colors disabled:opacity-30 ${
+                  isX
+                    ? 'bg-zinc-600 text-white'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                𝕏
+              </button>
             </div>
           )
         })()}
@@ -211,6 +226,22 @@ export function BrowserPage({ accounts, activeAccountId, isVisible }: Props) {
             className="w-full px-3 py-1.5 bg-zinc-800 text-zinc-200 text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 disabled:opacity-30 placeholder-zinc-600 transition-all"
           />
         </form>
+
+        {/* ストーリー投稿ボタン（Threads/Instagram アカウントのみ） */}
+        {activeAccountId && activeAccount?.platform !== 'x' && (
+          <button
+            onClick={() => {
+              // WebContentsView を一時的に hide してからモーダルを表示
+              // (WebContentsView はネイティブレイヤーとして React の上に描画されるため)
+              if (activeAccountId) api.browserView.hide(activeAccountId)
+              setShowStoryModal(true)
+            }}
+            title="ストーリー投稿"
+            className="px-2 py-1 rounded-md text-[11px] font-semibold leading-none transition-colors text-zinc-400 hover:text-white hover:bg-zinc-700 shrink-0"
+          >
+            📸
+          </button>
+        )}
 
         {activeInfo?.title && (
           <span className="text-zinc-600 text-[11px] truncate max-w-28 hidden sm:block" title={activeInfo.title}>
@@ -241,6 +272,21 @@ export function BrowserPage({ accounts, activeAccountId, isVisible }: Props) {
           </div>
         )}
       </div>
+
+      {/* ストーリー投稿モーダル */}
+      {showStoryModal && activeAccountId && (
+        <StoryPostModal
+          accountId={activeAccountId}
+          onClose={() => {
+            setShowStoryModal(false)
+            // モーダルを閉じたらブラウザビューを再表示
+            if (activeAccountId) {
+              const b = getYHeight()
+              if (b) api.browserView.show(activeAccountId, b.y, b.height)
+            }
+          }}
+        />
+      )}
     </div>
   )
 }

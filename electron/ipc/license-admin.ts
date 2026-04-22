@@ -9,6 +9,7 @@ export interface LicenseRow {
   mac_address:   string | null
   device_free:   boolean
   max_accounts:  number | null
+  app_version:   string | null
 }
 
 export function registerLicenseAdminHandlers(): void {
@@ -24,9 +25,11 @@ export function registerLicenseAdminHandlers(): void {
     {
       const r1 = await sb
         .from('licenses')
-        .select('key, is_active, expires_at, memo, mac_address, device_free, max_accounts')
+        .select('key, is_active, expires_at, memo, mac_address, device_free, max_accounts, app_version')
         .order('key')
-      if (r1.error?.message?.includes('device_free') || r1.error?.message?.includes('max_accounts')) {
+      console.log(`[license:list] r1 error=${r1.error?.message ?? 'none'} data_count=${r1.data?.length ?? 'null'}`)
+      if (r1.error?.message?.includes('device_free') || r1.error?.message?.includes('max_accounts') || r1.error?.message?.includes('app_version')) {
+        console.log(`[license:list] fallback: column missing, retrying without optional columns`)
         const r2 = await sb
           .from('licenses')
           .select('key, is_active, expires_at, memo, mac_address')
@@ -43,7 +46,9 @@ export function registerLicenseAdminHandlers(): void {
       ...r,
       device_free:  r.device_free === true,
       max_accounts: typeof r.max_accounts === 'number' ? r.max_accounts : null,
+      app_version:  typeof r.app_version === 'string' ? r.app_version : null,
     })) as LicenseRow[]
+    if (rows.length > 0) console.log(`[license:list] first row app_version=${rows[0].app_version} raw=${JSON.stringify((resData ?? [])[0]?.app_version)}`)
     return { success: true, data: rows }
   })
 

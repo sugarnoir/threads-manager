@@ -1020,32 +1020,68 @@ export function AccountEditModal({
     }
   }
 
+  // ── X Auth Token ────────────────────────────────────────────────────
+  const [xAuthToken, setXAuthToken]     = useState<string | null>(null)
+  const [xAuthTokenShow, setXAuthTokenShow] = useState(false)
+  const [xAuthTokenLoaded, setXAuthTokenLoaded] = useState(false)
+
+  useEffect(() => {
+    if (account.platform === 'x' && !xAuthTokenLoaded) {
+      api.accounts.getAuthToken(account.id).then(r => {
+        setXAuthToken(r.token)
+        setXAuthTokenLoaded(true)
+      })
+    }
+  }, [account.id, account.platform, xAuthTokenLoaded])
+
+  // ── TOTP 認証コードジェネレーター ───────────────────────────────────
+  const [totpSecret, setTotpSecret]       = useState(account.totp_secret ?? '')
+  const [totpCode, setTotpCode]           = useState<string | null>(null)
+  const [totpRemaining, setTotpRemaining] = useState(30)
+  const [totpSaving, setTotpSaving]       = useState(false)
+  const [totpError, setTotpError]         = useState<string | null>(null)
+  const totpIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const handleSaveTotpSecret = async () => {
+    setTotpSaving(true)
+    await api.accounts.saveTotpSecret({ id: account.id, totp_secret: totpSecret.trim() || null })
+    setTotpSaving(false)
+  }
+
+  const generateTotpCode = async () => {
+    const secret = totpSecret.trim()
+    if (!secret) { setTotpError('シークレットキーを入力してください'); return }
+    setTotpError(null)
+    const res = await api.accounts.generateTotp(secret)
+    if (res.success && res.code) {
+      setTotpCode(res.code)
+      setTotpRemaining(res.remaining ?? 30)
+    } else {
+      setTotpError(res.error ?? 'コード生成に失敗しました')
+      setTotpCode(null)
+    }
+  }
+
+  // 自動更新: コード表示中は1秒ごとにカウントダウン、0になったら再生成
+  useEffect(() => {
+    if (!totpCode) return
+    if (totpIntervalRef.current) clearInterval(totpIntervalRef.current)
+    totpIntervalRef.current = setInterval(async () => {
+      setTotpRemaining(prev => {
+        if (prev <= 1) {
+          // 0 になったら再生成
+          generateTotpCode()
+          return 30
+        }
+        return prev - 1
+      })
+    }, 1000)
+    return () => { if (totpIntervalRef.current) clearInterval(totpIntervalRef.current) }
+  }, [totpCode, totpSecret])
+
   const handleSetupNextToThreads = async () => {
     await api.browserView.navigate(account.id, 'https://www.threads.net/')
     setSetupStep('step3_threads')
-  }
-
-  // ── 名前を自動変更（Instagram モバイル API） ────────────────────────────
-  const [autoRenaming,     setAutoRenaming]     = useState(false)
-  const [autoRenameResult, setAutoRenameResult] = useState<{ ok: boolean; msg: string } | null>(null)
-
-  const handleAutoRename = async () => {
-    setAutoRenaming(true)
-    setAutoRenameResult(null)
-    try {
-      const res = await api.accounts.autoRename(account.id)
-      if (res.success && res.newName) {
-        setAutoRenameResult({ ok: true, msg: `✓ 「${res.newName}」に変更しました` })
-        setDisplayName(res.newName)
-      } else {
-        setAutoRenameResult({ ok: false, msg: `✗ 失敗: ${res.error ?? `status=${res.status ?? '不明'}`}` })
-      }
-    } catch (e) {
-      setAutoRenameResult({ ok: false, msg: `✗ ${e instanceof Error ? e.message : String(e)}` })
-    } finally {
-      setAutoRenaming(false)
-      setTimeout(() => setAutoRenameResult(null), 8000)
-    }
   }
 
   const handleSaveProxy = async () => {
@@ -1259,43 +1295,101 @@ export function AccountEditModal({
                 </button>
               </div>
 
-              {/* 名前を自動変更 */}
+              {/* X Auth Token (platform='x' のみ) */}
+              {account.platform === 'x' && (
+                <div className="border-t border-zinc-800 pt-4">
+                  <label className="text-zinc-400 text-xs font-medium block mb-2">Auth Token</label>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 font-mono text-xs text-zinc-300 truncate select-all">
+                      {xAuthToken
+                        ? xAuthTokenShow
+                          ? xAuthToken
+                          : '•'.repeat(Math.min(xAuthToken.length, 40))
+                        : <span className="text-zinc-600">{xAuthTokenLoaded ? '(未取得)' : '読込中...'}</span>
+                      }
+                    </div>
+                    {xAuthToken && (
+                      <>
+                        <button
+                          onClick={() => setXAuthTokenShow(v => !v)}
+                          className="px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded-lg transition-colors shrink-0"
+                        >
+                          {xAuthTokenShow ? '隠す' : '表示'}
+                        </button>
+                        <button
+                          onClick={() => navigator.clipboard.writeText(xAuthToken)}
+                          className="px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded-lg transition-colors shrink-0"
+                          title="コピー"
+                        >
+                          📋
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TOTP 認証コードジェネレーター */}
               <div className="border-t border-zinc-800 pt-4">
                 <div className="flex items-start justify-between gap-3 mb-2">
                   <div>
-                    <label className="text-zinc-400 text-xs font-medium block">名前を自動変更</label>
-                    <p className="text-zinc-600 text-xs mt-0.5">
-                      Instagramモバイル API でランダムな日本人女性名に変更します
-                      <br/>
-                      （sessionid・iPhone UA・プロキシ適用）
-                    </p>
+                    <label className="text-zinc-400 text-xs font-medium block">2FA 認証コード</label>
+                    <p className="text-zinc-600 text-xs mt-0.5">TOTP シークレットキーから6桁コードを生成</p>
                   </div>
+                </div>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    value={totpSecret}
+                    onChange={e => setTotpSecret(e.target.value)}
+                    placeholder="Base32 シークレットキー (例: JBSWY3DPEHPK3PXP)"
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
+                  />
                   <button
-                    onClick={handleAutoRename}
-                    disabled={autoRenaming}
-                    className="shrink-0 px-3 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5"
+                    onClick={handleSaveTotpSecret}
+                    disabled={totpSaving}
+                    className="px-2.5 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors shrink-0"
                   >
-                    {autoRenaming && (
-                      <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                    )}
-                    {autoRenaming ? '変更中...' : '🎲 自動変更'}
+                    {totpSaving ? '✓' : '保存'}
                   </button>
                 </div>
-                {autoRenameResult && (
-                  <div className={`mt-2 px-3 py-2 rounded-lg text-xs font-medium ${
-                    autoRenameResult.ok
-                      ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
-                      : 'bg-red-500/10 border border-red-500/30 text-red-400'
-                  }`}>
-                    {autoRenameResult.msg}
-                  </div>
+                <div className="flex gap-2 mb-2">
+                  <button
+                    onClick={generateTotpCode}
+                    disabled={!totpSecret.trim()}
+                    className="px-3 py-2 bg-teal-700 hover:bg-teal-600 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+                  >
+                    コード生成
+                  </button>
+                  {totpCode && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-2xl font-mono font-bold text-white tracking-widest select-all">
+                        {totpCode}
+                      </span>
+                      <button
+                        onClick={() => { navigator.clipboard.writeText(totpCode); }}
+                        className="px-2 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded transition-colors"
+                        title="コピー"
+                      >
+                        📋
+                      </button>
+                      <div className="flex items-center gap-1">
+                        <div className="w-16 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-1000 ${totpRemaining <= 5 ? 'bg-red-500' : totpRemaining <= 10 ? 'bg-amber-500' : 'bg-teal-500'}`}
+                            style={{ width: `${(totpRemaining / 30) * 100}%` }}
+                          />
+                        </div>
+                        <span className={`text-[10px] font-mono w-5 text-right ${totpRemaining <= 5 ? 'text-red-400' : 'text-zinc-500'}`}>
+                          {totpRemaining}s
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {totpError && (
+                  <p className="text-red-400 text-xs">{totpError}</p>
                 )}
-                <details className="mt-2 text-zinc-600 text-[10px]">
-                  <summary className="cursor-pointer hover:text-zinc-400">候補一覧 (15名)</summary>
-                  <p className="mt-1 leading-relaxed">
-                    ゆき・はな・さくら・あおい・ひより・なな・りん・みお・ことは・ゆな・かな・れな・もも・あかり・いちか
-                  </p>
-                </details>
               </div>
 
               {/* 操作速度設定 */}

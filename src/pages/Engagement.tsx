@@ -342,6 +342,107 @@ export function Engagement({ accounts }: Props) {
           </div>
         </div>
       )}
+      {/* X リプBANチェック */}
+      <XReplyBanSection accounts={accounts} />
+    </div>
+  )
+}
+
+// ── X Reply Ban Section ──────────────────────────────────────────────────────
+
+function XReplyBanSection({ accounts }: { accounts: Account[] }) {
+  const xAccounts = accounts.filter(a => a.platform === 'x')
+  const [checking, setChecking] = useState<number | null>(null)
+  const [results, setResults]   = useState<Record<number, { status: string; error?: string }>>({})
+
+  if (xAccounts.length === 0) return null
+
+  const handleCheck = async (id: number) => {
+    setChecking(id)
+    try {
+      const res = await api.accounts.checkReplyBan(id)
+      console.log(`[reply-ban UI] id=${id} result=`, res)
+      setResults(prev => ({ ...prev, [id]: { status: res.status ?? 'error', error: res.error } }))
+    } catch (e) {
+      console.error(`[reply-ban UI] id=${id} exception=`, e)
+      setResults(prev => ({ ...prev, [id]: { status: 'error', error: String(e) } }))
+    }
+    setChecking(null)
+  }
+
+  const handleCheckAll = async () => {
+    for (const a of xAccounts) {
+      setChecking(a.id)
+      try {
+        const res = await api.accounts.checkReplyBan(a.id)
+        setResults(prev => ({ ...prev, [a.id]: { status: res.status ?? 'error', error: res.error } }))
+      } catch (e) {
+        setResults(prev => ({ ...prev, [a.id]: { status: 'error', error: String(e) } }))
+      }
+    }
+    setChecking(null)
+  }
+
+  const formatTime = (iso: string | null) => {
+    if (!iso) return '未チェック'
+    try {
+      return new Date(iso).toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    } catch { return iso }
+  }
+
+  return (
+    <div className="mt-6 pt-4 border-t border-zinc-800">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-base">𝕏</span>
+          <p className="text-zinc-300 text-sm font-semibold">リプBANチェック</p>
+          <span className="text-zinc-600 text-[11px]">({xAccounts.length}垢)</span>
+        </div>
+        <button
+          onClick={handleCheckAll}
+          disabled={checking !== null}
+          className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 text-zinc-300 text-xs font-semibold rounded-lg transition-colors"
+        >
+          {checking !== null ? '確認中...' : '全てチェック'}
+        </button>
+      </div>
+      <div className="space-y-1">
+        {xAccounts.map(a => {
+          const isChecking = checking === a.id
+          const r = results[a.id]
+          const status = r?.status ?? a.reply_ban_status
+          return (
+            <div
+              key={a.id}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${
+                status === 'banned' ? 'bg-red-500/5 border-red-500/20' :
+                status === 'ok'    ? 'bg-zinc-800 border-zinc-700' :
+                                     'bg-zinc-900 border-zinc-800'
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full shrink-0 ${
+                status === 'banned' ? 'bg-red-500' : status === 'ok' ? 'bg-emerald-400' : 'bg-zinc-600'
+              }`} />
+              <span className="text-zinc-300 text-xs font-medium w-32 truncate">@{a.username}</span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                status === 'banned' ? 'bg-red-500/15 text-red-400 border-red-500/30' :
+                status === 'ok'    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
+                                     'bg-zinc-700 text-zinc-400 border-zinc-600'
+              }`}>
+                {status === 'banned' ? '🔴 リプBAN' : status === 'ok' ? '🟢 正常' : status === 'error' ? '⚠ エラー' : '— 未確認'}
+              </span>
+              <span className="text-zinc-600 text-[10px] flex-1">{formatTime(a.reply_ban_checked_at)}</span>
+              <button
+                onClick={() => handleCheck(a.id)}
+                disabled={isChecking}
+                className="shrink-0 px-2 py-1 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-30 text-zinc-300 text-[10px] rounded transition-colors"
+              >
+                {isChecking ? '...' : 'チェック'}
+              </button>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

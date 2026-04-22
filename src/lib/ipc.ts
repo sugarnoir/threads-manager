@@ -19,6 +19,10 @@ export interface Account {
   user_agent: string | null
   ig_password: string | null
   mark: string | null
+  platform: 'threads' | 'instagram' | 'x'
+  totp_secret: string | null
+  reply_ban_status: 'ok' | 'banned' | null
+  reply_ban_checked_at: string | null
   created_at: string
   updated_at: string
 }
@@ -260,6 +264,7 @@ export interface LicenseRow {
   mac_address:   string | null
   device_free:   boolean
   max_accounts:  number | null
+  app_version:   string | null
 }
 
 export interface MasterKeyRow {
@@ -286,7 +291,7 @@ declare global {
           proxy_url?: string
           proxy_username?: string
           proxy_password?: string
-          login_site?: 'threads' | 'instagram'
+          login_site?: 'threads' | 'instagram' | 'x'
         }) => Promise<{ success: boolean; account?: Account; error?: string }>
         register: (options?: {
           proxy_url?: string
@@ -364,6 +369,21 @@ declare global {
           skipped:  number
           errors:   Array<{ username: string; message: string }>
         }>
+        checkReplyBan: (id: number) => Promise<{ success: boolean; status?: string; tweetCount?: number; error?: string }>
+        getAuthToken: (id: number) => Promise<{ token: string | null }>
+        saveTotpSecret: (data: { id: number; totp_secret: string | null }) => Promise<{ success: boolean }>
+        generateTotp: (secret: string) => Promise<{ success: boolean; code?: string; remaining?: number; error?: string }>
+        postStory: (data: {
+          account_id:    number
+          image_path:    string
+          link_sticker?: { url: string; x?: number; y?: number; width?: number; height?: number; rotation?: number }
+        }) => Promise<{ success: boolean; status?: number; mediaId?: string; error?: string }>
+        xTokenLogin: (data: {
+          auth_token:      string
+          proxy_url?:      string | null
+          proxy_username?: string | null
+          proxy_password?: string | null
+        }) => Promise<{ success: boolean; account?: Account; error?: string }>
       }
       posts: {
         list: (accountId: number) => Promise<Post[]>
@@ -461,6 +481,11 @@ declare global {
         update: (data: { id: number; title: string; content: string }) => Promise<{ success: boolean; data: PostTemplate; error?: string }>
         delete: (id: number) => Promise<{ success: boolean; error?: string }>
       }
+      storyTemplates: {
+        list:   () => Promise<Array<{ id: number; name: string; image_path: string; link_url: string | null; link_x: number; link_y: number; link_width: number; link_height: number; created_at: string }>>
+        create: (data: { name: string; image_path: string; link_url?: string | null; link_x?: number; link_y?: number; link_width?: number; link_height?: number }) => Promise<{ success: boolean; id?: number }>
+        delete: (id: number) => Promise<{ success: boolean }>
+      }
       auth: {
         check:  () => Promise<{ required: boolean; authenticated: boolean }>
         verify: (key: string) => Promise<{ ok: boolean; error?: string }>
@@ -532,7 +557,7 @@ declare global {
         clearPending:    (accountId: number) => Promise<{ ok: boolean }>
       }
       dialog: {
-        openFile: () => Promise<{ name: string; data: number[] } | null>
+        openFile: () => Promise<{ name: string; path: string; data: number[] } | null>
       }
       on: (channel: string, callback: (...args: unknown[]) => void) => () => void
       debugLog: (msg: string) => Promise<void>

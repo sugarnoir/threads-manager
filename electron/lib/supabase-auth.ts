@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 import Store from 'electron-store'
 import os from 'os'
-import { setSetting } from '../db/repositories/settings'
+import { app } from 'electron'
+import { setSetting, getSetting } from '../db/repositories/settings'
 
 const SUPABASE_URL = 'https://pywvrkghavvwdqvefqbh.supabase.co'
 const SUPABASE_KEY  = 'sb_publishable_EPQxxmN_PJzcpbjk43DB4Q_oSzXF1T4'
@@ -170,7 +171,34 @@ export async function checkLicenseOnline(key: string): Promise<LicenseCheckResul
       return { valid: false, reason: 'mac_mismatch' }
     }
 
-    // 認証成功 → MACアドレスをローカルにもキャッシュ + maxAccounts をローカル保存
+    // 認証成功 → app_version を Supabase に保存（service_role key で RLS バイパス）
+    try {
+      const appVersion = app.getVersion()
+      const serviceKey = getSetting('supabase_service_key')?.trim()
+      if (serviceKey) {
+        const adminClient = createClient(SUPABASE_URL, serviceKey)
+        const { error: verErr } = await adminClient
+          .from('licenses')
+          .update({ app_version: appVersion })
+          .eq('key', key)
+        if (verErr) {
+          console.warn(`[License] app_version update error: ${verErr.message}`)
+        } else {
+          console.log(`[License] app_version saved: ${appVersion} (via service_role)`)
+        }
+      } else {
+        // service_role がない場合は anon key でフォールバック
+        const { error: verErr } = await supabase
+          .from('licenses')
+          .update({ app_version: appVersion })
+          .eq('key', key)
+        console.log(`[License] app_version update via anon: error=${verErr?.message ?? 'none'}`)
+      }
+    } catch (e) {
+      console.warn(`[License] app_version update exception: ${e}`)
+    }
+
+    // MACアドレスをローカルにもキャッシュ + maxAccounts をローカル保存
     setStoredMac(currentMac)
     console.log(`[License] max_accounts from Supabase: ${JSON.stringify(row.max_accounts)} (type=${typeof row.max_accounts})`)
     if (row.max_accounts !== null && row.max_accounts !== undefined) {

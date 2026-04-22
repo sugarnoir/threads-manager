@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../lib/ipc'
 import type { ProxyPreset } from '../lib/ipc'
 
-type Mode = 'login' | 'register' | 'setup'
+type Mode = 'login' | 'instagram' | 'x'
 type ProxyType = 'none' | 'http' | 'https' | 'socks5'
 
 interface ProxyOptions {
@@ -13,6 +13,7 @@ interface ProxyOptions {
 
 interface Props {
   onConfirm: (proxy: ProxyOptions | null, mode: Mode) => void
+  onXTokenLogin?: (authToken: string, proxy: ProxyOptions | null) => void
   onCancel: () => void
 }
 
@@ -144,8 +145,10 @@ function ProxyForm({
   )
 }
 
-export function AddAccountModal({ onConfirm, onCancel }: Props) {
+export function AddAccountModal({ onConfirm, onXTokenLogin, onCancel }: Props) {
   const [mode, setMode] = useState<Mode>('login')
+  const [xLoginMethod, setXLoginMethod] = useState<'browser' | 'token'>('browser')
+  const [xAuthToken, setXAuthToken] = useState('')
 
   const [proxyType, setProxyType] = useState<ProxyType>('none')
   const [host, setHost]           = useState('')
@@ -231,57 +234,86 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
             </div>
           </button>
           <button
-            onClick={() => setMode('register')}
+            onClick={() => setMode('instagram')}
             className={`flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
-              mode === 'register'
-                ? 'bg-emerald-600/15 border-emerald-500 text-emerald-400'
+              mode === 'instagram'
+                ? 'bg-pink-600/15 border-pink-500 text-pink-400'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
             }`}
           >
-            <span className="text-lg">✨</span>
+            <span className="text-lg">📷</span>
             <div className="text-center">
-              <p className="text-[11px] font-bold leading-tight">新規作成</p>
-              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">IG新規登録→<br/>Threads接続</p>
+              <p className="text-[11px] font-bold leading-tight">Instagram</p>
+              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">IGアカウント<br/>追加</p>
             </div>
           </button>
           <button
-            onClick={() => setMode('setup')}
+            onClick={() => setMode('x')}
             className={`flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
-              mode === 'setup'
-                ? 'bg-violet-600/15 border-violet-500 text-violet-400'
+              mode === 'x'
+                ? 'bg-zinc-500/15 border-zinc-400 text-zinc-200'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
             }`}
           >
-            <span className="text-lg">🧭</span>
+            <span className="text-lg font-bold">𝕏</span>
             <div className="text-center">
-              <p className="text-[11px] font-bold leading-tight">既存IG<br/>から作成</p>
-              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">3ステップ<br/>ウィザード</p>
+              <p className="text-[11px] font-bold leading-tight">X</p>
+              <p className="text-[9px] text-zinc-500 mt-0.5 leading-tight">Xアカウント<br/>追加</p>
             </div>
           </button>
         </div>
 
         {/* Mode description */}
-        {mode === 'register' && (
-          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 space-y-1">
-            <p className="text-emerald-400 text-xs font-semibold">新規登録の流れ</p>
+        {mode === 'instagram' && (
+          <div className="bg-pink-500/10 border border-pink-500/20 rounded-xl px-4 py-3 space-y-1">
+            <p className="text-pink-400 text-xs font-semibold">Instagram アカウント追加</p>
             <ol className="text-zinc-400 text-[11px] space-y-0.5 list-decimal list-inside">
-              <li>Instagramの登録ページが開きます</li>
-              <li>メール/電話番号でアカウントを作成</li>
-              <li>そのままThreadsにログイン</li>
-              <li>完了後、自動でリストに追加されます</li>
+              <li>Instagramのログイン画面が開きます</li>
+              <li>ログインすると自動でTMに追加されます</li>
             </ol>
           </div>
         )}
 
-        {mode === 'setup' && (
-          <div className="bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-3 space-y-1">
-            <p className="text-violet-400 text-xs font-semibold">既存Instagramから作成の流れ</p>
-            <ol className="text-zinc-400 text-[11px] space-y-0.5 list-decimal list-inside">
-              <li>Instagramログインウィンドウが開きます</li>
-              <li>プロフィール編集ページで名前を変更</li>
-              <li>「次へ」でThreadsアカウント作成画面へ</li>
-              <li>「完了」でTMにアカウントが追加されます</li>
-            </ol>
+        {mode === 'x' && (
+          <div className="bg-zinc-500/10 border border-zinc-500/20 rounded-xl px-4 py-3 space-y-2">
+            <div className="flex gap-1 bg-zinc-800/60 p-0.5 rounded-lg">
+              <button
+                onClick={() => setXLoginMethod('browser')}
+                className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                  xLoginMethod === 'browser' ? 'bg-zinc-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                ブラウザでログイン
+              </button>
+              <button
+                onClick={() => setXLoginMethod('token')}
+                className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                  xLoginMethod === 'token' ? 'bg-zinc-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                トークンでログイン
+              </button>
+            </div>
+            {xLoginMethod === 'browser' && (
+              <ol className="text-zinc-400 text-[11px] space-y-0.5 list-decimal list-inside">
+                <li>X (Twitter) のログイン画面が開きます</li>
+                <li>ログインすると自動でTMに追加されます</li>
+              </ol>
+            )}
+            {xLoginMethod === 'token' && (
+              <div className="space-y-2">
+                <p className="text-zinc-400 text-[11px]">
+                  ブラウザの Cookie から <code className="text-zinc-300 bg-zinc-800 px-1 rounded">auth_token</code> を取得して貼り付け
+                </p>
+                <input
+                  type="text"
+                  value={xAuthToken}
+                  onChange={e => setXAuthToken(e.target.value)}
+                  placeholder="auth_token の値を入力..."
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+            )}
           </div>
         )}
 
@@ -316,21 +348,31 @@ export function AddAccountModal({ onConfirm, onCancel }: Props) {
           >
             キャンセル
           </button>
-          <button
-            onClick={handleSubmit}
-            disabled={proxyType !== 'none' && (!host || !port)}
-            className={`flex-1 py-2 text-white rounded-lg text-sm font-semibold disabled:opacity-40 transition-colors ${
-              mode === 'register'
-                ? 'bg-emerald-600 hover:bg-emerald-500'
-                : mode === 'setup'
-                ? 'bg-violet-600 hover:bg-violet-500'
-                : 'bg-blue-600 hover:bg-blue-500'
-            }`}
-          >
-            {mode === 'login'    ? 'ログインウィンドウを開く'
-              : mode === 'register' ? '登録ページを開く'
-              : '初期設定ウィザードを開始'}
-          </button>
+          {mode === 'x' && xLoginMethod === 'token' ? (
+            <button
+              onClick={() => { onXTokenLogin?.(xAuthToken.trim(), buildProxy()) }}
+              disabled={!xAuthToken.trim()}
+              className="flex-1 py-2 bg-zinc-600 hover:bg-zinc-500 disabled:opacity-40 text-white rounded-lg text-sm font-semibold transition-colors"
+            >
+              トークンでログイン
+            </button>
+          ) : (
+            <button
+              onClick={handleSubmit}
+              disabled={proxyType !== 'none' && (!host || !port)}
+              className={`flex-1 py-2 text-white rounded-lg text-sm font-semibold disabled:opacity-40 transition-colors ${
+                mode === 'instagram'
+                  ? 'bg-pink-600 hover:bg-pink-500'
+                  : mode === 'x'
+                  ? 'bg-zinc-600 hover:bg-zinc-500'
+                  : 'bg-blue-600 hover:bg-blue-500'
+              }`}
+            >
+              {mode === 'login'     ? 'ログインウィンドウを開く'
+                : mode === 'instagram' ? 'Instagramを開く'
+                : 'X (Twitter) を開く'}
+            </button>
+          )}
         </div>
       </div>
     </div>
