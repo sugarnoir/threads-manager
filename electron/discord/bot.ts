@@ -6,6 +6,7 @@ import os from 'os'
 import { Client, GatewayIntentBits, Message } from 'discord.js'
 import { getAllAccounts } from '../db/repositories/accounts'
 import { createPost, updatePostStatus } from '../db/repositories/posts'
+import { shouldSkipForStatus } from '../lib/account-guard'
 import { createSchedule } from '../db/repositories/schedules'
 import { postThread } from '../playwright/threads-client'
 import { getSetting } from '../db/repositories/settings'
@@ -331,6 +332,14 @@ async function handleNaturalPost(
   const errs: string[] = []
 
   for (const account of targets) {
+    // ステータスチェック
+    const guard = shouldSkipForStatus(account)
+    if (guard.skip) {
+      console.log(`[DiscordBot] SKIP account=${account.username}: ${guard.reason}`)
+      errs.push(`⏭️ @${account.username}: ${guard.reason}`)
+      continue
+    }
+
     console.log(`[DiscordBot] postThread start: account=${account.username}(${account.id})`)
     try {
       const post   = createPost({ account_id: account.id, content })

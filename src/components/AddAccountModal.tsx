@@ -157,6 +157,7 @@ export function AddAccountModal({ onConfirm, onXTokenLogin, onCancel }: Props) {
   const [password, setPassword]   = useState('')
   const [presets, setPresets]     = useState<ProxyPreset[]>([])
   const [currentIp, setCurrentIp] = useState<string | null>(null)
+  const [ipError, setIpError] = useState<{ message: string; hint?: string } | null>(null)
   const [checkingIp, setCheckingIp] = useState(false)
 
   useEffect(() => {
@@ -178,18 +179,39 @@ export function AddAccountModal({ onConfirm, onXTokenLogin, onCancel }: Props) {
   useEffect(() => {
     if (proxyType === 'none') {
       setCurrentIp('__none__')
+      setIpError(null)
       return
     }
     if (!host || !port) {
       setCurrentIp(null)
+      setIpError(null)
       return
     }
     setCheckingIp(true)
     setCurrentIp(null)
+    setIpError(null)
     const proxyUrl = `${proxyType}://${host}:${port}`
+
+    const errorMessages: Record<string, { message: string; hint?: string }> = {
+      PROXY_CONNECTION_FAILED: { message: 'プロキシサーバーに接続できません', hint: 'ホスト・ポートが正しいか、プロキシが稼働中か確認してください' },
+      PROXY_AUTH_FAILED:       { message: 'プロキシ認証に失敗しました', hint: 'ユーザー名・パスワードをコピペし直してください' },
+      PROXY_FORBIDDEN:         { message: 'プロキシの利用制限・契約切れの可能性', hint: 'プロキシプロバイダの管理画面で契約状況を確認してください' },
+      PROXY_TIMEOUT:           { message: 'プロキシ応答タイムアウト', hint: 'プロキシが過負荷、または接続先がブロックされている可能性があります' },
+      IP_SERVICE_ERROR:        { message: 'IP取得サービスから応答なし', hint: 'プロキシ経由の通信は成功していますが、外部APIが一時的にダウンしている可能性があります' },
+      INVALID_IP_FORMAT:       { message: 'プロキシのIP取得に失敗', hint: 'プロバイダ側の問題（IPプール枯渇等）の可能性があります' },
+    }
+
     api.accounts.checkIp({ proxy_url: proxyUrl, proxy_username: username || undefined, proxy_password: password || undefined })
-      .then(r => setCurrentIp(r.ip ?? 'エラー'))
-      .catch(() => setCurrentIp('エラー'))
+      .then(r => {
+        if (r.ip) {
+          setCurrentIp(r.ip)
+        } else {
+          setCurrentIp(null)
+          const mapped = r.errorType ? errorMessages[r.errorType] : undefined
+          setIpError(mapped ?? { message: `IP取得エラー: ${r.error ?? '不明'}` })
+        }
+      })
+      .catch(() => setIpError({ message: 'IP取得エラー: 通信に失敗しました' }))
       .finally(() => setCheckingIp(false))
   }, [proxyType, host, port, username, password])
 
@@ -328,15 +350,23 @@ export function AddAccountModal({ onConfirm, onXTokenLogin, onCancel }: Props) {
         />
 
         {/* IP表示 */}
-        <div className="flex items-center gap-2 px-3 py-2 bg-zinc-800 rounded-lg text-xs">
-          <span className="text-zinc-400">現在のIP:</span>
-          {checkingIp && <span className="text-zinc-500">確認中...</span>}
-          {!checkingIp && currentIp === '__none__' && <span className="text-zinc-500">プロキシなし</span>}
-          {!checkingIp && currentIp && currentIp !== '__none__' && (
-            <span className={currentIp === 'エラー' ? 'text-red-400' : 'text-emerald-400 font-mono'}>{currentIp}</span>
-          )}
-          {!checkingIp && currentIp === null && proxyType !== 'none' && (
-            <span className="text-zinc-600">ホスト/ポートを入力してください</span>
+        <div className="px-3 py-2 bg-zinc-800 rounded-lg text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-400">現在のIP:</span>
+            {checkingIp && <span className="text-zinc-500">確認中...</span>}
+            {!checkingIp && currentIp === '__none__' && <span className="text-zinc-500">プロキシなし</span>}
+            {!checkingIp && currentIp && currentIp !== '__none__' && (
+              <span className="text-emerald-400 font-mono">{currentIp}</span>
+            )}
+            {!checkingIp && !currentIp && ipError && (
+              <span className="text-red-400">{ipError.message}</span>
+            )}
+            {!checkingIp && currentIp === null && !ipError && proxyType !== 'none' && (
+              <span className="text-zinc-600">ホスト/ポートを入力してください</span>
+            )}
+          </div>
+          {!checkingIp && ipError?.hint && (
+            <div className="mt-1 ml-[4.5rem] text-[10px] text-zinc-500">{ipError.hint}</div>
           )}
         </div>
 

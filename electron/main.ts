@@ -24,8 +24,13 @@ import { registerFollowQueueHandlers } from './ipc/follow-queue'
 import { registerProxyPresetHandlers } from './ipc/proxy-presets'
 import { registerMasterKeyHandlers } from './ipc/master-key'
 import { registerAutoReplyHandlers } from './ipc/auto-reply'
+import { registerStoryScheduleHandlers } from './ipc/story-schedule'
+import { registerReelScheduleHandlers } from './ipc/reel-schedule'
+import { registerResponseAlertHandlers } from './ipc/response-alerts'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
+import { registerAppConfigHandlers } from './ipc/app-config'
+import { initAppConfig } from './lib/app-config'
 
 const isDev = process.env.NODE_ENV === 'development'
 
@@ -85,6 +90,11 @@ app.whenReady().then(() => {
   registerAutoReplyHandlers()
   registerProxyPresetHandlers()
   registerMasterKeyHandlers()
+  registerAppConfigHandlers()
+  registerStoryScheduleHandlers()
+  registerReelScheduleHandlers()
+  registerResponseAlertHandlers()
+  initAppConfig() // fire-and-forget: 起動を遅延させない
   registerGroupHandlers()
   registerResearchHandlers()
   registerStockHandlers()

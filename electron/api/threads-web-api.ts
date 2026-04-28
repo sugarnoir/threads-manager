@@ -10,6 +10,13 @@
  */
 
 import { net, session, Session } from 'electron'
+import { prePostDelay, typingDelay, mediaConfigureDelay } from '../lib/delay'
+import { analyzeAndLog } from '../lib/response-analyzer'
+import { getBloksVersionId }            from '../lib/app-config'
+import { generateBrowserUA, generateMobileUA, getInstagramAppVersion } from '../lib/ua-generator'
+import { getHeadersPatternA, getHeadersPatternB, getUnifiedHeaders } from '../lib/ig-headers'
+import { generateAllDeviceIds } from '../lib/device-id-generator'
+import { updateAccountDeviceIds } from '../db/repositories/accounts'
 import { getSetting, setSetting }       from '../db/repositories/settings'
 import { getAccountById }               from '../db/repositories/accounts'
 
@@ -28,8 +35,25 @@ import fs from 'fs'
 const THREADS_URL  = 'https://www.threads.com'
 const IG_APP_ID    = '238260118697367'
 const TOKEN_TTL_MS = 25 * 60 * 1000
-// Instagram iPhone 公式アプリ UA (2026年4月時点の最新)
-const BROWSER_UA   = 'Instagram 355.0.0.24.108 (iPhone16,2; iOS 18_4; ja_JP; ja; scale=3.00; 1320x2868; 620931905)'
+// Instagram iPhone 公式アプリ UA（app_config から動的生成）
+function getBrowserUA(): string { return generateBrowserUA() }
+
+/** アカウントの use_unified_headers フラグに応じて追加ヘッダーを返す */
+function getExtraHeaders(accountId: number, legacyPattern: 'A' | 'B'): Record<string, string> {
+  const acct = getAccountById(accountId)
+  if (acct?.use_unified_headers) return getUnifiedHeaders(accountId)
+  return legacyPattern === 'A' ? getHeadersPatternA(accountId) : getHeadersPatternB(accountId)
+}
+
+/** 統一ヘッダーモードか判定 */
+function isUnifiedMode(accountId: number): boolean {
+  return !!getAccountById(accountId)?.use_unified_headers
+}
+
+/** 統一ヘッダーモード時の UA（全リクエストで getBrowserUA()） */
+function getUA(accountId: number): string {
+  return isUnifiedMode(accountId) ? getBrowserUA() : getAccountIphoneUA(accountId)
+}
 
 const CREATE_TEXT_DOC_IDS = [
   '7783822248314888',
@@ -161,7 +185,7 @@ function scrapePageTokens(sess: Session): Promise<{
       session:          sess,
       useSessionCookies: true,
     })
-    req.setHeader('User-Agent',                 BROWSER_UA)
+    req.setHeader('User-Agent',                 getBrowserUA())
     req.setHeader('Accept',                     'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
     req.setHeader('Accept-Language',            'ja,en-US;q=0.9,en;q=0.8')
     req.setHeader('Accept-Encoding',            'identity')
@@ -292,9 +316,10 @@ async function restPostTextViaNet(
         'x-asbd-id':     '129477',
         'Origin':        THREADS_URL,
         'Referer':       THREADS_URL + '/',
-        'User-Agent':    BROWSER_UA,
+        'User-Agent':    getBrowserUA(),
         'Accept':        '*/*',
         'Accept-Encoding': 'identity',
+        ...getExtraHeaders(accountId, 'A'),
       },
       body,
     })
@@ -351,8 +376,9 @@ async function restPostMediaViaNet(
         'x-asbd-id':                  '129477',
         'Origin':                     THREADS_URL,
         'Referer':                    THREADS_URL + '/',
-        'User-Agent':                 BROWSER_UA,
+        'User-Agent':                 getBrowserUA(),
         'Accept-Encoding':            'identity',
+        ...getExtraHeaders(accountId, 'A'),
       },
       body:      fileData,
       accountId,
@@ -371,6 +397,9 @@ async function restPostMediaViaNet(
   }
 
   if (uploadIds.length === 0) return null
+
+  // ── メディアconfigure前ディレイ ────────────────────────────────────────────
+  await mediaConfigureDelay(accountId)
 
   // ── configure ─────────────────────────────────────────────────────────────
   const selfId  = crypto.randomUUID()
@@ -453,13 +482,14 @@ async function restPostMediaViaNet(
     'x-asbd-id':       isSidecar ? '359341' : '129477',
     'Origin':          THREADS_URL,
     'Referer':         THREADS_URL + '/',
-    'User-Agent':      BROWSER_UA,
+    'User-Agent':      getBrowserUA(),
     'Accept':          '*/*',
     'Accept-Encoding': 'identity',
+    ...getExtraHeaders(accountId, 'A'),
   }
   if (isSidecar) {
     cfgHeaders['x-instagram-ajax']   = '0'
-    cfgHeaders['x-bloks-version-id'] = '86eaac606b7c5e9b45f4357f86082d05eace8411e43d3f754d885bf54a759a71'
+    cfgHeaders['x-bloks-version-id'] = getBloksVersionId()
   }
   console.log(`[CFG_DEBUG] ===== configure request =====`)
   console.log(`[CFG_DEBUG] URL: ${cfgUrl}`)
@@ -482,7 +512,7 @@ async function restPostMediaViaNet(
         const restResp = await doRestPost({
           sess:    info.sess,
           url:     cfgUrl,
-          headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'x-csrftoken': info.csrfToken, 'x-ig-app-id': IG_APP_ID, 'x-asbd-id': '359341', 'x-instagram-ajax': '0', 'x-bloks-version-id': '86eaac606b7c5e9b45f4357f86082d05eace8411e43d3f754d885bf54a759a71', 'Origin': THREADS_URL, 'Referer': THREADS_URL + '/' },
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'x-csrftoken': info.csrfToken, 'x-ig-app-id': IG_APP_ID, 'x-asbd-id': '359341', 'x-instagram-ajax': '0', 'x-bloks-version-id': getBloksVersionId(), 'Origin': THREADS_URL, 'Referer': THREADS_URL + '/' },
           body:    cfgBody,
         })
         console.log(`[WebAPI] doRestPost sidecar status=${restResp.status} body=${restResp.body}`)
@@ -641,7 +671,7 @@ export async function fetchFollowerCount(accountId: number): Promise<number | nu
         'X-CSRFToken':     info.csrfToken,
         'Accept':          'application/json',
         'Accept-Encoding': 'identity',
-        'User-Agent':      BROWSER_UA,
+        'User-Agent':      getBrowserUA(),
         'Referer':         THREADS_URL + '/',
       },
       accountId,
@@ -763,11 +793,12 @@ async function graphqlPost(
     ...headers,
     'Origin':                        THREADS_URL,
     'Referer':                       THREADS_URL + '/',
-    'User-Agent':                    BROWSER_UA,
+    'User-Agent':                    getBrowserUA(),
     'Accept-Encoding':               'identity',
     'X-IG-Connection-Type':          'WIFI',
     'X-IG-Bandwidth-Speed-KBPS':     '5000',
     'X-IG-Bandwidth-TotalBytes-B':   '500000',
+    ...getExtraHeaders(accountId, 'A'),
   }
   console.log(`[WebAPI] request body (300): ${body.slice(0, 300)}`)
 
@@ -786,8 +817,8 @@ async function graphqlPost(
 
 const IG_MOBILE_URL    = 'https://i.instagram.com'
 const IG_MOBILE_APP_ID = '238260118697367'  // Threads app ID (text_app)
-// Threads (Barcelona) iPhone 公式アプリ UA (2026年4月時点の最新)
-const IG_MOBILE_UA     = 'Barcelona 355.0.0.24.108 iPhone (iPhone16,2; iOS 18_4; ja_JP; ja; scale=3.00; 1320x2868; 620931905)'
+// Threads (Barcelona) iPhone 公式アプリ UA（app_config から動的生成）
+function getIgMobileUA(): string { return generateMobileUA() }
 
 /** アカウントに割り当てられた iPhone UA を返す。未設定の場合はリストから決定論的に選択 */
 function getAccountIphoneUA(accountId: number): string {
@@ -970,12 +1001,73 @@ export async function changeDisplayNameMobile(
   }
 }
 
-/** ランダムな日本人女性名で display_name を変更 */
+/** ランダムな名前で display_name を変更（Playwright 経由） */
 export async function autoRenameJapaneseFemale(
   accountId: number,
+  customNames?: string[],
 ): Promise<{ success: boolean; status?: number; newName?: string; error?: string }> {
-  const newName = JP_FEMALE_NAMES[Math.floor(Math.random() * JP_FEMALE_NAMES.length)]
-  return changeDisplayNameMobile(accountId, newName)
+  const nameList = customNames && customNames.length > 0 ? customNames : [...JP_FEMALE_NAMES]
+  const newName = nameList[Math.floor(Math.random() * nameList.length)]
+
+  const acct = getAccountById(accountId)
+  if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+
+  const allCookies = await session.fromPartition(`persist:account-${accountId}`).cookies.get({}).catch(() => [])
+  const sessionid = allCookies.find(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))?.value
+  const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('instagram.com'))?.value
+  const dsUserId  = allCookies.find(c => c.name === 'ds_user_id' && c.domain?.includes('instagram.com'))?.value
+
+  if (!sessionid || !csrftoken || !dsUserId) {
+    return { success: false, error: 'Cookie 不足 (sessionid/csrftoken/ds_user_id)' }
+  }
+
+  const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
+  const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
+  const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
+
+  const { spawn } = await import('child_process')
+  const pathMod = await import('path')
+  const { app } = await import('electron')
+
+  const isDev = !app.isPackaged
+  // 常に Playwright 版を使用（プロキシなしで実行）
+  const scriptPath = isDev
+    ? pathMod.join(app.getAppPath(), 'electron', 'scripts', 'change_name_playwright.py')
+    : pathMod.join(process.resourcesPath, 'scripts', 'change_name_playwright.py')
+
+  const args = [
+    scriptPath,
+    '--sessionid', sessionid,
+    '--csrftoken', csrftoken,
+    '--ds_user_id', dsUserId,
+    '--new_name', newName,
+  ]
+  if (mid)   args.push('--mid', mid)
+  if (igDid) args.push('--ig_did', igDid)
+  if (rur)   args.push('--rur', rur)
+  // プロキシは渡さない（名前変更はプロキシなしで実行）
+
+  console.log(`[autoRename] python3 ${args.slice(0, 3).join(' ')}... new_name=${newName}`)
+
+  return new Promise((resolve) => {
+    const proc = spawn('python3', args, { timeout: 300_000 })
+    let stdout = ''
+    let stderr = ''
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
+    proc.on('close', (code) => {
+      console.log(`[autoRename] python exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 200)}`)
+      try {
+        const result = JSON.parse(stdout.trim())
+        resolve(result)
+      } catch {
+        resolve({ success: false, error: stderr || stdout || `python exit code ${code}` })
+      }
+    })
+    proc.on('error', (err) => {
+      resolve({ success: false, error: `python spawn error: ${err.message}` })
+    })
+  })
 }
 
 async function mobilePostText(
@@ -1034,10 +1126,11 @@ async function mobilePostText(
       'Cookie':       cookieHeader,
       'X-CSRFToken':  csrfToken,
       'X-IG-App-ID':  IG_MOBILE_APP_ID,
-      'User-Agent':   getAccountIphoneUA(accountId),
+      'User-Agent':   getUA(accountId),
       'Content-Type': 'application/x-www-form-urlencoded',
       'Origin':       'https://www.instagram.com',
       'Referer':      'https://www.instagram.com/',
+      ...getExtraHeaders(accountId, 'B'),
     },
     body,
     accountId,
@@ -1067,9 +1160,10 @@ async function mobilePostWithMedia(
     'Cookie':       cookieHeader,
     'X-CSRFToken':  igCsrfToken,
     'X-IG-App-ID':  IG_MOBILE_APP_ID,
-    'User-Agent':   getAccountIphoneUA(accountId),
+    'User-Agent':   getUA(accountId),
     'Origin':       'https://www.instagram.com',
     'Referer':      'https://www.instagram.com/',
+    ...getExtraHeaders(accountId, 'B'),
   }
 
   // threads.com の csrfToken を取得（アップロードに使用）
@@ -1104,7 +1198,7 @@ async function mobilePostWithMedia(
         'x-ig-app-id':                IG_MOBILE_APP_ID,
         'Origin':                     THREADS_URL,
         'Referer':                    THREADS_URL + '/',
-        'User-Agent':                 getAccountIphoneUA(accountId),
+        'User-Agent':                 getUA(accountId),
         'Accept-Encoding':            'identity',
       },
       body:      fileData,
@@ -1121,6 +1215,9 @@ async function mobilePostWithMedia(
   }
 
   if (uploadIds.length === 0) return { success: false, error: 'no images uploaded' }
+
+  // ── メディアconfigure前ディレイ ────────────────────────────────────────────
+  await mediaConfigureDelay(accountId)
 
   // ── configure ──────────────────────────────────────────────────────────────
   const selfId  = crypto.randomUUID()
@@ -1198,12 +1295,12 @@ async function mobilePostWithMedia(
     'x-asbd-id':       isSidecar ? '359341' : '129477',
     'Origin':          THREADS_URL,
     'Referer':         THREADS_URL + '/',
-    'User-Agent':      getAccountIphoneUA(accountId),
+    'User-Agent':      getUA(accountId),
     'Accept-Encoding': 'identity',
   }
   if (isSidecar) {
     cfgHeaders['x-instagram-ajax']   = '0'
-    cfgHeaders['x-bloks-version-id'] = '86eaac606b7c5e9b45f4357f86082d05eace8411e43d3f754d885bf54a759a71'
+    cfgHeaders['x-bloks-version-id'] = getBloksVersionId()
   }
 
   const cfgResp = await doPost({
@@ -1225,11 +1322,31 @@ async function mobilePostWithMedia(
 
 // ── Text post ─────────────────────────────────────────────────────────────────
 
+/** 投稿前にデバイスIDをlazy生成（NULLなら生成して保存） */
+function lazyEnsureDeviceIds(accountId: number): void {
+  const acct = getAccountById(accountId)
+  if (!acct || acct.device_id) return
+  const ids = generateAllDeviceIds(acct.username)
+  updateAccountDeviceIds(accountId, ids)
+  console.log(`[WebAPI] lazy-generated device IDs for account=${accountId} (${acct.username})`)
+}
+
 export async function apiPostText(
   accountId: number,
   text:      string,
   topic?:    string
 ): Promise<ApiPostResult> {
+  lazyEnsureDeviceIds(accountId)
+
+  // ── 投稿前ディレイ（bot検知回避）─────────────────────────────────────────────
+  const preMs = await prePostDelay(accountId)
+  const typeMs = await typingDelay(accountId, text)
+  console.log(`[Delay] account=${accountId} prePost=${preMs}ms typing=${typeMs}ms (${text.length}chars)`)
+
+  // レスポンスアラート（1投稿につき最大1回）
+  let alerted = false
+  const maybeAlert = (body: string) => { if (!alerted && analyzeAndLog(accountId, body)) alerted = true }
+
   // ── 経路0: Mobile API (i.instagram.com) ─────────────────────────────────────
   console.log(`[WebAPI] apiPostText account=${accountId} topic=${JSON.stringify(topic)} trying mobile API`)
   const mobileResult = await mobilePostText(accountId, text, topic)
@@ -1237,6 +1354,7 @@ export async function apiPostText(
     console.log(`[WebAPI] ✓ mobile post success`)
     return { success: true }
   }
+  maybeAlert(mobileResult.error ?? '')
   console.warn(`[WebAPI] mobile post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch、最も確実）
@@ -1255,6 +1373,7 @@ export async function apiPostText(
         }
         const errMsg = JSON.stringify(json).slice(0, 200)
         console.warn(`[WebAPI] REST 200 but unexpected body: ${errMsg}`)
+        maybeAlert(restResp.body)
         return { success: false, error: errMsg }
       } catch (e) {
         console.error(`[WebAPI] REST JSON parse error: ${e instanceof Error ? e.message : String(e)}`)
@@ -1262,15 +1381,20 @@ export async function apiPostText(
       }
     }
     if (restResp.status === 401 || restResp.status === 403) {
+      maybeAlert(restResp.body)
       return { success: false, error: '認証エラー: 再ログインが必要です' }
     }
+    maybeAlert(restResp.body)
     return { success: false, error: `REST status=${restResp.status}: ${restResp.body.slice(0, 200)}` }
   }
 
   // ── 経路2: REST API via net.request + useSessionCookies（ビュー未開放時）
   console.log(`[WebAPI] REST view unavailable, trying REST via net.request`)
   const netResult = await restPostTextViaNet(accountId, text, topic)
-  if (netResult) return netResult
+  if (netResult) {
+    if (!netResult.success) maybeAlert(netResult.error ?? '')
+    return netResult
+  }
 
   // ── 経路3: GraphQL（最終フォールバック）
   console.log(`[WebAPI] REST net failed, falling back to GraphQL`)
@@ -1301,10 +1425,13 @@ export async function apiPostText(
       continue
     }
     if (res.ok) return { success: true }
+    maybeAlert(res.errorMsg ?? '')
     return { success: false, error: res.errorMsg }
   }
 
-  return { success: false, error: lastError || 'テキスト投稿 API が応答しませんでした (全 doc_id 試行済み)' }
+  const finalErr = lastError || 'テキスト投稿 API が応答しませんでした (全 doc_id 試行済み)'
+  maybeAlert(finalErr)
+  return { success: false, error: finalErr }
 }
 
 // ── Image upload ──────────────────────────────────────────────────────────────
@@ -1331,7 +1458,7 @@ async function uploadImage(
         'X-IG-App-ID':                IG_APP_ID,
         'X-CSRFToken':                tokens.csrfToken,
         'Origin':                     THREADS_URL,
-        'User-Agent':                 BROWSER_UA,
+        'User-Agent':                 getBrowserUA(),
         'Accept-Encoding':            'identity',
       },
       body:      fileData,
@@ -1356,8 +1483,18 @@ export async function apiPostWithMedia(
   imagePaths: string[],
   topic?:     string
 ): Promise<ApiPostResult> {
+  lazyEnsureDeviceIds(accountId)
   const validPaths = imagePaths.filter(p => fs.existsSync(p))
   if (validPaths.length === 0) return apiPostText(accountId, text, topic)
+
+  // ── 投稿前ディレイ（bot検知回避）─────────────────────────────────────────────
+  const preMs = await prePostDelay(accountId)
+  const typeMs = await typingDelay(accountId, text)
+  console.log(`[Delay] account=${accountId} prePost=${preMs}ms typing=${typeMs}ms (${text.length}chars)`)
+
+  // レスポンスアラート（1投稿につき最大1回）
+  let alerted = false
+  const maybeAlert = (body: string) => { if (!alerted && analyzeAndLog(accountId, body)) alerted = true }
 
   // ── 経路0: Mobile API (i.instagram.com) ─────────────────────────────────────
   console.log(`[WebAPI] apiPostWithMedia account=${accountId} images=${validPaths.length} topic=${JSON.stringify(topic)} trying mobile API`)
@@ -1366,6 +1503,7 @@ export async function apiPostWithMedia(
     console.log(`[WebAPI] ✓ mobile media post success`)
     return { success: true }
   }
+  maybeAlert(mobileResult.error ?? '')
   console.warn(`[WebAPI] mobile media post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch）
@@ -1384,6 +1522,7 @@ export async function apiPostWithMedia(
         }
         const errMsg = JSON.stringify(json).slice(0, 200)
         console.warn(`[WebAPI] REST media 200 but unexpected body: ${errMsg}`)
+        maybeAlert(restResp.body)
         return { success: false, error: errMsg }
       } catch (e) {
         console.error(`[WebAPI] REST media JSON parse error: ${e instanceof Error ? e.message : String(e)}`)
@@ -1391,8 +1530,10 @@ export async function apiPostWithMedia(
       }
     }
     if (restResp.status === 401 || restResp.status === 403) {
+      maybeAlert(restResp.body)
       return { success: false, error: '認証エラー: 再ログインが必要です' }
     }
+    maybeAlert(restResp.body)
     // 400 等の場合は経路2（net.request）へフォールスルー
     console.warn(`[WebAPI] REST media view status=${restResp.status} → falling through to net`)
   }
@@ -1400,7 +1541,10 @@ export async function apiPostWithMedia(
   // ── 経路2: REST API via net.request + useSessionCookies（ビュー未開放時）
   console.log(`[WebAPI] REST media view unavailable, trying REST media via net.request`)
   const netResult = await restPostMediaViaNet(accountId, text, validPaths, topic)
-  if (netResult) return netResult
+  if (netResult) {
+    if (!netResult.success) maybeAlert(netResult.error ?? '')
+    return netResult
+  }
 
   // ── 経路3: GraphQL（最終フォールバック）
   console.log(`[WebAPI] REST media net failed, falling back to GraphQL upload`)
@@ -1414,6 +1558,9 @@ export async function apiPostWithMedia(
     if (!uploadId) return { success: false, error: `画像アップロードに失敗しました: ${imgPath}` }
     uploadIds.push(uploadId)
   }
+
+  // ── メディアconfigure前ディレイ ────────────────────────────────────────────
+  await mediaConfigureDelay(accountId)
 
   let lastError = ''
   for (const docId of CREATE_TEXT_DOC_IDS) {
@@ -1435,10 +1582,13 @@ export async function apiPostWithMedia(
       continue
     }
     if (res.ok) return { success: true }
+    maybeAlert(res.errorMsg ?? '')
     return { success: false, error: res.errorMsg }
   }
 
-  return { success: false, error: lastError || '画像付き投稿 API が応答しませんでした' }
+  const finalErr = lastError || '画像付き投稿 API が応答しませんでした'
+  maybeAlert(finalErr)
+  return { success: false, error: finalErr }
 }
 
 // ── Instagram Story Post (i.instagram.com) ───────────────────────────────────
@@ -1488,17 +1638,20 @@ export async function postStory(
   const path = await import('path')
   const { app } = await import('electron')
 
-  // Python スクリプトのパスを解決（dev: electron/scripts, prod: dist-electron/scripts）
+  // Python スクリプトのパスを解決（dev: electron/scripts, prod: extraResources/scripts）
   const isDev = !app.isPackaged
-  const scriptDir = isDev
-    ? path.join(app.getAppPath(), 'electron', 'scripts')
-    : path.join(app.getAppPath(), 'dist-electron', 'scripts')
-  const scriptPath = path.join(scriptDir, 'story_post.py')
+  const scriptPath = isDev
+    ? path.join(app.getAppPath(), 'electron', 'scripts', 'story_post.py')
+    : path.join(process.resourcesPath, 'scripts', 'story_post.py')
 
   // 追加 Cookie（mid, ig_did, rur）
   const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
   const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
   const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
+
+  // デバイスID lazy生成（初回ストーリー投稿時に device_id と共に確定する）
+  lazyEnsureDeviceIds(accountId)
+  const freshAcct = getAccountById(accountId)
 
   const args = [
     scriptPath,
@@ -1511,6 +1664,15 @@ export async function postStory(
   if (igDid) args.push('--ig_did', igDid)
   if (rur)   args.push('--rur', rur)
 
+  // 永続化デバイスID（通常投稿と整合させる）
+  if (freshAcct?.device_id)   args.push('--device_id',   freshAcct.device_id)
+  if (freshAcct?.device_uuid) args.push('--device_uuid', freshAcct.device_uuid)
+  if (freshAcct?.phone_id)    args.push('--phone_id',    freshAcct.phone_id)
+  if (freshAcct?.adid)        args.push('--adid',        freshAcct.adid)
+
+  // Instagram アプリ UA（instagrapi はモバイルアプリ UA を期待する）
+  args.push('--ua', getBrowserUA())
+
   // プロキシ
   if (acct.proxy_url) {
     let proxyForPython = acct.proxy_url
@@ -1522,11 +1684,6 @@ export async function postStory(
     }
     args.push('--proxy', proxyForPython)
   }
-
-  // セッション作成時と同じ UA を使う（makeView が設定したフィンガープリント UA）
-  // iPhone UA だと useragent mismatch になるため、セッションの現在の UA を取得
-  const sessUa = getAccountSession(accountId).getUserAgent()
-  args.push('--ua', sessUa)
 
   // リンクスタンプ
   if (linkSticker?.url) {
@@ -1560,6 +1717,112 @@ export async function postStory(
   })
 }
 
+/**
+ * Instagram リール投稿（モバイル API）。
+ *
+ * instagrapi の clip_upload() を Python subprocess で実行。
+ * 動画変換待機があるためタイムアウトは300秒。
+ */
+export async function postReel(
+  accountId:     number,
+  videoPath:     string,
+  caption:       string,
+  thumbnailPath?: string | null,
+): Promise<{ success: boolean; status?: number; mediaId?: string; error?: string }> {
+  const ig = await getIgCookieHeaders(accountId)
+  if (!ig) return { success: false, error: 'instagram.com sessionid not found' }
+
+  const acct = getAccountById(accountId)
+  if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+
+  const allCookies = await session.fromPartition(`persist:account-${accountId}`).cookies.get({}).catch(() => [])
+  const sessionid = allCookies.find(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))?.value
+  const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('instagram.com'))?.value
+  const dsUserId  = allCookies.find(c => c.name === 'ds_user_id' && c.domain?.includes('instagram.com'))?.value
+
+  if (!sessionid || !csrftoken || !dsUserId) {
+    return { success: false, error: 'Cookie 不足 (sessionid/csrftoken/ds_user_id)' }
+  }
+
+  const { spawn } = await import('child_process')
+  const path = await import('path')
+  const { app } = await import('electron')
+
+  const isDev = !app.isPackaged
+  const scriptPath = isDev
+    ? path.join(app.getAppPath(), 'electron', 'scripts', 'reel_post.py')
+    : path.join(process.resourcesPath, 'scripts', 'reel_post.py')
+
+  const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
+  const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
+  const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
+
+  lazyEnsureDeviceIds(accountId)
+  const freshAcct = getAccountById(accountId)
+
+  const args = [
+    scriptPath,
+    '--sessionid', sessionid,
+    '--csrftoken', csrftoken,
+    '--ds_user_id', dsUserId,
+    '--video', videoPath,
+    '--caption', caption,
+  ]
+  if (thumbnailPath) args.push('--thumbnail', thumbnailPath)
+  if (mid)   args.push('--mid', mid)
+  if (igDid) args.push('--ig_did', igDid)
+  if (rur)   args.push('--rur', rur)
+
+  if (freshAcct?.device_id)   args.push('--device_id',   freshAcct.device_id)
+  if (freshAcct?.device_uuid) args.push('--device_uuid', freshAcct.device_uuid)
+  if (freshAcct?.phone_id)    args.push('--phone_id',    freshAcct.phone_id)
+  if (freshAcct?.adid)        args.push('--adid',        freshAcct.adid)
+
+  args.push('--ua', getBrowserUA())
+
+  if (acct.proxy_url) {
+    let proxyForPython = acct.proxy_url
+    if (acct.proxy_username) {
+      const u = new URL(proxyForPython)
+      u.username = acct.proxy_username
+      u.password = acct.proxy_password ?? ''
+      proxyForPython = u.toString()
+    }
+    args.push('--proxy', proxyForPython)
+  }
+
+  console.log(`[postReel] python3 ${args.join(' ').slice(0, 200)}...`)
+
+  return new Promise((resolve) => {
+    const proc = spawn('python3', args, { timeout: 600_000 })
+    let stdout = ''
+    let stderr = ''
+
+    // 300秒タイムアウト（Promise.race相当）
+    const timer = setTimeout(() => {
+      proc.kill()
+      resolve({ success: false, error: 'リール投稿タイムアウト (300秒)' })
+    }, 300_000)
+
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      console.log(`[postReel] python exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
+      try {
+        const result = JSON.parse(stdout.trim())
+        resolve(result)
+      } catch {
+        resolve({ success: false, error: stderr || stdout || `python exit code ${code}` })
+      }
+    })
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      resolve({ success: false, error: `python spawn error: ${err.message}` })
+    })
+  })
+}
+
 // 以下は旧モバイル API 実装（Playwright に移行済みのため未使用）
 async function _postStoryMobileApi_deprecated(
   accountId:   number,
@@ -1569,7 +1832,7 @@ async function _postStoryMobileApi_deprecated(
   const ig = await getIgCookieHeaders(accountId)
   if (!ig) return { success: false, error: 'instagram.com sessionid not found' }
   const { cookieHeader, csrfToken } = ig
-  const ua = BROWSER_UA
+  const ua = getBrowserUA()
   const sess = getAccountSession(accountId)
   await ensureAccountProxy(accountId, sess)
 

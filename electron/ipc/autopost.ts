@@ -9,8 +9,10 @@ import {
 } from '../db/repositories/autopost'
 import { getDb } from '../db/index'
 import { createPost, updatePostStatus } from '../db/repositories/posts'
+import { getAccountById } from '../db/repositories/accounts'
 import { apiPostText, apiPostWithMedia } from '../api/threads-web-api'
 import { resolveImagePaths } from '../utils/image-download'
+import { shouldSkipForStatus } from '../lib/account-guard'
 
 export function registerAutopostHandlers(): void {
   ipcMain.handle('autopost:get', (_event, accountId: number) => {
@@ -65,6 +67,15 @@ export function registerAutopostHandlers(): void {
       _event,
       data: { account_id: number; content: string; image_urls?: (string | null)[]; topic?: string }
     ) => {
+      // ステータスチェック
+      const acct = getAccountById(data.account_id)
+      if (acct) {
+        const guard = shouldSkipForStatus(acct)
+        if (guard.skip) {
+          return { success: false, error: guard.reason }
+        }
+      }
+
       const { paths: imagePaths, cleanup } = await resolveImagePaths(data.image_urls ?? [])
 
       const post = createPost({

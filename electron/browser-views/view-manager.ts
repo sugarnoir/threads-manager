@@ -3287,7 +3287,8 @@ const LIKE_DOC_ID         = '24753372994365040'
 const FOLLOW_DOC_ID       = '26234294899535416'
 // BarcelonaActivityFeedListPaginationQuery (activity ページの通知一覧取得クエリ)
 const NOTIF_DOC_ID        = '26652441151048593'
-const BLOKS_VERSION_ID    = '86eaac606b7c5e9b45f4357f86082d05eace8411e43d3f754d885bf54a759a71'
+// 動的に取得（app-config キャッシュ経由）
+import { getBloksVersionId } from '../lib/app-config'
 
 /** View の JS コンテキストで GraphQL ミューテーションを実行する共通ヘルパー */
 async function graphqlViaView(opts: {
@@ -3327,7 +3328,7 @@ async function graphqlViaView(opts: {
   const docIdJs    = JSON.stringify(opts.docId)
   const nameJs     = JSON.stringify(opts.friendlyName)
   const gqlUrlJs   = JSON.stringify(THREADS_GRAPHQL_URL)
-  const bloksJs    = JSON.stringify(BLOKS_VERSION_ID)
+  const bloksJs    = JSON.stringify(getBloksVersionId())
 
   console.log(`[graphqlViaView] account=${opts.accountId} ${opts.friendlyName}`)
 
@@ -3764,7 +3765,7 @@ export async function changeProfilePicViaView(
             canvas.width  = img.naturalWidth  || img.width  || 400;
             canvas.height = img.naturalHeight || img.height || 400;
             canvas.getContext('2d').drawImage(img, 0, 0);
-            var webpBlob = await new Promise(function(res) { canvas.toBlob(res, 'image/webp', 0.9); });
+            var webpBlob = await new Promise(function(res) { canvas.toBlob(res, 'image/jpeg', 0.92); });
             var webpBuf  = await webpBlob.arrayBuffer();
             var webpBytes = new Uint8Array(webpBuf);
 
@@ -3778,12 +3779,12 @@ export async function changeProfilePicViaView(
             var upResp = await fetch('/rupload_igphoto/fb_uploader_' + uploadId, {
               method: 'POST',
               headers: {
-                'X-Entity-Type':              'image/webp',
+                'X-Entity-Type':              'image/jpeg',
                 'X-Entity-Length':            String(webpBytes.length),
                 'X-Entity-Name':              'fb_uploader_' + uploadId,
                 'X-Instagram-Rupload-Params': ruploadParams,
                 'Offset':                     '0',
-                'Content-Type':               'image/webp',
+                'Content-Type':               'image/jpeg',
                 'X-CSRFToken':                csrftoken,
                 'X-IG-App-ID':                '238260118697367',
                 'X-ASBD-ID':                  '359341',
@@ -3853,6 +3854,10 @@ export async function changeProfilePicViaView(
               var mutJson = JSON.parse(mutText);
               if (mutJson.errors && mutJson.errors.length > 0) {
                 return { success: false, error: 'mutation error: ' + JSON.stringify(mutJson.errors[0]), debug: dbgInfo };
+              }
+              var mutData = mutJson?.data?.data;
+              if (mutData && mutData.status === 'FAILURE') {
+                return { success: false, error: mutData.error_message || 'mutation FAILURE', debug: dbgInfo };
               }
             } catch(_) {}
             return { success: true, debug: dbgInfo };

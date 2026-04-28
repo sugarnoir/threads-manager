@@ -33,3 +33,5 @@ extraResources:
     to: better-sqlite3/build/Release
     filter:
       - "*.node"
+  - from: electron/scripts
+    to: scripts

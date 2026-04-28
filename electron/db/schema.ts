@@ -271,6 +271,27 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('totp_secret')) {
     db.exec("ALTER TABLE accounts ADD COLUMN totp_secret TEXT")
   }
+  if (!colNames.includes('ua_generated_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN ua_generated_at TEXT")
+  }
+  if (!colNames.includes('ua_app_version')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN ua_app_version TEXT")
+  }
+  if (!colNames.includes('device_id')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN device_id TEXT")
+  }
+  if (!colNames.includes('device_uuid')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN device_uuid TEXT")
+  }
+  if (!colNames.includes('phone_id')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN phone_id TEXT")
+  }
+  if (!colNames.includes('adid')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN adid TEXT")
+  }
+  if (!colNames.includes('use_unified_headers')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN use_unified_headers INTEGER NOT NULL DEFAULT 0")
+  }
 
   // story_templates テーブル
   db.exec(`
@@ -329,6 +350,115 @@ export function initializeSchema(db: Database.Database): void {
   if (!licenseKeyCols.map(c => c.name).includes('user_name')) {
     db.exec("ALTER TABLE license_keys ADD COLUMN user_name TEXT")
   }
+
+  // ストーリーグループスケジュール（先に作成 — 他テーブルから参照される）
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS story_group_schedules (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_name      TEXT NOT NULL,
+      day_of_week     INTEGER NOT NULL,
+      time_slot       TEXT NOT NULL,
+      random_offset   INTEGER NOT NULL DEFAULT 30,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  // ストーリーグループ画像プール
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS story_group_images (
+      id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+      story_group_schedule_id   INTEGER NOT NULL REFERENCES story_group_schedules(id) ON DELETE CASCADE,
+      image_path                TEXT NOT NULL,
+      link_url                  TEXT,
+      link_x                    REAL NOT NULL DEFAULT 0.5,
+      link_y                    REAL NOT NULL DEFAULT 0.5,
+      link_width                REAL NOT NULL DEFAULT 0.3,
+      link_height               REAL NOT NULL DEFAULT 0.1,
+      sort_order                INTEGER NOT NULL DEFAULT 0
+    )
+  `)
+
+  // 個別ストーリー予約
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS story_schedules (
+      id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id                INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      image_path                TEXT NOT NULL,
+      link_url                  TEXT,
+      link_x                    REAL NOT NULL DEFAULT 0.5,
+      link_y                    REAL NOT NULL DEFAULT 0.5,
+      link_width                REAL NOT NULL DEFAULT 0.3,
+      link_height               REAL NOT NULL DEFAULT 0.1,
+      scheduled_at              TEXT NOT NULL,
+      status                    TEXT NOT NULL DEFAULT 'pending',
+      error_msg                 TEXT,
+      posted_at                 TEXT,
+      source_group_schedule_id  INTEGER REFERENCES story_group_schedules(id) ON DELETE SET NULL,
+      created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_story_schedules_account_id ON story_schedules(account_id)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_story_schedules_scheduled_at ON story_schedules(scheduled_at)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_story_group_images_schedule ON story_group_images(story_group_schedule_id)')
+
+  // リールグループスケジュール
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reel_group_schedules (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_name      TEXT NOT NULL,
+      day_of_week     INTEGER NOT NULL,
+      time_slot       TEXT NOT NULL,
+      random_offset   INTEGER NOT NULL DEFAULT 30,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  // リールグループ動画プール
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reel_group_videos (
+      id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+      reel_group_schedule_id  INTEGER NOT NULL REFERENCES reel_group_schedules(id) ON DELETE CASCADE,
+      video_path              TEXT NOT NULL,
+      caption                 TEXT NOT NULL DEFAULT '',
+      thumbnail_path          TEXT,
+      sort_order              INTEGER NOT NULL DEFAULT 0
+    )
+  `)
+
+  // 個別リール予約
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reel_schedules (
+      id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id                INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      video_path                TEXT NOT NULL,
+      caption                   TEXT NOT NULL DEFAULT '',
+      thumbnail_path            TEXT,
+      scheduled_at              TEXT NOT NULL,
+      status                    TEXT NOT NULL DEFAULT 'pending',
+      error_msg                 TEXT,
+      posted_at                 TEXT,
+      source_group_schedule_id  INTEGER REFERENCES reel_group_schedules(id) ON DELETE SET NULL,
+      created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_reel_schedules_account_id ON reel_schedules(account_id)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_reel_schedules_scheduled_at ON reel_schedules(scheduled_at)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_reel_group_videos_schedule ON reel_group_videos(reel_group_schedule_id)')
+
+  // レスポンスアラート
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS response_alerts (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      error_type  TEXT NOT NULL,
+      raw_body    TEXT,
+      detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_response_alerts_account ON response_alerts(account_id)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_response_alerts_detected_at ON response_alerts(detected_at)')
 
   // groups テーブルへの既存 group_name のシード (一度だけ実行)
   const groupCount = (db.prepare("SELECT COUNT(*) as c FROM groups").get() as { c: number }).c

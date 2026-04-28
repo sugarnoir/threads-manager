@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { api, Schedule, Account, AutopostConfig, AutoEngagementConfig, PostStock, FollowQueueStats, AutoReplyConfig, AutoReplyRecord, AutoReplyTemplate } from '../lib/ipc'
+import { api, Schedule, Account, Group, AutopostConfig, AutoEngagementConfig, PostStock, FollowQueueStats, AutoReplyConfig, AutoReplyRecord, AutoReplyTemplate, StoryScheduleRow, StoryGroupScheduleRow, StoryGroupImageRow, ReelScheduleRow, ReelGroupScheduleRow, ReelGroupVideoRow } from '../lib/ipc'
 import { StatusBadge } from '../components/StatusBadge'
 import { MasterKeyGate } from '../components/MasterKeyGate'
 
@@ -1377,6 +1377,955 @@ function ScheduleTab({ accounts }: { accounts: Account[] }) {
   )
 }
 
+// ── Story Schedule tab ────────────────────────────────────────────────────────
+
+type LinkPosition = 'top' | 'center' | 'bottom' | 'custom'
+const LINK_POSITION_Y: Record<Exclude<LinkPosition, 'custom'>, number> = {
+  top: 0.2, center: 0.5, bottom: 0.8,
+}
+
+interface StoryTemplate {
+  id: number; name: string; image_path: string
+  link_url: string | null; link_x: number; link_y: number
+  link_width: number; link_height: number; created_at: string
+}
+
+function StoryScheduleTab({ accounts }: { accounts: Account[] }) {
+  const [schedules, setSchedules] = useState<StoryScheduleRow[]>([])
+  const [templates, setTemplates] = useState<StoryTemplate[]>([])
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
+  const [form, setForm] = useState({
+    account_id: '',
+    image_path: '',
+    link_url: '',
+    link_x: 0.5,
+    link_y: 0.5,
+    link_width: 0.3,
+    link_height: 0.1,
+    scheduled_at: '',
+  })
+  const [linkPos, setLinkPos] = useState<LinkPosition>('center')
+  const [saving, setSaving] = useState(false)
+
+  const isTemplateMode = selectedTemplateId !== ''
+
+  const fetchSchedules = async () => {
+    const data = await api.storySchedules.list()
+    setSchedules(data)
+  }
+
+  useEffect(() => {
+    fetchSchedules()
+    api.storyTemplates.list().then(setTemplates)
+    const unsub = api.on('storyScheduler:executed', fetchSchedules)
+    return unsub
+  }, [])
+
+  const handleTemplateChange = (tmplId: string) => {
+    setSelectedTemplateId(tmplId)
+    if (!tmplId) return
+    const t = templates.find(t => t.id === Number(tmplId))
+    if (!t) return
+    setForm(f => ({
+      ...f,
+      image_path:  t.image_path,
+      link_url:    t.link_url ?? '',
+      link_x:      t.link_x,
+      link_y:      t.link_y,
+      link_width:  t.link_width,
+      link_height: t.link_height,
+    }))
+    setLinkPos('custom')
+  }
+
+  const handleLinkPosChange = (pos: LinkPosition) => {
+    setLinkPos(pos)
+    if (pos !== 'custom') {
+      setForm(f => ({ ...f, link_y: LINK_POSITION_Y[pos] }))
+    }
+  }
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!form.account_id || !form.image_path || !form.scheduled_at) return
+    setSaving(true)
+    await api.storySchedules.create({
+      account_id:   Number(form.account_id),
+      image_path:   form.image_path,
+      link_url:     form.link_url || null,
+      link_x:       form.link_x,
+      link_y:       form.link_y,
+      link_width:   form.link_width,
+      link_height:  form.link_height,
+      scheduled_at: new Date(form.scheduled_at).toISOString(),
+    })
+    setForm({ account_id: '', image_path: '', link_url: '', link_x: 0.5, link_y: 0.5, link_width: 0.3, link_height: 0.1, scheduled_at: '' })
+    setSelectedTemplateId('')
+    setLinkPos('center')
+    await fetchSchedules()
+    setSaving(false)
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('ストーリー予約を削除しますか？')) return
+    await api.storySchedules.delete(id)
+    setSchedules(prev => prev.filter(s => s.id !== id))
+  }
+
+  const handleSelectFile = async () => {
+    const file = await api.dialog.openFile()
+    if (file) {
+      setForm(f => ({ ...f, image_path: file.path }))
+      setSelectedTemplateId('')
+    }
+  }
+
+  const getAccountName = (id: number) =>
+    accounts.find(a => a.id === id)?.username ?? `ID:${id}`
+
+  const statusColor: Record<string, string> = {
+    pending:   'bg-yellow-100 text-yellow-700',
+    posted:    'bg-green-100 text-green-700',
+    failed:    'bg-red-100 text-red-700',
+    skipped:   'bg-gray-100 text-gray-500',
+    cancelled: 'bg-gray-100 text-gray-400',
+  }
+
+  const statusLabel: Record<string, string> = {
+    pending:   '待機中',
+    posted:    '投稿済',
+    failed:    '失敗',
+    skipped:   'スキップ',
+    cancelled: 'キャンセル',
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 新規ストーリー予約フォーム */}
+      <form onSubmit={handleCreate} className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+        <p className="text-sm font-medium text-gray-700">ストーリー予約</p>
+
+        {/* テンプレート選択 */}
+        {templates.length > 0 && (
+          <select
+            value={selectedTemplateId}
+            onChange={e => handleTemplateChange(e.target.value)}
+            className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+          >
+            <option value="">カスタム入力</option>
+            {templates.map(t => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        )}
+
+        <select
+          value={form.account_id}
+          onChange={e => setForm({ ...form, account_id: e.target.value })}
+          className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+        >
+          <option value="">アカウントを選択</option>
+          {accounts.map(a => (
+            <option key={a.id} value={a.id}>@{a.username}</option>
+          ))}
+        </select>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={form.image_path}
+            onChange={e => { setForm({ ...form, image_path: e.target.value }); setSelectedTemplateId('') }}
+            placeholder="画像パス"
+            readOnly={isTemplateMode}
+            className={`flex-1 border border-gray-200 rounded-lg p-2 text-sm ${isTemplateMode ? 'bg-gray-50 text-gray-500' : ''}`}
+          />
+          {!isTemplateMode && (
+            <button
+              type="button"
+              onClick={handleSelectFile}
+              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm text-gray-600"
+            >
+              選択
+            </button>
+          )}
+        </div>
+
+        <input
+          type="text"
+          value={form.link_url}
+          onChange={e => { setForm({ ...form, link_url: e.target.value }); if (isTemplateMode) setSelectedTemplateId('') }}
+          placeholder="リンクURL（任意）"
+          readOnly={isTemplateMode}
+          className={`w-full border border-gray-200 rounded-lg p-2 text-sm ${isTemplateMode ? 'bg-gray-50 text-gray-500' : ''}`}
+        />
+
+        {/* リンク位置: テンプレートモードでは読み取り専用表示、カスタムモードでは編集可能 */}
+        {form.link_url && (
+          isTemplateMode ? (
+            <div className="flex items-center gap-3 text-xs text-gray-400 px-1">
+              <span>位置: x={form.link_x} y={form.link_y}</span>
+              <span>サイズ: {form.link_width}x{form.link_height}</span>
+            </div>
+          ) : (
+            <div className="space-y-2 p-3 bg-gray-50 rounded-lg">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 w-12 shrink-0">位置:</span>
+                {(['top', 'center', 'bottom', 'custom'] as const).map(pos => (
+                  <button
+                    key={pos}
+                    type="button"
+                    onClick={() => handleLinkPosChange(pos)}
+                    className={`px-2 py-1 text-xs rounded ${linkPos === pos ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+                  >
+                    {{ top: '上', center: '中央', bottom: '下', custom: 'カスタム' }[pos]}
+                  </button>
+                ))}
+              </div>
+              {linkPos === 'custom' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex items-center gap-1 text-xs text-gray-500">
+                    X: <input type="range" min="0" max="1" step="0.05" value={form.link_x}
+                      onChange={e => setForm(f => ({ ...f, link_x: Number(e.target.value) }))}
+                      className="flex-1" /><span className="w-7 text-right">{form.link_x}</span>
+                  </label>
+                  <label className="flex items-center gap-1 text-xs text-gray-500">
+                    Y: <input type="range" min="0" max="1" step="0.05" value={form.link_y}
+                      onChange={e => setForm(f => ({ ...f, link_y: Number(e.target.value) }))}
+                      className="flex-1" /><span className="w-7 text-right">{form.link_y}</span>
+                  </label>
+                  <label className="flex items-center gap-1 text-xs text-gray-500">
+                    W: <input type="range" min="0.05" max="1" step="0.05" value={form.link_width}
+                      onChange={e => setForm(f => ({ ...f, link_width: Number(e.target.value) }))}
+                      className="flex-1" /><span className="w-7 text-right">{form.link_width}</span>
+                  </label>
+                  <label className="flex items-center gap-1 text-xs text-gray-500">
+                    H: <input type="range" min="0.05" max="1" step="0.05" value={form.link_height}
+                      onChange={e => setForm(f => ({ ...f, link_height: Number(e.target.value) }))}
+                      className="flex-1" /><span className="w-7 text-right">{form.link_height}</span>
+                  </label>
+                </div>
+              )}
+            </div>
+          )
+        )}
+
+        <div className="flex gap-2">
+          <input
+            type="datetime-local"
+            value={form.scheduled_at}
+            onChange={e => setForm({ ...form, scheduled_at: e.target.value })}
+            className="flex-1 border border-gray-200 rounded-lg p-2 text-sm"
+          />
+          <button
+            type="submit"
+            disabled={saving || !form.account_id || !form.image_path || !form.scheduled_at}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40"
+          >
+            {saving ? '保存中...' : '予約'}
+          </button>
+        </div>
+      </form>
+
+      {/* ストーリー予約一覧 */}
+      <div className="space-y-2">
+        {schedules.length === 0 ? (
+          <p className="text-center text-gray-400 text-sm mt-8">ストーリー予約がありません</p>
+        ) : (
+          schedules.map(ss => (
+            <div key={ss.id} className="bg-white border border-gray-200 rounded-xl p-3 flex gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-medium text-gray-600">@{getAccountName(ss.account_id)}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${statusColor[ss.status] ?? 'bg-gray-100 text-gray-500'}`}>
+                    {statusLabel[ss.status] ?? ss.status}
+                  </span>
+                  {ss.source_group_schedule_id && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-600">グループ</span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 truncate">{ss.image_path}</p>
+                {ss.link_url && <p className="text-xs text-blue-400 truncate">{ss.link_url}</p>}
+                <div className="flex items-center gap-3 mt-1">
+                  <p className="text-xs text-gray-400">
+                    {new Date(ss.scheduled_at).toLocaleString('ja-JP')}
+                  </p>
+                  {ss.error_msg && <p className="text-xs text-red-400 truncate">{ss.error_msg}</p>}
+                </div>
+              </div>
+              {ss.status === 'pending' && (
+                <button
+                  onClick={() => handleDelete(ss.id)}
+                  className="text-xs text-red-400 hover:text-red-600 shrink-0"
+                >
+                  削除
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Story Group Schedule tab ──────────────────────────────────────────────────
+
+const DAY_LABELS = ['日', '月', '火', '水', '木', '金', '土']
+
+function StoryGroupScheduleTab() {
+  const [groupSchedules, setGroupSchedules] = useState<StoryGroupScheduleRow[]>([])
+  const [groups, setGroups]     = useState<Group[]>([])
+  const [templates, setTemplates] = useState<StoryTemplate[]>([])
+
+  // 作成フォーム
+  const [newForm, setNewForm] = useState({
+    group_name: '',
+    days: [] as number[],
+    time_slot: '18:00',
+    random_offset: 30,
+  })
+  const [creating, setCreating] = useState(false)
+
+  // 画像プール管理
+  const [selectedScheduleId, setSelectedScheduleId] = useState<number | null>(null)
+  const [images, setImages] = useState<StoryGroupImageRow[]>([])
+  const [imgForm, setImgForm] = useState({ image_path: '', link_url: '' })
+  const [selectedTemplateForImage, setSelectedTemplateForImage] = useState('')
+
+  const fetchAll = async () => {
+    const [gs, grps, tmpls] = await Promise.all([
+      api.storyGroupSchedules.list(),
+      api.groups.list(),
+      api.storyTemplates.list(),
+    ])
+    setGroupSchedules(gs)
+    setGroups(grps)
+    setTemplates(tmpls)
+  }
+
+  useEffect(() => { fetchAll() }, [])
+
+  const fetchImages = async (scheduleId: number) => {
+    const imgs = await api.storyGroupImages.list(scheduleId)
+    setImages(imgs)
+  }
+
+  useEffect(() => {
+    if (selectedScheduleId) fetchImages(selectedScheduleId)
+    else setImages([])
+  }, [selectedScheduleId])
+
+  // 曜日トグル
+  const toggleDay = (d: number) => {
+    setNewForm(f => ({
+      ...f,
+      days: f.days.includes(d) ? f.days.filter(x => x !== d) : [...f.days, d].sort(),
+    }))
+  }
+
+  // 作成
+  const handleCreate = async () => {
+    if (!newForm.group_name || newForm.days.length === 0) return
+    setCreating(true)
+    for (const day of newForm.days) {
+      await api.storyGroupSchedules.create({
+        group_name:    newForm.group_name,
+        day_of_week:   day,
+        time_slot:     newForm.time_slot,
+        random_offset: newForm.random_offset,
+      })
+    }
+    setNewForm(f => ({ ...f, days: [] }))
+    await fetchAll()
+    setCreating(false)
+  }
+
+  // 有効/無効トグル
+  const handleToggle = async (id: number, currentEnabled: number) => {
+    await api.storyGroupSchedules.toggle(id, currentEnabled === 0)
+    setGroupSchedules(prev => prev.map(s => s.id === id ? { ...s, enabled: currentEnabled === 0 ? 1 : 0 } : s))
+  }
+
+  // 削除
+  const handleDelete = async (id: number) => {
+    if (!confirm('このスケジュールを削除しますか？（紐づく画像プールも削除されます）')) return
+    await api.storyGroupSchedules.delete(id)
+    if (selectedScheduleId === id) { setSelectedScheduleId(null); setImages([]) }
+    setGroupSchedules(prev => prev.filter(s => s.id !== id))
+  }
+
+  // 画像追加（ファイル選択）
+  const handleAddImageByFile = async () => {
+    const file = await api.dialog.openFile()
+    if (!file) return
+    if (!selectedScheduleId) return
+    await api.storyGroupImages.add({
+      story_group_schedule_id: selectedScheduleId,
+      image_path: file.path,
+      link_url:   imgForm.link_url || null,
+    })
+    setImgForm({ image_path: '', link_url: '' })
+    fetchImages(selectedScheduleId)
+  }
+
+  // 画像追加（テンプレートから）
+  const handleAddImageFromTemplate = async (tmplId: string) => {
+    if (!tmplId || !selectedScheduleId) return
+    const t = templates.find(t => t.id === Number(tmplId))
+    if (!t) return
+    await api.storyGroupImages.add({
+      story_group_schedule_id: selectedScheduleId,
+      image_path:  t.image_path,
+      link_url:    t.link_url,
+      link_x:      t.link_x,
+      link_y:      t.link_y,
+      link_width:  t.link_width,
+      link_height: t.link_height,
+    })
+    setSelectedTemplateForImage('')
+    fetchImages(selectedScheduleId)
+  }
+
+  // 画像削除
+  const handleRemoveImage = async (id: number) => {
+    await api.storyGroupImages.remove(id)
+    setImages(prev => prev.filter(img => img.id !== id))
+  }
+
+  // グループごとにまとめる
+  const groupedSchedules = groupSchedules.reduce<Record<string, StoryGroupScheduleRow[]>>((acc, s) => {
+    ;(acc[s.group_name] ??= []).push(s)
+    return acc
+  }, {})
+
+  const selectedSchedule = groupSchedules.find(s => s.id === selectedScheduleId)
+
+  return (
+    <div className="space-y-4">
+      {/* 新規作成フォーム */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+        <p className="text-sm font-medium text-gray-700">グループストーリー予約</p>
+
+        <select
+          value={newForm.group_name}
+          onChange={e => setNewForm(f => ({ ...f, group_name: e.target.value }))}
+          className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+        >
+          <option value="">グループを選択</option>
+          {groups.map(g => (
+            <option key={g.name} value={g.name}>{g.name}</option>
+          ))}
+        </select>
+
+        {/* 曜日チェックボックス */}
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500 w-10 shrink-0">曜日:</span>
+          {DAY_LABELS.map((label, i) => (
+            <button
+              key={i}
+              type="button"
+              onClick={() => toggleDay(i)}
+              className={`w-8 h-8 rounded-lg text-xs font-medium transition-colors ${
+                newForm.days.includes(i)
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-2">
+          <div className="flex items-center gap-1 flex-1">
+            <span className="text-xs text-gray-500 shrink-0">時間:</span>
+            <input
+              type="time"
+              value={newForm.time_slot}
+              onChange={e => setNewForm(f => ({ ...f, time_slot: e.target.value }))}
+              className="flex-1 border border-gray-200 rounded-lg p-2 text-sm"
+            />
+          </div>
+          <div className="flex items-center gap-1 flex-1">
+            <span className="text-xs text-gray-500 shrink-0 whitespace-nowrap">±分:</span>
+            <input
+              type="number"
+              min={0} max={120}
+              value={newForm.random_offset}
+              onChange={e => setNewForm(f => ({ ...f, random_offset: Number(e.target.value) }))}
+              className="flex-1 border border-gray-200 rounded-lg p-2 text-sm"
+            />
+          </div>
+          <button
+            onClick={handleCreate}
+            disabled={creating || !newForm.group_name || newForm.days.length === 0}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40 shrink-0"
+          >
+            {creating ? '作成中...' : '作成'}
+          </button>
+        </div>
+      </div>
+
+      {/* スケジュール一覧 */}
+      {Object.keys(groupedSchedules).length === 0 ? (
+        <p className="text-center text-gray-400 text-sm mt-8">グループスケジュールがありません</p>
+      ) : (
+        Object.entries(groupedSchedules).map(([groupName, schedules]) => (
+          <div key={groupName} className="space-y-1.5">
+            <p className="text-xs font-semibold text-gray-600 px-1">{groupName}</p>
+            {schedules.map(s => {
+              const imgCount = s.id === selectedScheduleId ? images.length : null
+              return (
+                <div
+                  key={s.id}
+                  className={`bg-white border rounded-xl p-3 flex items-center gap-3 cursor-pointer transition-colors ${
+                    selectedScheduleId === s.id ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                  onClick={() => setSelectedScheduleId(prev => prev === s.id ? null : s.id)}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-700">{DAY_LABELS[s.day_of_week]}曜 {s.time_slot}</span>
+                      <span className="text-xs text-gray-400">±{s.random_offset}分</span>
+                      {imgCount !== null && <span className="text-xs text-gray-400">画像{imgCount}枚</span>}
+                    </div>
+                  </div>
+                  <button
+                    onClick={e => { e.stopPropagation(); handleToggle(s.id, s.enabled) }}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                      s.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'
+                    }`}
+                  >
+                    {s.enabled ? 'ON' : 'OFF'}
+                  </button>
+                  <button
+                    onClick={e => { e.stopPropagation(); handleDelete(s.id) }}
+                    className="text-xs text-red-400 hover:text-red-600"
+                  >
+                    削除
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        ))
+      )}
+
+      {/* 画像プール管理 */}
+      {selectedScheduleId && selectedSchedule && (
+        <div className="bg-white border border-blue-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-medium text-gray-700">
+            画像プール — {selectedSchedule.group_name} / {DAY_LABELS[selectedSchedule.day_of_week]}曜 {selectedSchedule.time_slot}
+          </p>
+
+          {/* 追加UI */}
+          <div className="space-y-2">
+            {/* テンプレートから追加 */}
+            {templates.length > 0 && (
+              <div className="flex gap-2">
+                <select
+                  value={selectedTemplateForImage}
+                  onChange={e => { setSelectedTemplateForImage(e.target.value); handleAddImageFromTemplate(e.target.value) }}
+                  className="flex-1 border border-gray-200 rounded-lg p-2 text-sm"
+                >
+                  <option value="">テンプレートから追加...</option>
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name} — {t.image_path.split('/').pop()}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* ファイル選択で追加 */}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={imgForm.link_url}
+                onChange={e => setImgForm(f => ({ ...f, link_url: e.target.value }))}
+                placeholder="リンクURL（任意）"
+                className="flex-1 border border-gray-200 rounded-lg p-2 text-sm"
+              />
+              <button
+                onClick={handleAddImageByFile}
+                className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm text-gray-600 shrink-0"
+              >
+                ファイル選択して追加
+              </button>
+            </div>
+          </div>
+
+          {/* 画像一覧 */}
+          {images.length === 0 ? (
+            <p className="text-xs text-gray-400">画像が登録されていません</p>
+          ) : (
+            <div className="space-y-1.5">
+              {images.map(img => (
+                <div key={img.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-700 truncate">{img.image_path.split('/').pop()}</p>
+                    {img.link_url && <p className="text-xs text-blue-400 truncate">{img.link_url}</p>}
+                    <p className="text-[10px] text-gray-400">位置: x={img.link_x} y={img.link_y} / サイズ: {img.link_width}x{img.link_height}</p>
+                  </div>
+                  <button
+                    onClick={() => handleRemoveImage(img.id)}
+                    className="text-xs text-red-400 hover:text-red-600 shrink-0"
+                  >
+                    削除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Reel Schedule tab ─────────────────────────────────────────────────────────
+
+function ReelScheduleTab({ accounts }: { accounts: Account[] }) {
+  const [schedules, setSchedules] = useState<ReelScheduleRow[]>([])
+  const [form, setForm] = useState({
+    account_id: '',
+    video_path: '',
+    caption: '',
+    scheduled_at: '',
+  })
+  const [saving, setSaving] = useState(false)
+
+  const fetchSchedules = async () => {
+    const data = await api.reelSchedules.list()
+    setSchedules(data)
+  }
+
+  useEffect(() => {
+    fetchSchedules()
+    const unsub = api.on('reelScheduler:executed', fetchSchedules)
+    return unsub
+  }, [])
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!form.account_id || !form.video_path || !form.scheduled_at) return
+    setSaving(true)
+    await api.reelSchedules.create({
+      account_id:   Number(form.account_id),
+      video_path:   form.video_path,
+      caption:      form.caption,
+      scheduled_at: new Date(form.scheduled_at).toISOString(),
+    })
+    setForm({ account_id: '', video_path: '', caption: '', scheduled_at: '' })
+    await fetchSchedules()
+    setSaving(false)
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('リール予約を削除しますか？')) return
+    await api.reelSchedules.delete(id)
+    setSchedules(prev => prev.filter(s => s.id !== id))
+  }
+
+  const handleSelectFile = async () => {
+    const file = await api.dialog.openFile()
+    if (file) setForm(f => ({ ...f, video_path: file.path }))
+  }
+
+  const getAccountName = (id: number) =>
+    accounts.find(a => a.id === id)?.username ?? `ID:${id}`
+
+  const statusColor: Record<string, string> = {
+    pending: 'bg-yellow-100 text-yellow-700', posted: 'bg-green-100 text-green-700',
+    failed: 'bg-red-100 text-red-700', skipped: 'bg-gray-100 text-gray-500', cancelled: 'bg-gray-100 text-gray-400',
+  }
+  const statusLabel: Record<string, string> = {
+    pending: '待機中', posted: '投稿済', failed: '失敗', skipped: 'スキップ', cancelled: 'キャンセル',
+  }
+
+  return (
+    <div className="space-y-4">
+      <form onSubmit={handleCreate} className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+        <p className="text-sm font-medium text-gray-700">リール予約</p>
+        <select
+          value={form.account_id}
+          onChange={e => setForm({ ...form, account_id: e.target.value })}
+          className="w-full border border-gray-200 rounded-lg p-2 text-sm"
+        >
+          <option value="">アカウントを選択</option>
+          {accounts.map(a => (
+            <option key={a.id} value={a.id}>@{a.username}</option>
+          ))}
+        </select>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={form.video_path}
+            onChange={e => setForm({ ...form, video_path: e.target.value })}
+            placeholder="動画パス"
+            className="flex-1 border border-gray-200 rounded-lg p-2 text-sm"
+          />
+          <button type="button" onClick={handleSelectFile}
+            className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm text-gray-600">
+            選択
+          </button>
+        </div>
+
+        <textarea
+          value={form.caption}
+          onChange={e => setForm({ ...form, caption: e.target.value })}
+          placeholder="キャプション（ハッシュタグも含む）"
+          rows={3}
+          className="w-full border border-gray-200 rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
+        />
+
+        <div className="flex gap-2">
+          <input type="datetime-local" value={form.scheduled_at}
+            onChange={e => setForm({ ...form, scheduled_at: e.target.value })}
+            className="flex-1 border border-gray-200 rounded-lg p-2 text-sm" />
+          <button type="submit"
+            disabled={saving || !form.account_id || !form.video_path || !form.scheduled_at}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40">
+            {saving ? '保存中...' : '予約'}
+          </button>
+        </div>
+      </form>
+
+      <div className="space-y-2">
+        {schedules.length === 0 ? (
+          <p className="text-center text-gray-400 text-sm mt-8">リール予約がありません</p>
+        ) : (
+          schedules.map(rs => (
+            <div key={rs.id} className="bg-white border border-gray-200 rounded-xl p-3 flex gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-medium text-gray-600">@{getAccountName(rs.account_id)}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${statusColor[rs.status] ?? ''}`}>
+                    {statusLabel[rs.status] ?? rs.status}
+                  </span>
+                  {rs.source_group_schedule_id && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-600">グループ</span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 truncate">{rs.video_path.split('/').pop()}</p>
+                {rs.caption && <p className="text-xs text-gray-600 line-clamp-1">{rs.caption}</p>}
+                <div className="flex items-center gap-3 mt-1">
+                  <p className="text-xs text-gray-400">{new Date(rs.scheduled_at).toLocaleString('ja-JP')}</p>
+                  {rs.error_msg && <p className="text-xs text-red-400 truncate">{rs.error_msg}</p>}
+                </div>
+              </div>
+              {rs.status === 'pending' && (
+                <button onClick={() => handleDelete(rs.id)}
+                  className="text-xs text-red-400 hover:text-red-600 shrink-0">削除</button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Reel Group Schedule tab ──────────────────────────────────────────────────
+
+function ReelGroupScheduleTab() {
+  const [groupSchedules, setGroupSchedules] = useState<ReelGroupScheduleRow[]>([])
+  const [groups, setGroups] = useState<Group[]>([])
+
+  const [newForm, setNewForm] = useState({
+    group_name: '', days: [] as number[], time_slot: '18:00', random_offset: 30,
+  })
+  const [creating, setCreating] = useState(false)
+
+  const [selectedScheduleId, setSelectedScheduleId] = useState<number | null>(null)
+  const [videos, setVideos] = useState<ReelGroupVideoRow[]>([])
+  const [vidForm, setVidForm] = useState({ caption: '' })
+
+  const fetchAll = async () => {
+    const [gs, grps] = await Promise.all([api.reelGroupSchedules.list(), api.groups.list()])
+    setGroupSchedules(gs)
+    setGroups(grps)
+  }
+  useEffect(() => { fetchAll() }, [])
+
+  const fetchVideos = async (id: number) => {
+    const v = await api.reelGroupVideos.list(id)
+    setVideos(v)
+  }
+  useEffect(() => {
+    if (selectedScheduleId) fetchVideos(selectedScheduleId)
+    else setVideos([])
+  }, [selectedScheduleId])
+
+  const toggleDay = (d: number) => {
+    setNewForm(f => ({
+      ...f, days: f.days.includes(d) ? f.days.filter(x => x !== d) : [...f.days, d].sort(),
+    }))
+  }
+
+  const handleCreate = async () => {
+    if (!newForm.group_name || newForm.days.length === 0) return
+    setCreating(true)
+    for (const day of newForm.days) {
+      await api.reelGroupSchedules.create({
+        group_name: newForm.group_name, day_of_week: day,
+        time_slot: newForm.time_slot, random_offset: newForm.random_offset,
+      })
+    }
+    setNewForm(f => ({ ...f, days: [] }))
+    await fetchAll()
+    setCreating(false)
+  }
+
+  const handleToggle = async (id: number, currentEnabled: number) => {
+    await api.reelGroupSchedules.toggle(id, currentEnabled === 0)
+    setGroupSchedules(prev => prev.map(s => s.id === id ? { ...s, enabled: currentEnabled === 0 ? 1 : 0 } : s))
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('このスケジュールを削除しますか？')) return
+    await api.reelGroupSchedules.delete(id)
+    if (selectedScheduleId === id) { setSelectedScheduleId(null); setVideos([]) }
+    setGroupSchedules(prev => prev.filter(s => s.id !== id))
+  }
+
+  const handleAddVideo = async () => {
+    const file = await api.dialog.openFile()
+    if (!file || !selectedScheduleId) return
+    await api.reelGroupVideos.add({
+      reel_group_schedule_id: selectedScheduleId,
+      video_path: file.path,
+      caption: vidForm.caption,
+    })
+    setVidForm({ caption: '' })
+    fetchVideos(selectedScheduleId)
+  }
+
+  const handleRemoveVideo = async (id: number) => {
+    await api.reelGroupVideos.remove(id)
+    setVideos(prev => prev.filter(v => v.id !== id))
+  }
+
+  const groupedSchedules = groupSchedules.reduce<Record<string, ReelGroupScheduleRow[]>>((acc, s) => {
+    ;(acc[s.group_name] ??= []).push(s)
+    return acc
+  }, {})
+
+  const selectedSchedule = groupSchedules.find(s => s.id === selectedScheduleId)
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+        <p className="text-sm font-medium text-gray-700">リールグループ予約</p>
+        <select value={newForm.group_name}
+          onChange={e => setNewForm(f => ({ ...f, group_name: e.target.value }))}
+          className="w-full border border-gray-200 rounded-lg p-2 text-sm">
+          <option value="">グループを選択</option>
+          {groups.map(g => <option key={g.name} value={g.name}>{g.name}</option>)}
+        </select>
+
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500 w-10 shrink-0">曜日:</span>
+          {DAY_LABELS.map((label, i) => (
+            <button key={i} type="button" onClick={() => toggleDay(i)}
+              className={`w-8 h-8 rounded-lg text-xs font-medium transition-colors ${
+                newForm.days.includes(i) ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+              }`}>{label}</button>
+          ))}
+        </div>
+
+        <div className="flex gap-2">
+          <div className="flex items-center gap-1 flex-1">
+            <span className="text-xs text-gray-500 shrink-0">時間:</span>
+            <input type="time" value={newForm.time_slot}
+              onChange={e => setNewForm(f => ({ ...f, time_slot: e.target.value }))}
+              className="flex-1 border border-gray-200 rounded-lg p-2 text-sm" />
+          </div>
+          <div className="flex items-center gap-1 flex-1">
+            <span className="text-xs text-gray-500 shrink-0 whitespace-nowrap">±分:</span>
+            <input type="number" min={0} max={120} value={newForm.random_offset}
+              onChange={e => setNewForm(f => ({ ...f, random_offset: Number(e.target.value) }))}
+              className="flex-1 border border-gray-200 rounded-lg p-2 text-sm" />
+          </div>
+          <button onClick={handleCreate}
+            disabled={creating || !newForm.group_name || newForm.days.length === 0}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40 shrink-0">
+            {creating ? '作成中...' : '作成'}
+          </button>
+        </div>
+      </div>
+
+      {Object.keys(groupedSchedules).length === 0 ? (
+        <p className="text-center text-gray-400 text-sm mt-8">リールグループスケジュールがありません</p>
+      ) : (
+        Object.entries(groupedSchedules).map(([groupName, schedules]) => (
+          <div key={groupName} className="space-y-1.5">
+            <p className="text-xs font-semibold text-gray-600 px-1">{groupName}</p>
+            {schedules.map(s => {
+              const vidCount = s.id === selectedScheduleId ? videos.length : null
+              return (
+                <div key={s.id}
+                  className={`bg-white border rounded-xl p-3 flex items-center gap-3 cursor-pointer transition-colors ${
+                    selectedScheduleId === s.id ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                  onClick={() => setSelectedScheduleId(prev => prev === s.id ? null : s.id)}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-700">{DAY_LABELS[s.day_of_week]}曜 {s.time_slot}</span>
+                      <span className="text-xs text-gray-400">±{s.random_offset}分</span>
+                      {vidCount !== null && <span className="text-xs text-gray-400">動画{vidCount}件</span>}
+                    </div>
+                  </div>
+                  <button onClick={e => { e.stopPropagation(); handleToggle(s.id, s.enabled) }}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                      s.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'
+                    }`}>{s.enabled ? 'ON' : 'OFF'}</button>
+                  <button onClick={e => { e.stopPropagation(); handleDelete(s.id) }}
+                    className="text-xs text-red-400 hover:text-red-600">削除</button>
+                </div>
+              )
+            })}
+          </div>
+        ))
+      )}
+
+      {selectedScheduleId && selectedSchedule && (
+        <div className="bg-white border border-blue-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-medium text-gray-700">
+            動画プール — {selectedSchedule.group_name} / {DAY_LABELS[selectedSchedule.day_of_week]}曜 {selectedSchedule.time_slot}
+          </p>
+          <div className="space-y-2">
+            <input type="text" value={vidForm.caption}
+              onChange={e => setVidForm({ caption: e.target.value })}
+              placeholder="キャプション（任意）"
+              className="w-full border border-gray-200 rounded-lg p-2 text-sm" />
+            <button onClick={handleAddVideo}
+              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm text-gray-600">
+              ファイル選択して追加
+            </button>
+          </div>
+          {videos.length === 0 ? (
+            <p className="text-xs text-gray-400">動画が登録されていません</p>
+          ) : (
+            <div className="space-y-1.5">
+              {videos.map(v => (
+                <div key={v.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-700 truncate">{v.video_path.split('/').pop()}</p>
+                    {v.caption && <p className="text-xs text-gray-500 line-clamp-1">{v.caption}</p>}
+                  </div>
+                  <button onClick={() => handleRemoveVideo(v.id)}
+                    className="text-xs text-red-400 hover:text-red-600 shrink-0">削除</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Auto DM tab ───────────────────────────────────────────────────────────────
 
 function AutoDmTab() {
@@ -2096,10 +3045,14 @@ function AutoReplyTab({ accounts }: { accounts: Account[] }) {
 // ── Main Scheduler page ───────────────────────────────────────────────────────
 
 function SchedulerInner({ accounts }: Props) {
-  const [tab, setTab] = useState<'schedule' | 'autopost' | 'engagement' | 'autoreply' | 'autodm'>('schedule')
+  const [tab, setTab] = useState<'schedule' | 'story' | 'storyGroup' | 'reel' | 'reelGroup' | 'autopost' | 'engagement' | 'autoreply' | 'autodm'>('schedule')
 
   const TAB_LABELS: Record<typeof tab, string> = {
     schedule:   'スケジュール',
+    story:      'ストーリー予約',
+    storyGroup: 'Sグループ',
+    reel:       'リール予約',
+    reelGroup:  'Rグループ',
     autopost:   '自動投稿',
     engagement: '自動ENG',
     autoreply:  '自動返信',
@@ -2112,7 +3065,7 @@ function SchedulerInner({ accounts }: Props) {
 
       {/* タブ */}
       <div className="flex border-b border-gray-200 overflow-x-auto">
-        {(['schedule', 'autopost', 'engagement', 'autoreply', 'autodm'] as const).map((t) => (
+        {(['schedule', 'story', 'storyGroup', 'reel', 'reelGroup', 'autopost', 'engagement', 'autoreply', 'autodm'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -2130,6 +3083,14 @@ function SchedulerInner({ accounts }: Props) {
       <div className="flex-1 overflow-y-auto">
         {tab === 'schedule' ? (
           <ScheduleTab accounts={accounts} />
+        ) : tab === 'story' ? (
+          <StoryScheduleTab accounts={accounts} />
+        ) : tab === 'storyGroup' ? (
+          <StoryGroupScheduleTab />
+        ) : tab === 'reel' ? (
+          <ReelScheduleTab accounts={accounts} />
+        ) : tab === 'reelGroup' ? (
+          <ReelGroupScheduleTab />
         ) : tab === 'autopost' ? (
           <AutopostTab accounts={accounts} />
         ) : tab === 'engagement' ? (

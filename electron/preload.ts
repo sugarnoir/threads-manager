@@ -69,7 +69,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxy_type?: string | null
       group_name?: string | null
     }>) => ipcRenderer.invoke('accounts:bulk-import', rows),
-    autoRename: (id: number) => ipcRenderer.invoke('accounts:auto-rename', id),
+    autoRename: (id: number, customNames?: string[]) => ipcRenderer.invoke('accounts:auto-rename', id, customNames),
+    regenerateUA: (id: number) => ipcRenderer.invoke('accounts:regenerate-ua', id),
+    updateUnifiedHeaders: (id: number, enabled: boolean) => ipcRenderer.invoke('accounts:update-unified-headers', id, enabled),
     importCookieLogin: (rows: Array<{
       username:    string
       password:    string
@@ -251,6 +253,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id: number) => ipcRenderer.invoke('templates:delete', id),
   },
 
+  // App Config (Supabase app_config)
+  appConfig: {
+    list:    () => ipcRenderer.invoke('appConfig:list'),
+    update:  (data: { key: string; value: string; updated_by?: string }) => ipcRenderer.invoke('appConfig:update', data),
+    refresh: () => ipcRenderer.invoke('appConfig:refresh'),
+    get:     (key: string) => ipcRenderer.invoke('appConfig:get', key),
+  },
+
   // License Admin (service_role key required)
   license: {
     list:   () => ipcRenderer.invoke('license:list'),
@@ -357,6 +367,56 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Dialog
+  storySchedules: {
+    list:          ()                 => ipcRenderer.invoke('storySchedules:list'),
+    listByAccount: (accountId: number) => ipcRenderer.invoke('storySchedules:listByAccount', accountId),
+    create:        (data: { account_id: number; image_path: string; link_url?: string | null; link_x?: number; link_y?: number; link_width?: number; link_height?: number; scheduled_at: string }) =>
+                     ipcRenderer.invoke('storySchedules:create', data),
+    delete:        (id: number)       => ipcRenderer.invoke('storySchedules:delete', id),
+  },
+  storyGroupSchedules: {
+    list:        ()                   => ipcRenderer.invoke('storyGroupSchedules:list'),
+    listByGroup: (groupName: string)  => ipcRenderer.invoke('storyGroupSchedules:listByGroup', groupName),
+    create:      (data: { group_name: string; day_of_week: number; time_slot: string; random_offset?: number }) =>
+                   ipcRenderer.invoke('storyGroupSchedules:create', data),
+    update:      (id: number, data: { group_name?: string; day_of_week?: number; time_slot?: string; random_offset?: number }) =>
+                   ipcRenderer.invoke('storyGroupSchedules:update', id, data),
+    delete:      (id: number)         => ipcRenderer.invoke('storyGroupSchedules:delete', id),
+    toggle:      (id: number, enabled: boolean) => ipcRenderer.invoke('storyGroupSchedules:toggle', id, enabled),
+  },
+  storyGroupImages: {
+    list:   (scheduleId: number)     => ipcRenderer.invoke('storyGroupImages:list', scheduleId),
+    add:    (data: { story_group_schedule_id: number; image_path: string; link_url?: string | null; link_x?: number; link_y?: number; link_width?: number; link_height?: number; sort_order?: number }) =>
+              ipcRenderer.invoke('storyGroupImages:add', data),
+    remove: (id: number)             => ipcRenderer.invoke('storyGroupImages:remove', id),
+  },
+
+  reelSchedules: {
+    list:   ()                 => ipcRenderer.invoke('reelSchedules:list'),
+    create: (data: { account_id: number; video_path: string; caption?: string; thumbnail_path?: string | null; scheduled_at: string }) =>
+              ipcRenderer.invoke('reelSchedules:create', data),
+    delete: (id: number)       => ipcRenderer.invoke('reelSchedules:delete', id),
+  },
+  reelGroupSchedules: {
+    list:   ()                 => ipcRenderer.invoke('reelGroupSchedules:list'),
+    create: (data: { group_name: string; day_of_week: number; time_slot: string; random_offset?: number }) =>
+              ipcRenderer.invoke('reelGroupSchedules:create', data),
+    delete: (id: number)       => ipcRenderer.invoke('reelGroupSchedules:delete', id),
+    toggle: (id: number, enabled: boolean) => ipcRenderer.invoke('reelGroupSchedules:toggle', id, enabled),
+  },
+  reelGroupVideos: {
+    list:   (scheduleId: number) => ipcRenderer.invoke('reelGroupVideos:list', scheduleId),
+    add:    (data: { reel_group_schedule_id: number; video_path: string; caption?: string; thumbnail_path?: string | null; sort_order?: number }) =>
+              ipcRenderer.invoke('reelGroupVideos:add', data),
+    remove: (id: number)         => ipcRenderer.invoke('reelGroupVideos:remove', id),
+  },
+
+  alerts: {
+    list:      (limit?: number, offset?: number) => ipcRenderer.invoke('alerts:list', limit, offset),
+    byAccount: (accountId: number, limit?: number) => ipcRenderer.invoke('alerts:byAccount', accountId, limit),
+    summary:   () => ipcRenderer.invoke('alerts:summary'),
+  },
+
   dialog: {
     openFile: () => ipcRenderer.invoke('dialog:open-file') as Promise<{ name: string; path: string; data: number[] } | null>,
   },

@@ -6,8 +6,13 @@
  */
 
 import { net, session } from 'electron'
+import { prePostDelay, typingDelay } from '../lib/delay'
+import { analyzeAndLog } from '../lib/response-analyzer'
 import { likeViaView, followViaView, ensureViewLoaded, fetchNotificationsViaGraphQL } from '../browser-views/view-manager'
 import { getApiTokens } from './threads-web-api'
+import { getHeadersPatternB, getHeadersPatternC, getUnifiedHeaders } from '../lib/ig-headers'
+import { getAccountById } from '../db/repositories/accounts'
+import { generateBrowserUA } from '../lib/ua-generator'
 
 const IG_URL     = 'https://i.instagram.com'
 const IG_APP_ID  = '936619743392459'
@@ -28,14 +33,18 @@ async function getSessionHeaders(accountId: number): Promise<Record<string, stri
   const csrfToken   = cookies.find(c => c.name === 'csrftoken')?.value ?? ''
   const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ')
 
+  const acct = getAccountById(accountId)
+  const unified = !!acct?.use_unified_headers
+
   return {
     'Cookie':       cookieHeader,
     'X-CSRFToken':  csrfToken,
     'X-IG-App-ID':  IG_APP_ID,
-    'User-Agent':   USER_AGENT,
+    'User-Agent':   unified ? generateBrowserUA() : USER_AGENT,
     'Content-Type': 'application/x-www-form-urlencoded',
     'Referer':      'https://www.threads.com/',
     'Origin':       'https://www.threads.com',
+    ...(unified ? getUnifiedHeaders(accountId) : getHeadersPatternB(accountId)),
   }
 }
 
@@ -328,10 +337,11 @@ async function threadsGraphQL(
       'X-CSRFToken':     tokens.csrfToken,
       'X-FB-LSD':        tokens.lsd,
       'X-ASBD-ID':       '359341',
-      'User-Agent':      BROWSER_UA_REPLY,
+      'User-Agent':      getAccountById(accountId)?.use_unified_headers ? generateBrowserUA() : BROWSER_UA_REPLY,
       'Origin':          THREADS_URL_BASE,
       'Referer':         THREADS_URL_BASE + '/',
       'Accept-Encoding': 'identity',
+      ...(getAccountById(accountId)?.use_unified_headers ? getUnifiedHeaders(accountId) : getHeadersPatternC(accountId)),
     },
   })
   if (!resp.ok) {
@@ -397,6 +407,11 @@ export async function apiReplyToPost(
   replyToMediaId: string,
   content: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // ── 投稿前ディレイ（bot検知回避）─────────────────────────────────────────────
+  const preMs = await prePostDelay(accountId)
+  const typeMs = await typingDelay(accountId, content)
+  console.log(`[Delay] account=${accountId} prePost=${preMs}ms typing=${typeMs}ms (${content.length}chars)`)
+
   const sess = session.fromPartition(`persist:account-${accountId}`)
   const allCookies = await sess.cookies.get({}).catch(() => [])
   const csrftoken = allCookies.find(c => c.name === 'csrftoken' && c.domain?.includes('threads.com'))?.value
@@ -450,16 +465,20 @@ export async function apiReplyToPost(
         'X-CSRFToken':     csrftoken,
         'X-IG-App-ID':     THREADS_APP_ID,
         'X-ASBD-ID':       '129477',
-        'User-Agent':      BROWSER_UA_REPLY,
+        'User-Agent':      getAccountById(accountId)?.use_unified_headers ? generateBrowserUA() : BROWSER_UA_REPLY,
         'Origin':          THREADS_URL_BASE,
         'Referer':         THREADS_URL_BASE + '/',
         'Accept-Encoding': 'identity',
+        ...(getAccountById(accountId)?.use_unified_headers ? getUnifiedHeaders(accountId) : getHeadersPatternC(accountId)),
       },
       body,
     })
     const text = await resp.text()
     console.log(`[apiReplyToPost] account=${accountId} replyTo=${replyToMediaId} status=${resp.status} body=${text.slice(0, 200)}`)
-    if (!resp.ok) return { success: false, error: `status ${resp.status}: ${text.slice(0, 200)}` }
+    if (!resp.ok) {
+      analyzeAndLog(accountId, text)
+      return { success: false, error: `status ${resp.status}: ${text.slice(0, 200)}` }
+    }
     return { success: true }
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) }

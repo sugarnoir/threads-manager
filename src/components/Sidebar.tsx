@@ -1650,7 +1650,7 @@ export function Sidebar({
             接続中 {accounts.filter(a => a.status === 'active').length}
           </span>
         </div>
-        <span className="text-zinc-700 text-[10px]">v1.0.0</span>
+        <span className="text-zinc-700 text-[10px]">v{__APP_VERSION__}</span>
       </div>
 
     </aside>

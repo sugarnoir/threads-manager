@@ -5,7 +5,7 @@ export interface Post {
   account_id: number
   content: string
   media_paths: string[]
-  status: 'pending' | 'posted' | 'failed'
+  status: 'pending' | 'posted' | 'failed' | 'skipped'
   error_msg: string | null
   posted_at: string | null
   created_at: string

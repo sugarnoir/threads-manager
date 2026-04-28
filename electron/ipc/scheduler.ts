@@ -27,6 +27,7 @@ import { getSetting } from '../db/repositories/settings'
 import { createEngagement } from '../db/repositories/engagements'
 import { sendPost } from './post'
 import { apiPostText, apiPostWithMedia, fetchFollowerCount } from '../api/threads-web-api'
+import { shouldSkipForStatus } from '../lib/account-guard'
 import { resolveImagePaths } from '../utils/image-download'
 import { apiGetUserId, apiGetUserPosts, apiLikePost, apiFollowUser, apiReplyToPost, apiFetchNotifications } from '../api/threads-engage-api'
 import {
@@ -50,6 +51,27 @@ import {
   AutoReplyConfig,
 } from '../db/repositories/auto-reply'
 import { getAllAccounts, updateAccountFollowerCount, updateReplyBanStatus, getAccountById } from '../db/repositories/accounts'
+import {
+  getPendingStorySchedules,
+  updateStoryScheduleStatus,
+  createStorySchedule,
+  hasExpandedToday,
+} from '../db/repositories/story-schedules'
+import {
+  getEnabledStoryGroupSchedules,
+  getImagesByGroupSchedule,
+} from '../db/repositories/story-group-schedules'
+import { postStory, StoryLinkSticker, postReel } from '../api/threads-web-api'
+import {
+  getPendingReelSchedules,
+  updateReelScheduleStatus,
+  createReelSchedule,
+  hasReelExpandedToday,
+} from '../db/repositories/reel-schedules'
+import {
+  getEnabledReelGroupSchedules,
+  getVideosByGroupSchedule,
+} from '../db/repositories/reel-group-schedules'
 
 let schedulerInterval: NodeJS.Timeout | null = null
 let schedulerRunning = false
@@ -315,6 +337,13 @@ async function executeAutoReply(config: AutoReplyConfig): Promise<void> {
   }
 
   for (const account of accounts) {
+    // ステータスチェック
+    const replyGuard = shouldSkipForStatus(account)
+    if (replyGuard.skip) {
+      console.log(`[autoReply] SKIP account=${account.id}: ${replyGuard.reason}`)
+      continue
+    }
+
     try {
       // 通知ページからリプライ通知を取得
       const notifications = await apiFetchNotifications(account.id)
@@ -381,6 +410,22 @@ export function startScheduler(win: BrowserWindow): void {
       // 1. 通常スケジュール
       const pending = getPendingSchedules()
       for (const schedule of pending) {
+        // ステータスチェック
+        const schedAccount = getAccountById(schedule.account_id)
+        if (schedAccount) {
+          const guard = shouldSkipForStatus(schedAccount)
+          if (guard.skip) {
+            console.log(`[Scheduler] SKIP schedule.id=${schedule.id} account=${schedule.account_id}: ${guard.reason}`)
+            const post = createPost({ account_id: schedule.account_id, content: schedule.content, media_paths: schedule.media_paths })
+            updatePostStatus(post.id, 'skipped', guard.reason)
+            updateScheduleStatus(schedule.id, 'failed', post.id)
+            if (!win.isDestroyed()) {
+              win.webContents.send('scheduler:executed', { schedule_id: schedule.id, success: false })
+            }
+            continue
+          }
+        }
+
         updateScheduleStatus(schedule.id, 'posted')
         const post = createPost({
           account_id:  schedule.account_id,
@@ -409,6 +454,193 @@ export function startScheduler(win: BrowserWindow): void {
         }
       }
 
+      // 日時計算（ストーリー・リールグループ展開で共用）
+      const nowJST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }))
+      const todayDow = nowJST.getDay() // 0=日 ... 6=土
+      const nowMinutes = nowJST.getHours() * 60 + nowJST.getMinutes()
+
+      // 1.5 ストーリーグループ展開
+      try {
+        const enabledGroupSchedules = getEnabledStoryGroupSchedules()
+
+        for (const gs of enabledGroupSchedules) {
+          if (gs.day_of_week !== todayDow) continue
+
+          const [slotH, slotM] = gs.time_slot.split(':').map(Number)
+          const slotMinutes = slotH * 60 + slotM
+          const expandAt = slotMinutes - 30 // 30分前に展開
+
+          if (nowMinutes < expandAt) continue
+          if (hasExpandedToday(gs.id)) continue
+
+          const images = getImagesByGroupSchedule(gs.id)
+          if (images.length === 0) {
+            console.log(`[StoryGroup] SKIP gs.id=${gs.id} group=${gs.group_name}: 画像プールが空`)
+            continue
+          }
+
+          const groupAccounts = getAllAccounts().filter(a => a.group_name === gs.group_name)
+          if (groupAccounts.length === 0) {
+            console.log(`[StoryGroup] SKIP gs.id=${gs.id} group=${gs.group_name}: グループにアカウントなし`)
+            continue
+          }
+
+          // 今日の time_slot の Date を構築（JST）
+          const todayBase = new Date()
+          todayBase.setHours(slotH, slotM, 0, 0)
+
+          for (const account of groupAccounts) {
+            const img = images[Math.floor(Math.random() * images.length)]
+            const offsetMs = (Math.random() * 2 - 1) * gs.random_offset * 60_000
+            const scheduledAt = new Date(todayBase.getTime() + offsetMs)
+
+            createStorySchedule({
+              account_id:               account.id,
+              image_path:               img.image_path,
+              link_url:                 img.link_url,
+              link_x:                   img.link_x,
+              link_y:                   img.link_y,
+              link_width:               img.link_width,
+              link_height:              img.link_height,
+              scheduled_at:             scheduledAt.toISOString(),
+              source_group_schedule_id: gs.id,
+            })
+          }
+          console.log(`[StoryGroup] 展開完了 gs.id=${gs.id} group=${gs.group_name} accounts=${groupAccounts.length}`)
+        }
+      } catch (e) {
+        console.error('[StoryGroup] 展開エラー:', e)
+      }
+
+      // 1.6 ストーリー予約実行
+      const pendingStories = getPendingStorySchedules()
+      for (const ss of pendingStories) {
+        const storyAccount = getAccountById(ss.account_id)
+        if (storyAccount) {
+          const guard = shouldSkipForStatus(storyAccount)
+          if (guard.skip) {
+            console.log(`[StoryScheduler] SKIP ss.id=${ss.id} account=${ss.account_id}: ${guard.reason}`)
+            updateStoryScheduleStatus(ss.id, 'skipped', guard.reason)
+            if (!win.isDestroyed()) {
+              win.webContents.send('storyScheduler:executed', { story_schedule_id: ss.id, success: false })
+            }
+            continue
+          }
+        }
+
+        updateStoryScheduleStatus(ss.id, 'posted') // 二重実行防止
+        console.log(`[StoryScheduler] executing ss.id=${ss.id} account=${ss.account_id}`)
+
+        let storySuccess = false
+        try {
+          const linkSticker: StoryLinkSticker | undefined = ss.link_url
+            ? { url: ss.link_url, x: ss.link_x, y: ss.link_y, width: ss.link_width, height: ss.link_height }
+            : undefined
+          const result = await postStory(ss.account_id, ss.image_path, linkSticker)
+          storySuccess = result.success
+          updateStoryScheduleStatus(ss.id, result.success ? 'posted' : 'failed', result.error)
+          console.log(`[StoryScheduler] ss.id=${ss.id} result=${result.success ? 'posted' : 'failed'}${result.error ? ` (${result.error})` : ''}`)
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e)
+          updateStoryScheduleStatus(ss.id, 'failed', errMsg)
+          console.error(`[StoryScheduler] ss.id=${ss.id} error:`, e)
+        }
+
+        if (!win.isDestroyed()) {
+          win.webContents.send('storyScheduler:executed', { story_schedule_id: ss.id, success: storySuccess })
+        }
+      }
+
+      // 1.7 リールグループ展開
+      try {
+        const enabledReelGroupSchedules = getEnabledReelGroupSchedules()
+
+        for (const gs of enabledReelGroupSchedules) {
+          if (gs.day_of_week !== todayDow) continue
+
+          const [rSlotH, rSlotM] = gs.time_slot.split(':').map(Number)
+          const rSlotMinutes = rSlotH * 60 + rSlotM
+          const rExpandAt = rSlotMinutes - 30
+
+          if (nowMinutes < rExpandAt) continue
+          if (hasReelExpandedToday(gs.id)) continue
+
+          const videos = getVideosByGroupSchedule(gs.id)
+          if (videos.length === 0) {
+            console.log(`[ReelGroup] SKIP gs.id=${gs.id} group=${gs.group_name}: 動画プールが空`)
+            continue
+          }
+
+          const reelGroupAccounts = getAllAccounts().filter(a => a.group_name === gs.group_name)
+          if (reelGroupAccounts.length === 0) {
+            console.log(`[ReelGroup] SKIP gs.id=${gs.id} group=${gs.group_name}: グループにアカウントなし`)
+            continue
+          }
+
+          const reelTodayBase = new Date()
+          reelTodayBase.setHours(rSlotH, rSlotM, 0, 0)
+
+          for (const account of reelGroupAccounts) {
+            const vid = videos[Math.floor(Math.random() * videos.length)]
+            const offsetMs = (Math.random() * 2 - 1) * gs.random_offset * 60_000
+            const scheduledAt = new Date(reelTodayBase.getTime() + offsetMs)
+
+            createReelSchedule({
+              account_id:               account.id,
+              video_path:               vid.video_path,
+              caption:                  vid.caption,
+              thumbnail_path:           vid.thumbnail_path,
+              scheduled_at:             scheduledAt.toISOString(),
+              source_group_schedule_id: gs.id,
+            })
+          }
+          console.log(`[ReelGroup] 展開完了 gs.id=${gs.id} group=${gs.group_name} accounts=${reelGroupAccounts.length}`)
+        }
+      } catch (e) {
+        console.error('[ReelGroup] 展開エラー:', e)
+      }
+
+      // 1.8 リール予約実行（1tickあたり最大2件）
+      const MAX_REELS_PER_TICK = 2
+      const pendingReels = getPendingReelSchedules()
+      let reelCount = 0
+      for (const rs of pendingReels) {
+        if (reelCount >= MAX_REELS_PER_TICK) break
+
+        const reelAccount = getAccountById(rs.account_id)
+        if (reelAccount) {
+          const guard = shouldSkipForStatus(reelAccount)
+          if (guard.skip) {
+            console.log(`[ReelScheduler] SKIP rs.id=${rs.id} account=${rs.account_id}: ${guard.reason}`)
+            updateReelScheduleStatus(rs.id, 'skipped', guard.reason)
+            if (!win.isDestroyed()) {
+              win.webContents.send('reelScheduler:executed', { reel_schedule_id: rs.id, success: false })
+            }
+            continue
+          }
+        }
+
+        updateReelScheduleStatus(rs.id, 'posted') // 二重実行防止
+        console.log(`[ReelScheduler] executing rs.id=${rs.id} account=${rs.account_id}`)
+        reelCount++
+
+        let reelSuccess = false
+        try {
+          const result = await postReel(rs.account_id, rs.video_path, rs.caption, rs.thumbnail_path)
+          reelSuccess = result.success
+          updateReelScheduleStatus(rs.id, result.success ? 'posted' : 'failed', result.error)
+          console.log(`[ReelScheduler] rs.id=${rs.id} result=${result.success ? 'posted' : 'failed'}${result.error ? ` (${result.error})` : ''}`)
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e)
+          updateReelScheduleStatus(rs.id, 'failed', errMsg)
+          console.error(`[ReelScheduler] rs.id=${rs.id} error:`, e)
+        }
+
+        if (!win.isDestroyed()) {
+          win.webContents.send('reelScheduler:executed', { reel_schedule_id: rs.id, success: reelSuccess })
+        }
+      }
+
       // 2. 自動投稿
       const MIN_POST_INTERVAL_MS = 260 * 60_000 // 260分
       const now = new Date()
@@ -424,6 +656,16 @@ export function startScheduler(win: BrowserWindow): void {
         if (nextAt && nextAt > now) {
           logAutopost(`[Autopost] account=${config.account_id} SKIP — next_at in ${remainMin}m (${config.next_at})`)
           continue
+        }
+
+        // ステータスチェック
+        const autoAcct = getAccountById(config.account_id)
+        if (autoAcct) {
+          const guard = shouldSkipForStatus(autoAcct)
+          if (guard.skip) {
+            logAutopost(`[Autopost] account=${config.account_id} SKIP — ${guard.reason}`)
+            continue
+          }
         }
 
         // 再起動時の重複投稿防止: 直近の投稿時刻が最小間隔未満ならスキップ

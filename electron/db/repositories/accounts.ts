@@ -20,6 +20,13 @@ export interface Account {
   ig_password: string | null
   platform: 'threads' | 'instagram' | 'x'
   totp_secret: string | null
+  ua_generated_at: string | null
+  ua_app_version: string | null
+  device_id: string | null
+  device_uuid: string | null
+  phone_id: string | null
+  adid: string | null
+  use_unified_headers: boolean
   reply_ban_status: 'ok' | 'banned' | null
   reply_ban_checked_at: string | null
   created_at: string
@@ -156,6 +163,24 @@ export function updateAccountUserAgent(id: number, user_agent: string | null): v
   getDb()
     .prepare("UPDATE accounts SET user_agent = ?, updated_at = datetime('now') WHERE id = ?")
     .run(user_agent, id)
+}
+
+export function updateAccountUA(id: number, user_agent: string, ua_generated_at: string, ua_app_version: string): void {
+  getDb()
+    .prepare("UPDATE accounts SET user_agent = ?, ua_generated_at = ?, ua_app_version = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(user_agent, ua_generated_at, ua_app_version, id)
+}
+
+export function updateAccountDeviceIds(id: number, ids: { device_id: string; device_uuid: string; phone_id: string; adid: string }): void {
+  getDb()
+    .prepare("UPDATE accounts SET device_id = ?, device_uuid = ?, phone_id = ?, adid = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(ids.device_id, ids.device_uuid, ids.phone_id, ids.adid, id)
+}
+
+export function updateAccountUnifiedHeaders(id: number, enabled: boolean): void {
+  getDb()
+    .prepare("UPDATE accounts SET use_unified_headers = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(enabled ? 1 : 0, id)
 }
 
 export function updateReplyBanStatus(id: number, status: 'ok' | 'banned', checkedAt: string): void {

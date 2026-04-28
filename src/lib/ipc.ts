@@ -21,6 +21,10 @@ export interface Account {
   mark: string | null
   platform: 'threads' | 'instagram' | 'x'
   totp_secret: string | null
+  ua_generated_at: string | null
+  ua_app_version: string | null
+  device_id: string | null
+  use_unified_headers: boolean
   reply_ban_status: 'ok' | 'banned' | null
   reply_ban_checked_at: string | null
   created_at: string
@@ -275,9 +279,107 @@ export interface MasterKeyRow {
 }
 
 
+export interface AppConfigRow {
+  key: string
+  value: string
+  updated_at: string
+  updated_by: string | null
+}
+
+export interface StoryScheduleRow {
+  id: number
+  account_id: number
+  image_path: string
+  link_url: string | null
+  link_x: number
+  link_y: number
+  link_width: number
+  link_height: number
+  scheduled_at: string
+  status: 'pending' | 'posted' | 'failed' | 'skipped' | 'cancelled'
+  error_msg: string | null
+  posted_at: string | null
+  source_group_schedule_id: number | null
+  created_at: string
+}
+
+export interface StoryGroupScheduleRow {
+  id: number
+  group_name: string
+  day_of_week: number
+  time_slot: string
+  random_offset: number
+  enabled: number
+  created_at: string
+}
+
+export interface StoryGroupImageRow {
+  id: number
+  story_group_schedule_id: number
+  image_path: string
+  link_url: string | null
+  link_x: number
+  link_y: number
+  link_width: number
+  link_height: number
+  sort_order: number
+}
+
+export interface ReelScheduleRow {
+  id: number
+  account_id: number
+  video_path: string
+  caption: string
+  thumbnail_path: string | null
+  scheduled_at: string
+  status: 'pending' | 'posted' | 'failed' | 'skipped' | 'cancelled'
+  error_msg: string | null
+  posted_at: string | null
+  source_group_schedule_id: number | null
+  created_at: string
+}
+
+export interface ReelGroupScheduleRow {
+  id: number
+  group_name: string
+  day_of_week: number
+  time_slot: string
+  random_offset: number
+  enabled: number
+  created_at: string
+}
+
+export interface ReelGroupVideoRow {
+  id: number
+  reel_group_schedule_id: number
+  video_path: string
+  caption: string
+  thumbnail_path: string | null
+  sort_order: number
+}
+
+export interface ResponseAlertRow {
+  id: number
+  account_id: number
+  error_type: string
+  raw_body: string | null
+  detected_at: string
+}
+
+export interface AlertSummary {
+  error_type: string
+  count: number
+}
+
 declare global {
   interface Window {
     electronAPI: {
+      appConfig: {
+        list:    () => Promise<{ success: boolean; data?: AppConfigRow[]; error?: string }>
+        update:  (data: { key: string; value: string; updated_by?: string }) => Promise<{ success: boolean; error?: string }>
+        refresh: () => Promise<{ success: boolean; error?: string }>
+        get:     (key: string) => Promise<string>
+      }
       license: {
         list:   () => Promise<{ success: boolean; data?: LicenseRow[]; error?: string }>
         create: (row: LicenseRow) => Promise<{ success: boolean; error?: string }>
@@ -310,7 +412,7 @@ declare global {
         updateMark: (data: { id: number; mark: string | null }) => Promise<{ success: boolean }>
         updateSpeedPreset: (data: { id: number; speed_preset: 'slow' | 'normal' | 'fast' }) => Promise<{ success: boolean }>
         updateUserAgent: (data: { id: number; user_agent: string | null }) => Promise<{ success: boolean }>
-        checkIp: (data: { proxy_url: string | null; proxy_username?: string; proxy_password?: string }) => Promise<{ ip: string | null; error?: string }>
+        checkIp: (data: { proxy_url: string | null; proxy_username?: string; proxy_password?: string }) => Promise<{ ip: string | null; error?: string; errorType?: 'PROXY_CONNECTION_FAILED' | 'PROXY_AUTH_FAILED' | 'PROXY_FORBIDDEN' | 'PROXY_TIMEOUT' | 'IP_SERVICE_ERROR' | 'INVALID_IP_FORMAT' | 'UNKNOWN' }>
         hasAccessToken: (id: number) => Promise<{ hasToken: boolean }>
         loginInstagram: (id: number) => Promise<{ success: boolean; hasSessionId?: boolean; error?: string }>
         bulkLoginInstagram: (data: { group_name: string | null }) => Promise<{ success: boolean; error?: string }>
@@ -348,11 +450,20 @@ declare global {
           errors:   Array<{ username: string; message: string }>
           accounts: Account[]
         }>
-        autoRename: (id: number) => Promise<{
+        autoRename: (id: number, customNames?: string[]) => Promise<{
           success: boolean
           status?: number
           newName?: string
           error?:   string
+        }>
+        regenerateUA: (id: number) => Promise<{
+          success: boolean
+          newUA?:  string
+          error?:  string
+        }>
+        updateUnifiedHeaders: (id: number, enabled: boolean) => Promise<{
+          success: boolean
+          error?:  string
         }>
         importCookieLogin: (rows: Array<{
           username:    string
@@ -555,6 +666,53 @@ declare global {
           Promise<{ added: number; total?: number; error?: string }>
         stats:           (accountId: number) => Promise<FollowQueueStats>
         clearPending:    (accountId: number) => Promise<{ ok: boolean }>
+      }
+      storySchedules: {
+        list:          ()                 => Promise<StoryScheduleRow[]>
+        listByAccount: (accountId: number) => Promise<StoryScheduleRow[]>
+        create:        (data: { account_id: number; image_path: string; link_url?: string | null; link_x?: number; link_y?: number; link_width?: number; link_height?: number; scheduled_at: string }) =>
+                         Promise<{ success: boolean; schedule?: StoryScheduleRow; error?: string }>
+        delete:        (id: number) => Promise<{ success: boolean; error?: string }>
+      }
+      storyGroupSchedules: {
+        list:        ()                   => Promise<StoryGroupScheduleRow[]>
+        listByGroup: (groupName: string)  => Promise<StoryGroupScheduleRow[]>
+        create:      (data: { group_name: string; day_of_week: number; time_slot: string; random_offset?: number }) =>
+                       Promise<{ success: boolean; schedule?: StoryGroupScheduleRow; error?: string }>
+        update:      (id: number, data: { group_name?: string; day_of_week?: number; time_slot?: string; random_offset?: number }) =>
+                       Promise<{ success: boolean; error?: string }>
+        delete:      (id: number) => Promise<{ success: boolean; error?: string }>
+        toggle:      (id: number, enabled: boolean) => Promise<{ success: boolean; error?: string }>
+      }
+      storyGroupImages: {
+        list:   (scheduleId: number) => Promise<StoryGroupImageRow[]>
+        add:    (data: { story_group_schedule_id: number; image_path: string; link_url?: string | null; link_x?: number; link_y?: number; link_width?: number; link_height?: number; sort_order?: number }) =>
+                  Promise<{ success: boolean; image?: StoryGroupImageRow; error?: string }>
+        remove: (id: number) => Promise<{ success: boolean; error?: string }>
+      }
+      reelSchedules: {
+        list:   () => Promise<ReelScheduleRow[]>
+        create: (data: { account_id: number; video_path: string; caption?: string; thumbnail_path?: string | null; scheduled_at: string }) =>
+                  Promise<{ success: boolean; schedule?: ReelScheduleRow; error?: string }>
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>
+      }
+      reelGroupSchedules: {
+        list:   () => Promise<ReelGroupScheduleRow[]>
+        create: (data: { group_name: string; day_of_week: number; time_slot: string; random_offset?: number }) =>
+                  Promise<{ success: boolean; schedule?: ReelGroupScheduleRow; error?: string }>
+        delete: (id: number) => Promise<{ success: boolean; error?: string }>
+        toggle: (id: number, enabled: boolean) => Promise<{ success: boolean; error?: string }>
+      }
+      reelGroupVideos: {
+        list:   (scheduleId: number) => Promise<ReelGroupVideoRow[]>
+        add:    (data: { reel_group_schedule_id: number; video_path: string; caption?: string; thumbnail_path?: string | null; sort_order?: number }) =>
+                  Promise<{ success: boolean; video?: ReelGroupVideoRow; error?: string }>
+        remove: (id: number) => Promise<{ success: boolean; error?: string }>
+      }
+      alerts: {
+        list:      (limit?: number, offset?: number) => Promise<ResponseAlertRow[]>
+        byAccount: (accountId: number, limit?: number) => Promise<ResponseAlertRow[]>
+        summary:   () => Promise<AlertSummary[]>
       }
       dialog: {
         openFile: () => Promise<{ name: string; path: string; data: number[] } | null>

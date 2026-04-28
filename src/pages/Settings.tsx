@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { api, ProxyPreset, MasterKeyRow } from '../lib/ipc'
+import { api, ProxyPreset, MasterKeyRow, AppConfigRow, ResponseAlertRow, AlertSummary, Account } from '../lib/ipc'
 import { LicenseAdmin } from './LicenseAdmin'
 import { MasterKeyGate } from '../components/MasterKeyGate'
+import { CONFIG_KEYS } from '../lib/config/configKeys'
+import { Copy, Check, RefreshCw, Loader2 } from 'lucide-react'
 
 // 管理者パスワード（ハードコード）
 const ADMIN_PASSWORD = 'TM-ADMIN-2025'
@@ -49,6 +51,159 @@ function Toggle({ checked, onChange, disabled = false, size = 'md' }: ToggleProp
         ].join(' ')}
       />
     </button>
+  )
+}
+
+// ── Response Alert section ─────────────────────────────────────────────────────
+
+type AlertPeriod = '24h' | '7d' | 'all'
+
+const ERROR_TYPE_LABELS: Record<string, { label: string; cls: string }> = {
+  feedback_required:   { label: 'スパム判定',       cls: 'bg-red-900/40 text-red-400' },
+  checkpoint_required: { label: 'チャレンジ要求',   cls: 'bg-orange-900/40 text-orange-400' },
+  sentry_block:        { label: '一時ブロック',     cls: 'bg-red-900/40 text-red-300' },
+  login_required:      { label: 'セッション切れ',   cls: 'bg-yellow-900/40 text-yellow-400' },
+  rate_limit:          { label: 'レート制限',       cls: 'bg-amber-900/40 text-amber-400' },
+}
+
+function ResponseAlertSection() {
+  const [alerts, setAlerts]     = useState<ResponseAlertRow[]>([])
+  const [summary, setSummary]   = useState<AlertSummary[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [period, setPeriod]     = useState<AlertPeriod>('24h')
+  const [typeFilter, setTypeFilter] = useState<string>('')
+  const [expandedId, setExpandedId] = useState<number | null>(null)
+
+  const fetchData = async () => {
+    const [a, s, accts] = await Promise.all([
+      api.alerts.list(100),
+      api.alerts.summary(),
+      api.accounts.list(),
+    ])
+    setAlerts(a)
+    setSummary(s)
+    setAccounts(accts)
+  }
+
+  useEffect(() => {
+    fetchData()
+    const unsub = api.on('response-alert', fetchData)
+    return unsub
+  }, [])
+
+  const acctMap = new Map(accounts.map(a => [a.id, a.username]))
+
+  const now = Date.now()
+  const periodMs: Record<AlertPeriod, number> = {
+    '24h': 24 * 60 * 60 * 1000,
+    '7d':  7 * 24 * 60 * 60 * 1000,
+    'all': Infinity,
+  }
+
+  const filtered = alerts.filter(a => {
+    if (period !== 'all') {
+      const age = now - new Date(a.detected_at).getTime()
+      if (age > periodMs[period]) return false
+    }
+    if (typeFilter && a.error_type !== typeFilter) return false
+    return true
+  })
+
+  const uniqueTypes = [...new Set(alerts.map(a => a.error_type))]
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-red-600 flex items-center justify-center shrink-0">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <div>
+          <p className="text-white font-semibold text-sm">アラート履歴</p>
+          <p className="text-zinc-500 text-xs">APIエラー検知ログ</p>
+        </div>
+      </div>
+
+      {/* サマリー */}
+      {summary.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3">
+          <span className="text-zinc-500 text-xs">直近24時間:</span>
+          {summary.map(s => {
+            const info = ERROR_TYPE_LABELS[s.error_type]
+            return (
+              <span key={s.error_type} className={`text-xs px-2 py-0.5 rounded-full font-medium ${info?.cls ?? 'bg-zinc-700 text-zinc-300'}`}>
+                {info?.label ?? s.error_type} {s.count}
+              </span>
+            )
+          })}
+        </div>
+      )}
+      {summary.length === 0 && (
+        <p className="text-zinc-600 text-xs mb-3">直近24時間のアラートはありません</p>
+      )}
+
+      {/* フィルター */}
+      <div className="flex gap-2 mb-3">
+        {(['24h', '7d', 'all'] as const).map(p => (
+          <button
+            key={p}
+            onClick={() => setPeriod(p)}
+            className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+              period === p ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-300'
+            }`}
+          >
+            {{ '24h': '24時間', '7d': '7日', 'all': '全期間' }[p]}
+          </button>
+        ))}
+        <select
+          value={typeFilter}
+          onChange={e => setTypeFilter(e.target.value)}
+          className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-xs text-zinc-300"
+        >
+          <option value="">全タイプ</option>
+          {uniqueTypes.map(t => (
+            <option key={t} value={t}>{ERROR_TYPE_LABELS[t]?.label ?? t}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* アラート一覧 */}
+      <div className="space-y-1.5 max-h-80 overflow-y-auto">
+        {filtered.length === 0 ? (
+          <p className="text-zinc-600 text-xs text-center py-4">アラートがありません</p>
+        ) : (
+          filtered.map(a => {
+            const info = ERROR_TYPE_LABELS[a.error_type]
+            const isExpanded = expandedId === a.id
+            return (
+              <div key={a.id} className="bg-zinc-800 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 font-mono">@{acctMap.get(a.account_id) ?? a.account_id}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${info?.cls ?? 'bg-zinc-700 text-zinc-300'}`}>
+                    {info?.label ?? a.error_type}
+                  </span>
+                  <span className="text-[10px] text-zinc-600 ml-auto">
+                    {new Date(a.detected_at).toLocaleString('ja-JP')}
+                  </span>
+                </div>
+                {a.raw_body && (
+                  <div className="mt-1">
+                    <button
+                      onClick={() => setExpandedId(isExpanded ? null : a.id)}
+                      className="text-[10px] text-zinc-500 hover:text-zinc-400 font-mono break-all text-left"
+                    >
+                      {isExpanded ? a.raw_body : a.raw_body.slice(0, 100) + (a.raw_body.length > 100 ? '...' : '')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -541,9 +696,30 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
         )}
       </div>
 
+      {/* Response Alerts section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <ResponseAlertSection />
+      </div>
+
       {/* Image Groups section */}
       <div className="pt-2 border-t border-zinc-800">
         <ImageGroupsSection />
+      </div>
+
+      {/* Bloks ID section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <BloksIdSection />
+      </div>
+
+      {/* User-Agent Management section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <UserAgentSection />
+      </div>
+
+      {/* Profile Name Auto-change section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <h2 className="text-white font-semibold mb-3">プロフィール名前一括変更</h2>
+        <ProfileNameSection />
       </div>
 
       {/* Profile Icon Auto-change section */}
@@ -571,6 +747,11 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
       {/* Discord Bot section */}
       <div className="pt-2 border-t border-zinc-800">
         <BotSection />
+      </div>
+
+      {/* App Config Admin section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <AppConfigAdminSection />
       </div>
 
       {/* Master Key Admin section */}
@@ -1852,6 +2033,598 @@ export function StockBulkDeleteSection() {
         <p className={`text-xs px-3 py-2 rounded-lg ${message.ok ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'}`}>
           {message.text}
         </p>
+      )}
+    </div>
+  )
+}
+
+// ── User-Agent 管理セクション ────────────────────────────────────────────────
+
+function UserAgentSection() {
+  const [accounts, setAccounts]       = useState<import('../lib/ipc').Account[]>([])
+  const [groups, setGroups]           = useState<import('../lib/ipc').Group[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>('__all__')
+  const [running, setRunning]         = useState(false)
+  const [results, setResults]         = useState<{ username: string; success: boolean; newUA?: string; error?: string }[]>([])
+  const [currentAppVer, setCurrentAppVer] = useState('')
+  const [iosPool, setIosPool]         = useState('')
+  const [modelPool, setModelPool]     = useState('')
+  const [refreshing, setRefreshing]   = useState(false)
+  const [refreshMsg, setRefreshMsg]   = useState<{ ok: boolean; text: string } | null>(null)
+
+  const loadConfig = async () => {
+    const [ver, ios, model] = await Promise.all([
+      api.appConfig.get('instagram_app_version'),
+      api.appConfig.get('ios_versions_pool'),
+      api.appConfig.get('iphone_models_pool'),
+    ])
+    setCurrentAppVer(ver)
+    setIosPool(ios)
+    setModelPool(model)
+  }
+
+  useEffect(() => {
+    api.accounts.list().then(setAccounts)
+    api.groups.list().then(setGroups)
+    loadConfig()
+  }, [])
+
+  const handleRefreshConfig = async () => {
+    setRefreshing(true)
+    setRefreshMsg(null)
+    const r = await api.appConfig.refresh()
+    if (r.success) {
+      await loadConfig()
+      setRefreshMsg({ ok: true, text: '✓ 最新の設定を取得しました' })
+    } else {
+      setRefreshMsg({ ok: false, text: `✗ ${r.error ?? '取得に失敗しました'}` })
+    }
+    setRefreshing(false)
+    setTimeout(() => setRefreshMsg(null), 5000)
+  }
+
+  const targetAccounts = selectedGroup === '__all__'
+    ? accounts
+    : selectedGroup === '__none__'
+    ? accounts.filter(a => !a.group_name)
+    : accounts.filter(a => a.group_name === selectedGroup)
+
+  // 警告判定
+  const now = Date.now()
+  const staleAccounts = accounts.filter(a => {
+    if (!a.ua_generated_at) return true // NULL = 既存アカウント
+    if (currentAppVer && a.ua_app_version !== currentAppVer) return true // バージョン不一致
+    const age = now - new Date(a.ua_generated_at).getTime()
+    if (age > 90 * 24 * 60 * 60 * 1000) return true // 90日以上
+    return false
+  })
+
+  const nullCount    = accounts.filter(a => !a.ua_generated_at).length
+  const mismatchCount = accounts.filter(a => a.ua_generated_at && currentAppVer && a.ua_app_version !== currentAppVer).length
+  const oldCount     = accounts.filter(a => {
+    if (!a.ua_generated_at) return false
+    return (now - new Date(a.ua_generated_at).getTime()) > 90 * 24 * 60 * 60 * 1000
+  }).length
+
+  const handleBulkRegenerate = async () => {
+    if (targetAccounts.length === 0) { alert('対象アカウントがありません'); return }
+    const label = selectedGroup === '__all__' ? '全アカウント'
+      : selectedGroup === '__none__' ? 'グループなし'
+      : `グループ「${selectedGroup}」`
+    if (!confirm(`${label}（${targetAccounts.length}件）のUAを再生成しますか？`)) return
+
+    setRunning(true)
+    setResults([])
+    const res: typeof results = []
+    for (const acc of targetAccounts) {
+      const r = await api.accounts.regenerateUA(acc.id)
+      res.push({ username: acc.username, success: r.success, newUA: r.newUA, error: r.error })
+      setResults([...res])
+    }
+    setRunning(false)
+    api.accounts.list().then(setAccounts)
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-8 h-8 rounded-lg bg-orange-600 flex items-center justify-center shrink-0 text-base">📱</div>
+        <div>
+          <p className="text-white font-semibold text-sm">User-Agent 管理</p>
+          <p className="text-zinc-500 text-xs">アカウントのUA文字列を最新化</p>
+        </div>
+      </div>
+
+      {/* 現在の設定値 */}
+      <div className="bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 mb-3 space-y-1 text-xs">
+        <div className="flex gap-2">
+          <span className="text-zinc-500 shrink-0 w-28">App Version:</span>
+          <code className="text-zinc-300 font-mono">{currentAppVer || '(未取得)'}</code>
+        </div>
+        <div className="flex gap-2">
+          <span className="text-zinc-500 shrink-0 w-28">iOS Pool:</span>
+          <code className="text-zinc-300 font-mono break-all">{iosPool || '(未取得)'}</code>
+        </div>
+        <div className="flex gap-2">
+          <span className="text-zinc-500 shrink-0 w-28">Model Pool:</span>
+          <code className="text-zinc-300 font-mono break-all">{modelPool || '(未取得)'}</code>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 mb-4">
+        <button
+          onClick={handleRefreshConfig}
+          disabled={refreshing}
+          className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-zinc-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+        >
+          {refreshing
+            ? <Loader2 className="w-3 h-3 animate-spin" />
+            : <RefreshCw className="w-3 h-3" />}
+          {refreshing ? '取得中...' : '最新化チェック'}
+        </button>
+        {refreshMsg && (
+          <span className={`text-xs font-medium ${refreshMsg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{refreshMsg.text}</span>
+        )}
+      </div>
+
+      {/* 警告 */}
+      {staleAccounts.length > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 mb-4 text-xs">
+          <p className="text-amber-400 font-medium mb-1">古いUAのアカウント: {staleAccounts.length}件</p>
+          <ul className="text-amber-400/70 space-y-0.5 ml-3">
+            {nullCount > 0 && <li>ua_generated_at = NULL: {nullCount}件</li>}
+            {mismatchCount > 0 && <li>バージョン不一致: {mismatchCount}件</li>}
+            {oldCount > 0 && <li>90日以上経過: {oldCount}件</li>}
+            {accounts.filter(a => !a.device_id).length > 0 && (
+              <li>デバイスID未生成: {accounts.filter(a => !a.device_id).length}件</li>
+            )}
+          </ul>
+        </div>
+      )}
+
+      {/* 統一ヘッダーモード進捗 */}
+      {accounts.length > 0 && (
+        <div className="bg-zinc-800/50 border border-zinc-700 rounded-lg px-3 py-2 mb-4 text-xs">
+          <p className="text-zinc-400 font-medium">
+            統一ヘッダーモード: <span className="text-white">{accounts.filter(a => a.use_unified_headers).length}</span> / {accounts.length}件
+          </p>
+        </div>
+      )}
+
+      {/* グループ選択 */}
+      <div className="mb-3">
+        <label className="text-zinc-400 text-xs font-medium block mb-1">対象グループ</label>
+        <select
+          value={selectedGroup}
+          onChange={(e) => setSelectedGroup(e.target.value)}
+          className="w-full px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-orange-500 rounded-lg text-white text-sm outline-none transition-colors"
+        >
+          <option value="__all__">全アカウント（{accounts.length}件）</option>
+          {groups.map((g) => {
+            const count = accounts.filter(a => a.group_name === g.name).length
+            return <option key={g.name} value={g.name}>{g.name}（{count}件）</option>
+          })}
+          {accounts.some(a => !a.group_name) && (
+            <option value="__none__">グループなし（{accounts.filter(a => !a.group_name).length}件）</option>
+          )}
+        </select>
+      </div>
+
+      {/* 実行ボタン */}
+      <button
+        onClick={handleBulkRegenerate}
+        disabled={running || targetAccounts.length === 0}
+        className="w-full py-2 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-all"
+      >
+        {running
+          ? `再生成中... (${results.length}/${targetAccounts.length})`
+          : `🔄 UAを一括再生成（${targetAccounts.length}件）`}
+      </button>
+
+      {/* 結果表示 */}
+      {results.length > 0 && (
+        <div className="space-y-1 max-h-48 overflow-y-auto mt-3">
+          {results.map((r, i) => (
+            <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-xs ${r.success ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'}`}>
+              <span>{r.success ? '✓' : '✗'}</span>
+              <span className="font-mono">@{r.username}</span>
+              {r.error && <span className="text-zinc-500 truncate">{r.error}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Bloks ID セクション（一般ユーザー向け）──────────────────────────────────
+
+function BloksIdSection() {
+  const [bloksId, setBloksId]       = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [toast, setToast]           = useState<{ ok: boolean; text: string } | null>(null)
+  const [copied, setCopied]         = useState(false)
+
+  useEffect(() => {
+    api.appConfig.get('bloks_versioning_id').then(setBloksId)
+  }, [])
+
+  const showToast = (ok: boolean, text: string, duration = 3000) => {
+    setToast({ ok, text })
+    setTimeout(() => setToast(null), duration)
+  }
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    const r = await api.appConfig.refresh()
+    if (r.success) {
+      const v = await api.appConfig.get('bloks_versioning_id')
+      setBloksId(v)
+      showToast(true, 'Bloks IDを最新の値に更新しました')
+    } else {
+      showToast(false, '更新に失敗しました')
+    }
+    setRefreshing(false)
+  }
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(bloksId)
+    setCopied(true)
+    showToast(true, 'コピーしました', 1000)
+    setTimeout(() => setCopied(false), 1000)
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0 text-base">🔄</div>
+        <div className="flex-1">
+          <p className="text-white font-semibold text-sm">Bloks Versioning ID</p>
+          <p className="text-zinc-500 text-xs">Threads API 認証に使用するバージョンID</p>
+        </div>
+        <button
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="shrink-0 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+        >
+          {refreshing
+            ? <Loader2 className="w-3 h-3 animate-spin" />
+            : <RefreshCw className="w-3 h-3" />}
+          {refreshing ? '更新中...' : 'Bloks IDを更新'}
+        </button>
+      </div>
+
+      <div className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 mb-2">
+        <div className="flex items-start gap-2">
+          <code className="flex-1 text-zinc-300 text-xs font-mono break-all select-all leading-relaxed">
+            {bloksId || '(未取得)'}
+          </code>
+          {bloksId && (
+            <button
+              onClick={handleCopy}
+              title="コピー"
+              className="shrink-0 p-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded transition-colors"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {toast && (
+        <div className={`mt-2 px-3 py-2 rounded-lg text-xs font-medium ${
+          toast.ok ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'
+        }`}>{toast.text}</div>
+      )}
+    </div>
+  )
+}
+
+// ── App Config Admin セクション（管理者向け）─────────────────────────────────
+
+function AppConfigAdminSection() {
+  const [unlocked, setUnlocked] = useState(false)
+  const [pw, setPw]             = useState('')
+  const [pwError, setPwError]   = useState(false)
+
+  const handleUnlock = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (pw === ADMIN_PASSWORD) { setUnlocked(true); setPwError(false) }
+    else { setPwError(true); setPw('') }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-amber-600 flex items-center justify-center shrink-0 text-base">⚙️</div>
+        <div>
+          <p className="text-white font-semibold text-sm">App Config 管理</p>
+          <p className="text-zinc-500 text-xs">Supabase の app_config テーブルを管理（管理者専用）</p>
+        </div>
+        {unlocked && (
+          <button onClick={() => setUnlocked(false)} className="ml-auto text-zinc-500 hover:text-zinc-300 text-xs transition-colors">
+            🔒 ロック
+          </button>
+        )}
+      </div>
+
+      {!unlocked ? (
+        <form onSubmit={handleUnlock} className="space-y-2">
+          <div className="flex gap-2">
+            <input
+              type="password" value={pw}
+              onChange={(e) => { setPw(e.target.value); setPwError(false) }}
+              placeholder="管理者パスワード" autoComplete="off"
+              className={`flex-1 bg-zinc-800 border rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 transition-colors ${pwError ? 'border-red-500' : 'border-zinc-700'}`}
+            />
+            <button type="submit" className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold rounded-lg transition-colors">解除</button>
+          </div>
+          {pwError && <p className="text-red-400 text-xs">パスワードが違います</p>}
+        </form>
+      ) : (
+        <AppConfigEditor />
+      )}
+    </div>
+  )
+}
+
+function AppConfigEditor() {
+  const [rows, setRows]       = useState<AppConfigRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState<string | null>(null)
+  const [editKey, setEditKey] = useState<string | null>(null)
+  const [editVal, setEditVal] = useState('')
+  const [saving, setSaving]   = useState(false)
+  const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const load = async () => {
+    setLoading(true); setError(null)
+    const r = await api.appConfig.list()
+    if (!r.success) setError(r.error ?? '取得に失敗しました')
+    else setRows(r.data ?? [])
+    setLoading(false)
+  }
+  useEffect(() => { load() }, [])
+
+  const fmtDate = (dt: string | null) => {
+    if (!dt) return '-'
+    try {
+      return new Date(dt).toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    } catch { return dt }
+  }
+
+  const handleSave = async (key: string) => {
+    const def = CONFIG_KEYS[key]
+    if (def && !def.validation(editVal)) {
+      setSaveMsg({ ok: false, text: `バリデーションエラー: ${def.placeholder}` })
+      return
+    }
+    setSaving(true); setSaveMsg(null)
+    const r = await api.appConfig.update({ key, value: editVal, updated_by: 'admin' })
+    if (r.success) {
+      setSaveMsg({ ok: true, text: '✓ 保存しました' })
+      setEditKey(null)
+      await load()
+    } else {
+      setSaveMsg({ ok: false, text: `✗ ${r.error}` })
+    }
+    setSaving(false)
+    setTimeout(() => setSaveMsg(null), 5000)
+  }
+
+  // allowlist に定義されているがテーブルに存在しないキーを補完
+  const allKeys = new Set([...rows.map(r => r.key), ...Object.keys(CONFIG_KEYS)])
+
+  if (loading) return <p className="text-zinc-500 text-sm">読み込み中...</p>
+  if (error) return <p className="text-red-400 text-sm">{error}</p>
+
+  return (
+    <div className="space-y-3">
+      {Array.from(allKeys).sort().map((key) => {
+        const row = rows.find(r => r.key === key)
+        const def = CONFIG_KEYS[key]
+        const isEditing = editKey === key
+
+        return (
+          <div key={key} className="bg-zinc-800/50 border border-zinc-700 rounded-lg p-3">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-white text-sm font-semibold">{def?.label ?? key}</span>
+              {row && (
+                <span className="text-zinc-600 text-[10px]">
+                  {fmtDate(row.updated_at)} {row.updated_by ? `(${row.updated_by})` : ''}
+                </span>
+              )}
+            </div>
+            {def && <p className="text-zinc-500 text-xs mb-2">{def.description}</p>}
+
+            {isEditing ? (
+              <div className="space-y-2">
+                <input
+                  value={editVal}
+                  onChange={(e) => setEditVal(e.target.value)}
+                  placeholder={def?.placeholder}
+                  className="w-full bg-zinc-900 border border-zinc-600 focus:border-amber-500 rounded-lg px-3 py-2 text-white text-xs font-mono outline-none transition-colors"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleSave(key)}
+                    disabled={saving}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors"
+                  >
+                    {saving ? '保存中...' : '保存'}
+                  </button>
+                  <button
+                    onClick={() => { setEditKey(null); setSaveMsg(null) }}
+                    className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors"
+                  >
+                    キャンセル
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2">
+                <code className="flex-1 text-zinc-300 text-xs font-mono break-all leading-relaxed">
+                  {row?.value ?? <span className="text-zinc-600">(未設定)</span>}
+                </code>
+                <button
+                  onClick={() => { setEditKey(key); setEditVal(row?.value ?? ''); setSaveMsg(null) }}
+                  className="shrink-0 px-2 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded transition-colors"
+                >
+                  編集
+                </button>
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {saveMsg && (
+        <p className={`text-xs font-medium ${saveMsg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg.text}</p>
+      )}
+    </div>
+  )
+}
+
+export function ProfileNameSection() {
+  const [accounts, setAccounts]   = useState<import('../lib/ipc').Account[]>([])
+  const [groups, setGroups]       = useState<import('../lib/ipc').Group[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>('__all__')
+  const [running, setRunning]     = useState(false)
+  const [results, setResults]     = useState<{ username: string; success: boolean; newName?: string; error?: string }[]>([])
+  const [nameCandidates, setNameCandidates] = useState<string>('')
+  const [delay, setDelay]         = useState(3)
+
+  useEffect(() => {
+    api.accounts.list().then(setAccounts)
+    api.groups.list().then(setGroups)
+    // 保存済みの名前候補を読み込み
+    api.settings.getAll().then((s) => {
+      if (s['rename_candidates']) setNameCandidates(s['rename_candidates'])
+    })
+  }, [])
+
+  const handleSaveCandidates = async (val: string) => {
+    setNameCandidates(val)
+    await api.settings.set('rename_candidates', val)
+  }
+
+  const candidateList = nameCandidates
+    .split('\n')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+
+  const targetAccounts = selectedGroup === '__all__'
+    ? accounts
+    : selectedGroup === '__none__'
+    ? accounts.filter(a => !a.group_name)
+    : accounts.filter(a => a.group_name === selectedGroup)
+
+  const handleBulkRename = async () => {
+    if (targetAccounts.length === 0) { alert('対象アカウントがありません'); return }
+    const label = selectedGroup === '__all__' ? '全アカウント'
+      : selectedGroup === '__none__' ? 'グループなし'
+      : `グループ「${selectedGroup}」`
+    const nameSource = candidateList.length > 0
+      ? `カスタム名前リスト（${candidateList.length}件）`
+      : 'デフォルト名前リスト（15件）'
+    if (!confirm(`${label}（${targetAccounts.length}件）の名前を${nameSource}からランダムに変更しますか？`)) return
+
+    setRunning(true)
+    setResults([])
+    const res: { username: string; success: boolean; newName?: string; error?: string }[] = []
+    for (const acc of targetAccounts) {
+      const r = await api.accounts.autoRename(acc.id, candidateList.length > 0 ? candidateList : undefined)
+      const entry = {
+        username: acc.username,
+        success: r.success,
+        newName: r.newName,
+        error: r.error,
+      }
+      res.push(entry)
+      setResults([...res])
+      if (r.success && targetAccounts.indexOf(acc) < targetAccounts.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay * 1000))
+      }
+    }
+    setRunning(false)
+    // アカウント一覧を再取得
+    api.accounts.list().then(setAccounts)
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* 名前候補リスト */}
+      <div>
+        <label className="text-zinc-400 text-xs font-medium block mb-1">名前候補（1行1名、空欄ならデフォルト）</label>
+        <textarea
+          value={nameCandidates}
+          onChange={(e) => handleSaveCandidates(e.target.value)}
+          placeholder={'ゆき\nはな\nさくら\nあおい\nひより'}
+          rows={5}
+          className="w-full px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-pink-500 rounded-lg text-white text-sm outline-none transition-colors resize-y font-mono"
+        />
+        <p className="text-zinc-600 text-xs mt-1">
+          {candidateList.length > 0
+            ? `${candidateList.length}件の候補`
+            : 'デフォルト: ゆき, はな, さくら, あおい, ひより, なな, りん, みお, ことは, ゆな, かな, れな, もも, あかり, いちか'}
+        </p>
+      </div>
+
+      {/* グループ選択 */}
+      <div>
+        <label className="text-zinc-400 text-xs font-medium block mb-1">対象グループ</label>
+        <select
+          value={selectedGroup}
+          onChange={(e) => setSelectedGroup(e.target.value)}
+          className="w-full px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-pink-500 rounded-lg text-white text-sm outline-none transition-colors"
+        >
+          <option value="__all__">全アカウント（{accounts.length}件）</option>
+          {groups.map((g) => {
+            const count = accounts.filter(a => a.group_name === g.name).length
+            return <option key={g.name} value={g.name}>{g.name}（{count}件）</option>
+          })}
+          {accounts.some(a => !a.group_name) && (
+            <option value="__none__">グループなし（{accounts.filter(a => !a.group_name).length}件）</option>
+          )}
+        </select>
+      </div>
+
+      {/* 間隔設定 */}
+      <div>
+        <label className="text-zinc-400 text-xs font-medium block mb-1">アカウント間の待機時間（秒）</label>
+        <input
+          type="number"
+          min={1}
+          max={60}
+          value={delay}
+          onChange={(e) => setDelay(Number(e.target.value) || 3)}
+          className="w-20 px-2.5 py-2 bg-zinc-800 border border-zinc-700 focus:border-pink-500 rounded-lg text-white text-sm outline-none transition-colors"
+        />
+      </div>
+
+      {/* 実行ボタン */}
+      <button
+        onClick={handleBulkRename}
+        disabled={running || targetAccounts.length === 0}
+        className="w-full py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-all"
+      >
+        {running
+          ? `変更中... (${results.length}/${targetAccounts.length})`
+          : `🎲 名前を一括変更（${targetAccounts.length}件）`}
+      </button>
+
+      {/* 結果表示 */}
+      {results.length > 0 && (
+        <div className="space-y-1 max-h-48 overflow-y-auto">
+          {results.map((r, i) => (
+            <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-xs ${r.success ? 'bg-emerald-900/30 text-emerald-400' : 'bg-red-900/30 text-red-400'}`}>
+              <span>{r.success ? '✓' : '✗'}</span>
+              <span className="font-mono">@{r.username}</span>
+              {r.newName && <span className="text-zinc-400">→ {r.newName}</span>}
+              {r.error && <span className="text-zinc-500 truncate">{r.error}</span>}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )

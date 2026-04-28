@@ -19,8 +19,44 @@ import {
   deleteAccount,
   getAccountById,
   getAccountFingerprint,
+  updateAccountUA,
+  updateAccountDeviceIds,
+  updateAccountUnifiedHeaders,
 } from '../db/repositories/accounts'
 import { pickRandomIphoneUA } from '../utils/iphone-ua'
+import { generateAccountUA, getInstagramAppVersion } from '../lib/ua-generator'
+import { generateAllDeviceIds } from '../lib/device-id-generator'
+
+/** UA生成 + メタデータ記録。createAccount() 直後に呼ぶ。 */
+function stampUA(accountId: number): void {
+  const ua  = pickRandomIphoneUA()
+  const now = new Date().toISOString()
+  const ver = getInstagramAppVersion()
+  updateAccountUA(accountId, ua, now, ver)
+}
+
+/** デバイスID生成・保存 + 統一ヘッダーモードON。createAccount() 直後に呼ぶ。 */
+function stampDeviceIds(accountId: number, username: string): void {
+  const ids = generateAllDeviceIds(username)
+  updateAccountDeviceIds(accountId, ids)
+  updateAccountUnifiedHeaders(accountId, true)
+}
+
+/** デバイスIDのlazy生成。NULLなら生成して保存し返す。 */
+export function ensureDeviceIds(account: { id: number; username: string; device_id: string | null }): { device_id: string; device_uuid: string; phone_id: string; adid: string } {
+  if (account.device_id) {
+    const acct = getAccountById(account.id)
+    return {
+      device_id:   acct?.device_id   ?? '',
+      device_uuid: acct?.device_uuid ?? '',
+      phone_id:    acct?.phone_id    ?? '',
+      adid:        acct?.adid        ?? '',
+    }
+  }
+  const ids = generateAllDeviceIds(account.username)
+  updateAccountDeviceIds(account.id, ids)
+  return ids
+}
 import { getSetting, setSetting } from '../db/repositories/settings'
 import type { StatusCheckResult } from '../browser-views/view-manager'
 import { createAndSaveFingerprint } from '../fingerprint'
@@ -67,6 +103,7 @@ export function registerAccountHandlers(): void {
             user_agent:     userAgent,
           })
           stubAccountId = stub.id
+          stampUA(stub.id)
           createAndSaveFingerprint(stub.id)
           updateAccountStatus(stub.id, 'needs_login')
 
@@ -125,6 +162,7 @@ export function registerAccountHandlers(): void {
             platform:       'x',
           })
           stubAccountId = stub.id
+          stampUA(stub.id)
           createAndSaveFingerprint(stub.id)
           updateAccountStatus(stub.id, 'needs_login')
 
@@ -225,6 +263,8 @@ export function registerAccountHandlers(): void {
           proxy_password: options?.proxy_password,
           user_agent: pickRandomIphoneUA(),
         })
+        stampUA(account.id)
+        stampDeviceIds(account.id, username)
         // アカウント作成直後にフィンガープリントを固定
         createAndSaveFingerprint(account.id)
         updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
@@ -287,6 +327,8 @@ export function registerAccountHandlers(): void {
           proxy_password: options?.proxy_password,
           user_agent: pickRandomIphoneUA(),
         })
+        stampUA(account.id)
+        stampDeviceIds(account.id, username)
         // アカウント作成直後にフィンガープリントを固定
         createAndSaveFingerprint(account.id)
         updateAccountStatus(account.id, 'active', { display_name: displayName ?? undefined })
@@ -367,6 +409,8 @@ export function registerAccountHandlers(): void {
             user_agent:     pickRandomIphoneUA(),
             ig_password:    row.password ?? undefined,
           })
+          stampUA(account.id)
+          stampDeviceIds(account.id, username)
           if (row.group_name) updateAccountGroup(account.id, row.group_name)
           createAndSaveFingerprint(account.id)
           updateAccountStatus(account.id, 'needs_login')
@@ -643,6 +687,8 @@ export function registerAccountHandlers(): void {
         user_agent: pickRandomIphoneUA(),
         ig_password: data.password,
       })
+      stampUA(account.id)
+      stampDeviceIds(account.id, username)
       createAndSaveFingerprint(account.id)
       // status は needs_login で登録（すぐに active にするとロックリスクがある）
       updateAccountStatus(account.id, 'needs_login', { display_name: displayName ?? undefined })
@@ -793,6 +839,8 @@ export function registerAccountHandlers(): void {
           proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
         })
         console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
+        stampUA(account.id)
+        stampDeviceIds(account.id, username)
         if (row.group_name) updateAccountGroup(account.id, row.group_name)
         createAndSaveFingerprint(account.id)
 
@@ -867,6 +915,7 @@ export function registerAccountHandlers(): void {
         platform:       'x',
       })
       accountId = account.id
+      stampUA(account.id)
       createAndSaveFingerprint(account.id)
 
       // auth_token を Cookie としてパーティションに注入
@@ -1148,16 +1197,46 @@ export function registerAccountHandlers(): void {
     }
   })
 
-  ipcMain.handle('accounts:auto-rename', async (_event, accountId: number) => {
+  ipcMain.handle('accounts:auto-rename', async (_event, accountId: number, customNames?: string[]) => {
     try {
       const acct = getAccountById(accountId)
       if (!acct) return { success: false, error: 'アカウントが見つかりません' }
 
-      const result = await autoRenameJapaneseFemale(accountId)
+      const result = await autoRenameJapaneseFemale(accountId, customNames)
       if (result.success && result.newName) {
         updateAccountDisplayName(accountId, result.newName)
       }
       return result
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('accounts:update-unified-headers', async (_event, accountId: number, enabled: boolean) => {
+    try {
+      const acct = getAccountById(accountId)
+      if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+      updateAccountUnifiedHeaders(accountId, enabled)
+      // 統一モードONにする場合、デバイスIDがなければ生成
+      if (enabled && !acct.device_id) {
+        const ids = generateAllDeviceIds(acct.username)
+        updateAccountDeviceIds(accountId, ids)
+      }
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('accounts:regenerate-ua', async (_event, accountId: number) => {
+    try {
+      const acct = getAccountById(accountId)
+      if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+      const ua = generateAccountUA()
+      const now = new Date().toISOString()
+      const ver = getInstagramAppVersion()
+      updateAccountUA(accountId, ua, now, ver)
+      return { success: true, newUA: ua }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -1213,6 +1292,10 @@ export function registerAccountHandlers(): void {
     proxy_username?: string
     proxy_password?: string
   }) => {
+    type IpErrorType = 'PROXY_CONNECTION_FAILED' | 'PROXY_AUTH_FAILED' | 'PROXY_FORBIDDEN'
+      | 'PROXY_TIMEOUT' | 'IP_SERVICE_ERROR' | 'INVALID_IP_FORMAT' | 'UNKNOWN'
+    type CheckIpResult = { ip: string | null; error?: string; errorType?: IpErrorType }
+
     const { net, session: electronSession } = await import('electron')
     const partitionKey = `temp:ip-check-${Date.now()}`
     const sess = electronSession.fromPartition(partitionKey)
@@ -1221,22 +1304,61 @@ export function registerAccountHandlers(): void {
       let proxyUrl = data.proxy_url.trim()
       if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
       if (data.proxy_username && !proxyUrl.includes('@')) {
-        const user = data.proxy_username
-        const pass = data.proxy_password ?? ''
+        const user = encodeURIComponent(data.proxy_username)
+        const pass = encodeURIComponent(data.proxy_password ?? '')
         proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
       }
       await sess.setProxy({ proxyRules: proxyUrl }).catch(() => {})
     }
 
-    return new Promise<{ ip: string | null; error?: string }>((resolve) => {
+    const classifyNetError = (msg: string): IpErrorType => {
+      const m = msg.toLowerCase()
+      if (m.includes('timed_out') || m.includes('timeout') || m.includes('aborted')) return 'PROXY_TIMEOUT'
+      if (m.includes('proxy_connection_failed') || m.includes('tunnel_connection_failed')) return 'PROXY_CONNECTION_FAILED'
+      if (m.includes('connection_refused') || m.includes('econnrefused')) return 'PROXY_CONNECTION_FAILED'
+      if (m.includes('name_not_resolved') || m.includes('enotfound')) return 'PROXY_CONNECTION_FAILED'
+      if (m.includes('network_unreachable') || m.includes('enetunreach')) return 'PROXY_CONNECTION_FAILED'
+      return 'UNKNOWN'
+    }
+
+    const IP_REGEX = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+
+    return new Promise<CheckIpResult>((resolve) => {
       const req = net.request({ method: 'GET', url: 'https://api.ipify.org', session: sess })
       const timer = setTimeout(() => req.abort(), 8000)
       let body = ''
       req.on('response', (resp) => {
+        const status = resp.statusCode
         resp.on('data', c => { body += c.toString() })
-        resp.on('end', () => { clearTimeout(timer); resolve({ ip: body.trim() }) })
+        resp.on('end', () => {
+          clearTimeout(timer)
+          if (status === 407) {
+            return resolve({ ip: null, error: 'Proxy authentication required', errorType: 'PROXY_AUTH_FAILED' })
+          }
+          if (status === 403) {
+            return resolve({ ip: null, error: `HTTP ${status}`, errorType: 'PROXY_FORBIDDEN' })
+          }
+          if (status && status >= 500) {
+            return resolve({ ip: null, error: `HTTP ${status}`, errorType: 'IP_SERVICE_ERROR' })
+          }
+          if (status === 502 || status === 503) {
+            // Already covered above, but kept for clarity
+            return resolve({ ip: null, error: `HTTP ${status}`, errorType: 'IP_SERVICE_ERROR' })
+          }
+          const trimmed = body.trim()
+          if (status && status >= 200 && status < 300 && !IP_REGEX.test(trimmed)) {
+            return resolve({ ip: null, error: `Invalid response: ${trimmed.slice(0, 80)}`, errorType: 'INVALID_IP_FORMAT' })
+          }
+          if (status && (status < 200 || status >= 300)) {
+            return resolve({ ip: null, error: `HTTP ${status}`, errorType: 'UNKNOWN' })
+          }
+          resolve({ ip: trimmed })
+        })
       })
-      req.on('error', (e) => { clearTimeout(timer); resolve({ ip: null, error: e.message }) })
+      req.on('error', (e) => {
+        clearTimeout(timer)
+        resolve({ ip: null, error: e.message, errorType: classifyNetError(e.message) })
+      })
       req.end()
     })
   })
