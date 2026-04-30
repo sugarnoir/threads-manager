@@ -542,6 +542,16 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
   return (
     <div className="space-y-6 max-w-lg">
 
+      {/* Proxy Template section */}
+      <div>
+        <ProxyTemplateSection />
+      </div>
+
+      {/* Proxy Presets section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <ProxyPresetsSection />
+      </div>
+
       {/* ── 表示設定 ── */}
       <div>
         <div className="flex items-center gap-2 mb-4">
@@ -732,16 +742,6 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
       <div className="pt-2 border-t border-zinc-800">
         <h2 className="text-white font-semibold mb-3">ストック一括削除</h2>
         <StockBulkDeleteSection />
-      </div>
-
-      {/* Proxy Template section */}
-      <div className="pt-2 border-t border-zinc-800">
-        <ProxyTemplateSection />
-      </div>
-
-      {/* Proxy Presets section */}
-      <div className="pt-2 border-t border-zinc-800">
-        <ProxyPresetsSection />
       </div>
 
       {/* Discord Bot section */}

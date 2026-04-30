@@ -242,6 +242,12 @@ async function executeAutopost(
     const nextIdx = lastIdx + 1 >= stocks.length ? 0 : lastIdx + 1
     const stock = stocks[nextIdx]
 
+    const post = createPost({
+      account_id: config.account_id,
+      content:    stock.content,
+      media_paths: [stock.image_url, stock.image_url_2].filter(Boolean) as string[],
+    })
+
     let result: { success: boolean; error?: string }
     if (config.use_api) {
       logAutopost(`[Autopost] stock.topic=${JSON.stringify(stock.topic)}`)
@@ -258,6 +264,7 @@ async function executeAutopost(
     } else {
       result = await sendPost(config.account_id, stock.content)
     }
+    updatePostStatus(post.id, result.success ? 'posted' : 'failed', result.error)
     updateAutopostState(config.account_id, { stock_last_id: stock.id })
     return result
   }
@@ -267,6 +274,12 @@ async function executeAutopost(
     if (stocks.length === 0) return null
 
     const stock = stocks[Math.floor(Math.random() * stocks.length)]
+
+    const post = createPost({
+      account_id: config.account_id,
+      content:    stock.content,
+      media_paths: [stock.image_url, stock.image_url_2].filter(Boolean) as string[],
+    })
 
     let result: { success: boolean; error?: string }
     if (config.use_api) {
@@ -283,6 +296,7 @@ async function executeAutopost(
     } else {
       result = await sendPost(config.account_id, stock.content)
     }
+    updatePostStatus(post.id, result.success ? 'posted' : 'failed', result.error)
     return result
   }
 
@@ -303,12 +317,19 @@ async function executeAutopost(
 
     logAutopost(`[Autopost] rewritten: "${rewritten.slice(0, 80)}..."`)
 
+    const post = createPost({
+      account_id: config.account_id,
+      content:    rewritten,
+      media_paths: [],
+    })
+
     let result: { success: boolean; error?: string }
     if (config.use_api) {
       result = await apiPostText(config.account_id, rewritten)
     } else {
       result = await sendPost(config.account_id, rewritten)
     }
+    updatePostStatus(post.id, result.success ? 'posted' : 'failed', result.error)
     updateAutopostState(config.account_id, { stock_last_id: stock.id })
     return result
   }

@@ -94,17 +94,7 @@ async function getSessionInfo(accountId: number): Promise<{
   const sess = getAccountSession(accountId)
   // scrapePageTokens / doRestPost でもプロキシが効くよう事前に設定する
   // （ensureAccountProxy は冪等なので重複呼び出しは問題ない）
-  const account = getAccountById(accountId)
-  if (account?.proxy_url) {
-    let proxyUrl = account.proxy_url.trim()
-    if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
-    if (account.proxy_username && !proxyUrl.includes('@')) {
-      const user = account.proxy_username
-      const pass = account.proxy_password ?? ''
-      proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
-    }
-    await sess.setProxy({ proxyRules: proxyUrl }).catch(() => {})
-  }
+  await ensureAccountProxy(accountId, sess)
   const all  = await sess.cookies.get({}).catch(() => [])
 
   const threads = all.filter(c => c.domain?.includes('threads.com'))
@@ -565,20 +555,31 @@ function parseJson(raw: string): unknown {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-/** アカウントのプロキシ設定をセッションに適用する（冪等） */
-async function ensureAccountProxy(accountId: number, sess: Session): Promise<void> {
+/** プロキシ認証情報 */
+interface ProxyAuth { username: string; password: string }
+
+/** アカウントのプロキシ設定をセッションに適用する（冪等）。認証情報があれば返す。 */
+async function ensureAccountProxy(accountId: number, sess: Session): Promise<ProxyAuth | null> {
   const account = getAccountById(accountId)
-  if (!account?.proxy_url) return
+  if (!account?.proxy_url) return null
   let proxyUrl = account.proxy_url.trim()
   if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
-  // 認証情報をURLに埋め込む（net.request は proxy auth ヘッダーを自動付与しないため）
-  if (account.proxy_username && !proxyUrl.includes('@')) {
-    const user = account.proxy_username
-    const pass = account.proxy_password ?? ''
-    proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
-  }
   await sess.setProxy({ proxyRules: proxyUrl }).catch((e) => {
     console.warn(`[WebAPI] ensureAccountProxy account=${accountId} error: ${e?.message}`)
+  })
+  if (account.proxy_username) {
+    return { username: account.proxy_username, password: account.proxy_password ?? '' }
+  }
+  return null
+}
+
+/** net.request に プロキシ認証 login ハンドラを登録する */
+function attachProxyAuth(req: Electron.ClientRequest, auth: ProxyAuth | null): void {
+  if (!auth) return
+  req.on('login' as any, (authInfo: any, callback: (username: string, password: string) => void) => {
+    if (authInfo.isProxy) {
+      callback(auth.username, auth.password)
+    }
   })
 }
 
@@ -591,7 +592,7 @@ async function doPost(opts: {
   // threads.com クッキーのみ取得（instagram.com との重複 sessionid を避ける）
   // 手動 Cookie ヘッダーで設定することで SameSite 制限をバイパスする
   const sess = getAccountSession(opts.accountId)
-  await ensureAccountProxy(opts.accountId, sess)
+  const proxyAuth = await ensureAccountProxy(opts.accountId, sess)
   const allCookies  = await sess.cookies.get({}).catch(() => [])
   // threads.com クッキーを優先し、同名クッキーが instagram.com にもある場合は除外する
   // （sessionid が2つになると、サーバーが instagram.com の無効な方を使うため）
@@ -609,6 +610,7 @@ async function doPost(opts: {
   return new Promise((resolve, reject) => {
     // session を渡してプロキシを適用しつつ Cookie ヘッダーは手動設定
     const req = net.request({ method: 'POST', url: opts.url, session: sess })
+    attachProxyAuth(req, proxyAuth)
     req.setHeader('Cookie', cookieHeader)
     for (const [k, v] of Object.entries(opts.headers)) req.setHeader(k, v)
     let body = ''
@@ -630,7 +632,7 @@ async function doGet(opts: {
   accountId: number
 }): Promise<{ status: number; body: string }> {
   const sess = getAccountSession(opts.accountId)
-  await ensureAccountProxy(opts.accountId, sess)
+  const proxyAuth = await ensureAccountProxy(opts.accountId, sess)
   const allCookies     = await sess.cookies.get({}).catch(() => [])
   const threadsCookies = allCookies.filter(c => c.domain?.includes('threads.com'))
   const threadsNames   = new Set(threadsCookies.map(c => c.name))
@@ -642,6 +644,7 @@ async function doGet(opts: {
 
   return new Promise((resolve, reject) => {
     const req = net.request({ method: 'GET', url: opts.url, session: sess })
+    attachProxyAuth(req, proxyAuth)
     req.setHeader('Cookie', cookieHeader)
     for (const [k, v] of Object.entries(opts.headers)) req.setHeader(k, v)
     let body = ''
@@ -856,7 +859,7 @@ async function mobileNetRequest(
   accountId: number,
 ): Promise<{ ok: boolean; status: number; raw: string }> {
   const sess = getAccountSession(accountId)
-  await ensureAccountProxy(accountId, sess)
+  const proxyAuth = await ensureAccountProxy(accountId, sess)
 
   return new Promise((resolve) => {
     const req = net.request({
@@ -865,6 +868,7 @@ async function mobileNetRequest(
       session: sess,
       // useSessionCookies: true  ← 既定でセッションCookieが使われる
     })
+    attachProxyAuth(req, proxyAuth)
     for (const [k, v] of Object.entries(headers)) req.setHeader(k, v)
     let raw = ''
     req.on('response', (resp) => {

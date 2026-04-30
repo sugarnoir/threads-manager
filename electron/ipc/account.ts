@@ -1300,15 +1300,14 @@ export function registerAccountHandlers(): void {
     const partitionKey = `temp:ip-check-${Date.now()}`
     const sess = electronSession.fromPartition(partitionKey)
 
+    let proxyAuth: { username: string; password: string } | null = null
     if (data.proxy_url) {
       let proxyUrl = data.proxy_url.trim()
       if (!/^https?:\/\/|^socks5?:\/\//i.test(proxyUrl)) proxyUrl = 'http://' + proxyUrl
-      if (data.proxy_username && !proxyUrl.includes('@')) {
-        const user = encodeURIComponent(data.proxy_username)
-        const pass = encodeURIComponent(data.proxy_password ?? '')
-        proxyUrl = proxyUrl.replace(/^(https?:\/\/|socks5?:\/\/)/i, `$1${user}:${pass}@`)
-      }
       await sess.setProxy({ proxyRules: proxyUrl }).catch(() => {})
+      if (data.proxy_username) {
+        proxyAuth = { username: data.proxy_username, password: data.proxy_password ?? '' }
+      }
     }
 
     const classifyNetError = (msg: string): IpErrorType => {
@@ -1325,6 +1324,11 @@ export function registerAccountHandlers(): void {
 
     return new Promise<CheckIpResult>((resolve) => {
       const req = net.request({ method: 'GET', url: 'https://api.ipify.org', session: sess })
+      if (proxyAuth) {
+        (req as any).on('login', (authInfo: any, callback: (u: string, p: string) => void) => {
+          if (authInfo.isProxy) callback(proxyAuth!.username, proxyAuth!.password)
+        })
+      }
       const timer = setTimeout(() => req.abort(), 8000)
       let body = ''
       req.on('response', (resp) => {
