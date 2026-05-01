@@ -1,5 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { appendFileSync } from 'fs'
+import { logPoolStatus } from '../playwright/browser-manager'
 
 const AUTOPOST_LOG = '/tmp/tm-autopost.log'
 function logAutopost(msg: string): void {
@@ -427,6 +428,7 @@ export function startScheduler(win: BrowserWindow): void {
   schedulerInterval = setInterval(async () => {
     if (schedulerRunning) return
     schedulerRunning = true
+    logPoolStatus()
     try {
       // 1. 通常スケジュール
       const pending = getPendingSchedules()

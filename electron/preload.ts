@@ -68,7 +68,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxy_pass:  string | null
       proxy_type?: string | null
       group_name?: string | null
-    }>) => ipcRenderer.invoke('accounts:bulk-import', rows),
+    }>, options?: { proxyMode?: 'auto' | 'manual' | 'none' }) =>
+      ipcRenderer.invoke('accounts:bulk-import', rows, options),
     autoRename: (id: number, customNames?: string[]) => ipcRenderer.invoke('accounts:auto-rename', id, customNames),
     regenerateUA: (id: number) => ipcRenderer.invoke('accounts:regenerate-ua', id),
     updateUnifiedHeaders: (id: number, enabled: boolean) => ipcRenderer.invoke('accounts:update-unified-headers', id, enabled),

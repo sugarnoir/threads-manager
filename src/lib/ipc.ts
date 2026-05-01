@@ -444,7 +444,7 @@ declare global {
           proxy_pass:  string | null
           proxy_type?: string | null
           group_name?: string | null
-        }>) => Promise<{
+        }>, options?: { proxyMode?: 'auto' | 'manual' | 'none' }) => Promise<{
           imported: number
           skipped:  number
           errors:   Array<{ username: string; message: string }>

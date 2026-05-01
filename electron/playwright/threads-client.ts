@@ -853,9 +853,14 @@ export async function scheduleThread(
   const cleanup = () => { for (const tmp of tmpPaths) fs.unlink(tmp, () => {}) }
 
   // 全体タイムアウト: 180秒（page.goto 60秒 + 各ステップを考慮）
-  const makeTimeout = () => new Promise<PostResult>((_, reject) =>
-    setTimeout(() => reject(new Error('接続タイムアウト: 予約処理が180秒を超えました')), 180_000)
-  )
+  // clearTimeout を確実に呼ぶため、タイマーIDを保持する
+  function raceWithTimeout<T>(promise: Promise<T>, ms = 180_000, msg = '接続タイムアウト: 予約処理が180秒を超えました'): Promise<T> {
+    let timerId: ReturnType<typeof setTimeout>
+    const timeout = new Promise<never>((_, reject) => {
+      timerId = setTimeout(() => reject(new Error(msg)), ms)
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timerId!))
+  }
 
   try {
     // ── 1st try: プロキシあり（通常）─────────────────────────────────────────
@@ -869,7 +874,7 @@ export async function scheduleThread(
     })
 
     try {
-      return await Promise.race([task, makeTimeout()])
+      return await raceWithTimeout(task)
     } catch (err) {
       if (!isProxyError(err)) throw err
 
@@ -886,7 +891,7 @@ export async function scheduleThread(
         }
       })
 
-      return await Promise.race([directTask, makeTimeout()])
+      return await raceWithTimeout(directTask)
     }
   } finally {
     cleanup()

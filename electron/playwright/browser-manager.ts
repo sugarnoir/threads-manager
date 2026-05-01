@@ -14,8 +14,40 @@ export interface ContextInfo {
   state: 'idle' | 'busy'
 }
 
-// accountId → { context, busyCount }
-const pool = new Map<number, { ctx: BrowserContext; busy: number }>()
+// accountId → { context, busyCount, lastUsed }
+const pool = new Map<number, { ctx: BrowserContext; busy: number; lastUsed: number }>()
+
+// アイドルコンテキストの自動クリーンアップ（30分未使用で破棄）
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000
+
+let cleanupInterval: ReturnType<typeof setInterval> | null = null
+
+function startIdleCleanup(): void {
+  if (cleanupInterval) return
+  cleanupInterval = setInterval(async () => {
+    const now = Date.now()
+    const toClose: number[] = []
+    for (const [id, entry] of pool) {
+      if (entry.busy === 0 && (now - entry.lastUsed) > IDLE_TIMEOUT_MS) {
+        toClose.push(id)
+      }
+    }
+    for (const id of toClose) {
+      console.log(`[browser-manager] closing idle context: account=${id} (idle ${Math.round((now - pool.get(id)!.lastUsed) / 60000)}min)`)
+      await closeContext(id)
+    }
+    if (toClose.length > 0) {
+      console.log(`[browser-manager] pool size: ${pool.size} (closed ${toClose.length} idle)`)
+    }
+  }, 5 * 60 * 1000) // 5分ごとにチェック
+}
+
+export function stopIdleCleanup(): void {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval)
+    cleanupInterval = null
+  }
+}
 
 // Context 状態変化コールバック (IPC 通知用)
 let onStatusChange: ((infos: ContextInfo[]) => void) | null = null
@@ -32,6 +64,19 @@ export function getContextInfos(): ContextInfo[] {
     accountId: id,
     state: entry.busy > 0 ? 'busy' : 'idle',
   }))
+}
+
+/** プール状態のサマリーログ出力 */
+export function logPoolStatus(): void {
+  const now = Date.now()
+  const entries = [...pool.entries()]
+  const busy = entries.filter(([, e]) => e.busy > 0).length
+  const idle = entries.filter(([, e]) => e.busy === 0).length
+  const oldestIdle = entries
+    .filter(([, e]) => e.busy === 0)
+    .reduce((min, [, e]) => Math.min(min, e.lastUsed), now)
+  const oldestIdleMin = idle > 0 ? Math.round((now - oldestIdle) / 60000) : 0
+  console.log(`[browser-manager] pool: total=${pool.size} busy=${busy} idle=${idle} oldestIdle=${oldestIdleMin}min`)
 }
 
 export function getActiveContextIds(): number[] {
@@ -119,8 +164,9 @@ export async function getContext(accountId: number, headless = false): Promise<B
   // Electron セッション (persist:account-N) のCookieをPlaywrightに同期
   await syncElectronCookiesToContext(ctx, accountId)
 
-  pool.set(accountId, { ctx, busy: 0 })
+  pool.set(accountId, { ctx, busy: 0, lastUsed: Date.now() })
   notifyStatusChange()
+  startIdleCleanup()
   return ctx
 }
 
@@ -183,11 +229,13 @@ export async function withContext<T>(
   const ctx = await getContext(accountId, true) // 自動化はヘッドレス（不可視）
   const entry = pool.get(accountId)!
   entry.busy++
+  entry.lastUsed = Date.now()
   notifyStatusChange()
   try {
     return await task(ctx)
   } finally {
     entry.busy--
+    entry.lastUsed = Date.now()
     notifyStatusChange()
   }
 }
@@ -211,6 +259,7 @@ export async function closeContext(accountId: number): Promise<void> {
 }
 
 export async function closeAllContexts(): Promise<void> {
+  stopIdleCleanup()
   const ids = [...pool.keys()]
   await Promise.allSettled(ids.map(closeContext))
 }

@@ -371,8 +371,64 @@ export function registerAccountHandlers(): void {
         proxy_pass:  string | null
         proxy_type?: string | null
         group_name?: string | null
-      }>
+      }>,
+      options?: {
+        proxyMode?: 'auto' | 'manual' | 'none'
+      }
     ) => {
+      const proxyMode = options?.proxyMode ?? 'auto'
+
+      // ── ISP Dedicated プロキシ自動割り当て準備（import-cookie-login と同じロジック） ──
+      const existingAccounts = getAllAccounts()
+      const decodoAccounts = existingAccounts.filter(a =>
+        a.proxy_url && a.proxy_url.includes('decodo')
+      )
+      let autoProxyType = 'http'
+      let autoProxyHost = ''
+      let autoProxyUsername: string | null = null
+      let autoProxyPassword: string | null = null
+      if (decodoAccounts.length > 0) {
+        const ref = decodoAccounts[0]
+        try {
+          const url = new URL(ref.proxy_url!)
+          autoProxyType = url.protocol.replace(':', '')
+          autoProxyHost = url.hostname
+        } catch { /* ignore */ }
+        autoProxyUsername = ref.proxy_username
+        autoProxyPassword = ref.proxy_password
+      }
+
+      const portCountMap = new Map<number, number>()
+      let minPort = Infinity, maxPort = -Infinity
+      for (const a of decodoAccounts) {
+        try {
+          const url = new URL(a.proxy_url!)
+          const p = parseInt(url.port, 10)
+          if (!isNaN(p)) {
+            portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
+            if (p < minPort) minPort = p
+            if (p > maxPort) maxPort = p
+          }
+        } catch { /* ignore */ }
+      }
+
+      const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
+      const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
+      if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = cfgStart
+      if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = cfgEnd
+
+      const allPorts: Array<{ port: number; count: number }> = []
+      if (autoProxyHost && minPort <= maxPort) {
+        for (let p = minPort; p <= maxPort; p++) {
+          allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
+        }
+        allPorts.sort((a, b) => {
+          if (a.count !== b.count) return a.count - b.count
+          return Math.random() - 0.5
+        })
+      }
+      console.log(`[bulk-import] proxyMode=${proxyMode} host=${autoProxyHost || 'NONE'} ports=${allPorts.length}`)
+
       const results = {
         imported: 0,
         skipped:  0,
@@ -380,18 +436,34 @@ export function registerAccountHandlers(): void {
         accounts: [] as unknown[],
       }
 
-      for (const row of rows) {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i]
         const username = row.username?.trim()
         if (!username) {
           results.errors.push({ username: '', message: 'username が空です' })
           continue
         }
 
+        // プロキシ割り当て: CSV に指定があればそれを使い、なければ auto 割り当て
         let proxyUrl: string | undefined
+        let proxyUser: string | undefined
+        let proxyPass: string | undefined
+
         if (row.proxy_host && row.proxy_port) {
+          // CSV にプロキシ指定あり → そのまま使う
           const type = (row.proxy_type || 'http').toLowerCase()
-          proxyUrl = `${type}://${row.proxy_host}:${row.proxy_port}`
+          proxyUrl  = `${type}://${row.proxy_host}:${row.proxy_port}`
+          proxyUser = row.proxy_user ?? undefined
+          proxyPass = row.proxy_pass ?? undefined
+        } else if (proxyMode === 'auto' && autoProxyHost && allPorts.length > 0) {
+          // CSV にプロキシなし + auto モード → 使用数が少ないポートを割り当て
+          const portEntry = allPorts[i % allPorts.length]
+          proxyUrl  = `${autoProxyType}://${autoProxyHost}:${portEntry.port}`
+          proxyUser = autoProxyUsername ?? undefined
+          proxyPass = autoProxyPassword ?? undefined
+          console.log(`[bulk-import] row[${i}] auto proxy=${proxyUrl} (was ${portEntry.count}垢)`)
         }
+        // proxyMode === 'none' or no host → proxyUrl は undefined
 
         const sessionDir = path.join(
           app.getPath('userData'),
@@ -404,8 +476,8 @@ export function registerAccountHandlers(): void {
             username,
             session_dir:    sessionDir,
             proxy_url:      proxyUrl,
-            proxy_username: row.proxy_user ?? undefined,
-            proxy_password: row.proxy_pass ?? undefined,
+            proxy_username: proxyUser,
+            proxy_password: proxyPass,
             user_agent:     pickRandomIphoneUA(),
             ig_password:    row.password ?? undefined,
           })
