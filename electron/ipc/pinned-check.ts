@@ -116,9 +116,12 @@ async function checkPostAlive(accountId: number, postUrl: string): Promise<'aliv
 }
 
 export function registerPinnedCheckHandlers(): void {
-  // 全垢一括チェック
-  ipcMain.handle('pinned:check-all', async (event) => {
-    const accounts = getAllAccounts().filter(a => a.status === 'active')
+  // 全垢 or グループ別チェック
+  ipcMain.handle('pinned:check-all', async (event, groupName?: string | null) => {
+    let accounts = getAllAccounts().filter(a => a.status === 'active')
+    if (groupName) {
+      accounts = accounts.filter(a => a.group_name === groupName)
+    }
     const total = accounts.length
     let completed = 0
     const results = { alive: 0, deleted: 0, unknown: 0, no_pin: 0 }

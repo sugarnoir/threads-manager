@@ -188,7 +188,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Pinned Post Check
   pinned: {
-    checkAll: () => ipcRenderer.invoke('pinned:check-all'),
+    checkAll: (groupName?: string | null) => ipcRenderer.invoke('pinned:check-all', groupName),
     checkOne: (accountId: number) => ipcRenderer.invoke('pinned:check-one', accountId),
     onProgress: (cb: (data: { completed: number; total: number; message: string }) => void) => {
       ipcRenderer.on('pinned:progress', (_e, data) => cb(data))

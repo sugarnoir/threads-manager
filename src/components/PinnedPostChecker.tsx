@@ -13,6 +13,10 @@ export function PinnedPostChecker({ accounts, onComplete }: Props) {
   const [progress, setProgress] = useState({ completed: 0, total: 0, message: '' })
   const [result, setResult] = useState<CheckResult>(null)
   const [showResult, setShowResult] = useState(false)
+  const [selectedGroup, setSelectedGroup] = useState<string>('')
+
+  // グループ一覧を抽出
+  const groups = [...new Set(accounts.filter(a => a.group_name).map(a => a.group_name!))].sort()
 
   useEffect(() => {
     if (!checking) return
@@ -25,10 +29,13 @@ export function PinnedPostChecker({ accounts, onComplete }: Props) {
   const handleCheckAll = async () => {
     setChecking(true)
     setResult(null)
-    setProgress({ completed: 0, total: accounts.filter(a => a.status === 'active').length, message: '開始中...' })
+    const target = selectedGroup
+      ? accounts.filter(a => a.status === 'active' && a.group_name === selectedGroup)
+      : accounts.filter(a => a.status === 'active')
+    setProgress({ completed: 0, total: target.length, message: '開始中...' })
 
     try {
-      const res = await api.pinned.checkAll()
+      const res = await api.pinned.checkAll(selectedGroup || null)
       setResult(res)
       setShowResult(true)
       onComplete?.()
@@ -44,21 +51,32 @@ export function PinnedPostChecker({ accounts, onComplete }: Props) {
 
   return (
     <>
-      {/* チェック開始ボタン */}
-      <button
-        onClick={handleCheckAll}
-        disabled={checking}
-        className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-300 text-xs rounded-lg border border-zinc-700 transition-colors"
-      >
-        {checking ? (
-          <>
-            <span className="w-3 h-3 border-2 border-zinc-400/30 border-t-zinc-400 rounded-full animate-spin" />
-            チェック中...
-          </>
-        ) : (
-          <>📌 ピン投稿チェック</>
+      {/* グループ選択 + チェック開始ボタン */}
+      <div className="flex items-center gap-1.5">
+        <select
+          value={selectedGroup}
+          onChange={e => setSelectedGroup(e.target.value)}
+          disabled={checking}
+          className="bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500"
+        >
+          <option value="">全グループ</option>
+          {groups.map(g => <option key={g} value={g}>{g}</option>)}
+        </select>
+        <button
+          onClick={handleCheckAll}
+          disabled={checking}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-300 text-xs rounded-lg border border-zinc-700 transition-colors"
+        >
+          {checking ? (
+            <>
+              <span className="w-3 h-3 border-2 border-zinc-400/30 border-t-zinc-400 rounded-full animate-spin" />
+              チェック中...
+            </>
+          ) : (
+            <>📌 ピン投稿チェック</>
         )}
       </button>
+      </div>
 
       {/* 進捗モーダル */}
       {checking && (

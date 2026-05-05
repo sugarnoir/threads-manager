@@ -557,7 +557,7 @@ declare global {
         botStatus: () => Promise<{ running: boolean }>
       }
       pinned: {
-        checkAll: () => Promise<{ total: number; alive: number; deleted: number; unknown: number; no_pin: number }>
+        checkAll: (groupName?: string | null) => Promise<{ total: number; alive: number; deleted: number; unknown: number; no_pin: number }>
         checkOne: (accountId: number) => Promise<{ success: boolean; status?: string | null; url?: string; error?: string; message?: string }>
         onProgress: (cb: (data: { completed: number; total: number; message: string }) => void) => () => void
       }
