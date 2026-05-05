@@ -19,6 +19,18 @@ jobs:
           node-version: 22
           cache: npm
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build ig_tools binary (PyInstaller)
+        run: |
+          pip install -r electron/scripts/requirements.txt pyinstaller
+          cd electron/scripts
+          pyinstaller --onefile --name ig_tools ig_tools.py
+          mv dist/ig_tools ./ig_tools
+          rm -rf build dist ig_tools.spec
+
       - name: Install dependencies
         run: npm ci
 
@@ -40,6 +52,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build ig_tools binary (PyInstaller)
+        run: |
+          pip install -r electron/scripts/requirements.txt pyinstaller
+          cd electron/scripts
+          pyinstaller --onefile --name ig_tools ig_tools.py
+          move dist\ig_tools.exe .\ig_tools.exe
+          rmdir /s /q build dist
+          del ig_tools.spec
+        shell: cmd
 
       - name: Install dependencies
         run: npm ci
