@@ -1,11 +1,12 @@
 import { getSetting } from '../db/repositories/settings'
 
-export type NotifyEvent = 'account_error' | 'login_failed' | 'automation_failed' | 'test'
+export type NotifyEvent = 'account_error' | 'login_failed' | 'automation_failed' | 'auto_login' | 'test'
 
 const EVENT_LABELS: Record<NotifyEvent, string> = {
   account_error:      'アカウントエラー',
   login_failed:       'ログイン失敗',
   automation_failed:  '自動化エラー',
+  auto_login:         '自動ログイン',
   test:               'テスト通知',
 }
 
@@ -13,6 +14,7 @@ const EVENT_COLORS: Record<NotifyEvent, number> = {
   account_error:     0xef4444,  // red
   login_failed:      0xf97316,  // orange
   automation_failed: 0xeab308,  // yellow
+  auto_login:        0x22c55e,  // green
   test:              0x3b82f6,  // blue
 }
 
@@ -20,6 +22,7 @@ const EVENT_EMOJIS: Record<NotifyEvent, string> = {
   account_error:     '🔴',
   login_failed:      '🟠',
   automation_failed: '🟡',
+  auto_login:        '🟢',
   test:              '🔵',
 }
 

@@ -32,10 +32,11 @@ interface ProbeOpts {
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  uaOverride?: string
 }
 
 export async function probeAccountHealth(opts: ProbeOpts): Promise<ProbeResult> {
-  const { ua } = selectUA(opts.cookies)
+  const ua = opts.uaOverride || selectUA(opts.cookies).ua
   const csrf = opts.cookies.find(c => c.name === 'csrftoken')?.value || ''
   const cookieHeader = opts.cookies
     .filter(c => c.value && c.value !== '&quot')

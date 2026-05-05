@@ -33,6 +33,9 @@ export interface Account {
   ua_type: string | null
   last_probe_status: string | null
   last_probe_at: string | null
+  next_login_attempt_at: string | null
+  login_attempt_count: number
+  giveup: number
   created_at: string
   updated_at: string
 }

@@ -326,10 +326,19 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN ua_type TEXT DEFAULT 'fallback'")
   }
   if (!colNames.includes('last_probe_status')) {
-    db.exec("ALTER TABLE accounts ADD COLUMN last_probe_status TEXT")  // 'alive' | 'login_required' | 'challenge' | 'feedback_required' | 'rate_limited' | 'unknown'
+    db.exec("ALTER TABLE accounts ADD COLUMN last_probe_status TEXT")
   }
   if (!colNames.includes('last_probe_at')) {
     db.exec("ALTER TABLE accounts ADD COLUMN last_probe_at TEXT")
+  }
+  if (!colNames.includes('next_login_attempt_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN next_login_attempt_at TEXT")
+  }
+  if (!colNames.includes('login_attempt_count')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN login_attempt_count INTEGER DEFAULT 0")
+  }
+  if (!colNames.includes('giveup')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN giveup INTEGER DEFAULT 0")
   }
 
   // post_templates テーブルへの account_id カラム追加
