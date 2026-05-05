@@ -1625,18 +1625,27 @@ export async function postStory(
   const acct = getAccountById(accountId)
   if (!acct) return { success: false, error: 'アカウントが見つかりません' }
 
+  // 部分リンク判定: width/height が 1.0 未満なら部分リンク → Python直行
+  const isPartialLink = linkSticker?.url &&
+    ((linkSticker.width ?? 0.3) < 0.99 || (linkSticker.height ?? 0.1) < 0.99)
+
   // ── 1st: Playwright 経路（Python不要、配布版で確実に動く）──────────────────
-  console.log(`[postStory] account=${accountId} trying Playwright route first`)
-  try {
-    const { postStoryViaPlaywright } = await import('../playwright/story-post')
-    const pwResult = await postStoryViaPlaywright(accountId, imagePath, linkSticker)
-    if (pwResult.success) {
-      console.log(`[postStory] account=${accountId} Playwright success`)
-      return pwResult
+  // 部分リンクの場合はPlaywright経路をスキップ（座標制御ができないため）
+  if (!isPartialLink) {
+    console.log(`[postStory] account=${accountId} trying Playwright route first (fullScreenLink or no link)`)
+    try {
+      const { postStoryViaPlaywright } = await import('../playwright/story-post')
+      const pwResult = await postStoryViaPlaywright(accountId, imagePath, linkSticker)
+      if (pwResult.success) {
+        console.log(`[postStory] account=${accountId} Playwright success`)
+        return pwResult
+      }
+      console.warn(`[postStory] account=${accountId} Playwright failed: ${pwResult.error}`)
+    } catch (pwErr) {
+      console.warn(`[postStory] account=${accountId} Playwright error: ${pwErr instanceof Error ? pwErr.message : pwErr}`)
     }
-    console.warn(`[postStory] account=${accountId} Playwright failed: ${pwResult.error}`)
-  } catch (pwErr) {
-    console.warn(`[postStory] account=${accountId} Playwright error: ${pwErr instanceof Error ? pwErr.message : pwErr}`)
+  } else {
+    console.log(`[postStory] account=${accountId} partial link detected (w=${linkSticker!.width} h=${linkSticker!.height}), skipping Playwright`)
   }
 
   // ── 2nd: Python (instagrapi) フォールバック ────────────────────────────────

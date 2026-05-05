@@ -179,10 +179,16 @@ export function StoryPostModal({ accountId, onClose }: Props) {
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" checked={fullScreenLink} onChange={e => setFullScreenLink(e.target.checked)} className="accent-pink-500 w-3.5 h-3.5" />
                     <span className="text-zinc-200 text-xs font-medium">全面リンク</span>
-                    <span className="text-zinc-500 text-[10px]">（ストーリー全体）</span>
+                    <span className="text-emerald-400 text-[10px] font-medium">推奨</span>
                   </label>
+                  {fullScreenLink && (
+                    <p className="text-emerald-400/80 text-[10px]">ストーリー全体がリンクになります（配布版で動作確認済み）</p>
+                  )}
 
                   {!fullScreenLink && (<>
+                    <p className="text-amber-400/80 text-[10px] bg-amber-900/20 border border-amber-700/30 rounded px-2 py-1.5">
+                      部分リンクは Python (instagrapi) が必要です。配布版では全面リンクのみ動作します。
+                    </p>
                     <Slider label="縦位置 (Y)" value={customY} min={0} max={1} step={0.05}
                       onChange={v => { setCustomY(v); setLinkPos('custom') }}
                       presets={[
