@@ -32,6 +32,9 @@ export interface Account {
   pinned_post_url: string | null
   pinned_post_status: 'alive' | 'deleted' | 'unknown' | null
   pinned_checked_at: string | null
+  ua_type: string | null
+  last_probe_status: string | null
+  last_probe_at: string | null
   created_at: string
   updated_at: string
 }
@@ -190,6 +193,16 @@ export function updateReplyBanStatus(id: number, status: 'ok' | 'banned', checke
   getDb()
     .prepare("UPDATE accounts SET reply_ban_status = ?, reply_ban_checked_at = ?, updated_at = datetime('now') WHERE id = ?")
     .run(status, checkedAt, id)
+}
+
+export function updateProbeStatus(
+  id: number,
+  status: string,
+  uaType?: string,
+): void {
+  getDb()
+    .prepare("UPDATE accounts SET last_probe_status = ?, last_probe_at = datetime('now'), ua_type = COALESCE(?, ua_type), updated_at = datetime('now') WHERE id = ?")
+    .run(status, uaType ?? null, id)
 }
 
 export function updatePinnedPostStatus(

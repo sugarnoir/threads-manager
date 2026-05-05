@@ -322,6 +322,15 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('pinned_checked_at')) {
     db.exec("ALTER TABLE accounts ADD COLUMN pinned_checked_at TEXT")
   }
+  if (!colNames.includes('ua_type')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN ua_type TEXT DEFAULT 'fallback'")
+  }
+  if (!colNames.includes('last_probe_status')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN last_probe_status TEXT")  // 'alive' | 'login_required' | 'challenge' | 'feedback_required' | 'rate_limited' | 'unknown'
+  }
+  if (!colNames.includes('last_probe_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN last_probe_at TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]

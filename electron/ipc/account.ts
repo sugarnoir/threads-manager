@@ -65,6 +65,10 @@ import { getViewManager, fetchProfileFromInstagram, injectCookies, RawCookie } f
 import { sendDiscordNotification } from '../discord'
 import { autoRenameJapaneseFemale, postStory } from '../api/threads-web-api'
 import type { StoryLinkSticker } from '../api/threads-web-api'
+import { sanitizeCookies, isCookieSetUsable } from '../ig/cookie-sanitizer'
+import { selectUA } from '../ig/ua-selector'
+import { probeAccountHealth } from '../ig/health-probe'
+import { updateProbeStatus } from '../db/repositories/accounts'
 
 export function registerAccountHandlers(): void {
   ipcMain.handle('accounts:list', () => getAllAccounts())
@@ -916,14 +920,13 @@ export function registerAccountHandlers(): void {
         if (row.group_name) updateAccountGroup(account.id, row.group_name)
         createAndSaveFingerprint(account.id)
 
-        // Cookie を永続パーティションに注入
-        const permSess = session.fromPartition(`persist:account-${account.id}`)
-        const rawCookies: RawCookie[] = (row.cookies ?? []).map((c: unknown) => {
+        // ── Cookie sanitize + UA 選択 + Probe ──────────────────────────────
+        const inputCookies = (row.cookies ?? []).map((c: unknown) => {
           const o = c as Record<string, unknown>
           return {
             name:           String(o.name  ?? ''),
             value:          String(o.value ?? ''),
-            domain:         (o.domain as string) ?? undefined,
+            domain:         (o.domain as string) ?? '.instagram.com',
             path:           (o.path   as string) ?? '/',
             secure:         o.secure  as boolean | undefined,
             httpOnly:       o.httpOnly as boolean | undefined,
@@ -932,12 +935,60 @@ export function registerAccountHandlers(): void {
             sameSite:       o.sameSite as string | undefined,
           }
         })
-        console.log(`[import-cookie-login] row[${i}] rawCookies=${rawCookies.length} names=[${rawCookies.map(c => c.name).join(',')}]`)
+
+        // 1. Sanitize
+        const { sanitized, removed } = sanitizeCookies(inputCookies)
+        if (removed.length > 0) {
+          console.log(`[import-cookie-login] row[${i}] sanitized: removed ${removed.length} cookies:`, removed.map(r => `${r.name}(${r.reason})`).join(', '))
+        }
+        if (!isCookieSetUsable(sanitized)) {
+          console.warn(`[import-cookie-login] row[${i}] SKIP: missing required cookies after sanitize`)
+          results.errors.push({ username, message: '必須Cookie不足 (sessionid/csrftoken/ds_user_id)' })
+          continue
+        }
+
+        // 2. UA 選択
+        const { type: uaType, ua: selectedUA } = selectUA(sanitized)
+        console.log(`[import-cookie-login] row[${i}] UA type=${uaType}`)
+
+        // 3. Health Probe (WebView 前に生死判定)
+        const probe = await probeAccountHealth({
+          cookies: sanitized,
+          proxyUrl: assignedProxyUrl,
+          proxyUsername: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
+          proxyPassword: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
+        })
+        console.log(`[import-cookie-login] row[${i}] probe=${probe.status}${probe.status === 'alive' ? ` userId=${(probe as any).userId}` : ''}`)
+        updateProbeStatus(account.id, probe.status, uaType)
+
+        if (probe.status === 'login_required') {
+          console.log(`[import-cookie-login] row[${i}] session dead, skipping WebView`)
+          updateAccountStatus(account.id, 'needs_login')
+          results.imported++
+          continue
+        }
+
+        // 4. Cookie を永続パーティションに注入
+        const permSess = session.fromPartition(`persist:account-${account.id}`)
+        const rawCookies: RawCookie[] = sanitized.map(c => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          expirationDate: c.expirationDate,
+          sameSite: c.sameSite,
+        }))
+        console.log(`[import-cookie-login] row[${i}] injecting ${rawCookies.length} sanitized cookies`)
 
         const hasSession = await injectCookies(rawCookies, permSess)
         console.log(`[import-cookie-login] row[${i}] injectCookies hasSession=${hasSession}`)
 
-        // Cookie セット後のステータス設定のみ（Instagram への API 呼び出しは一切行わない）
+        // 5. UA をアカウントに設定
+        // (user_agent カラムは既に account 作成時に設定済みだが、probe 結果に基づいて上書き)
+
+        // Cookie セット後のステータス設定
         updateAccountStatus(account.id, hasSession ? 'active' : 'needs_login')
 
         results.imported++

@@ -30,6 +30,9 @@ export interface Account {
   pinned_post_url: string | null
   pinned_post_status: 'alive' | 'deleted' | 'unknown' | null
   pinned_checked_at: string | null
+  ua_type: string | null
+  last_probe_status: string | null
+  last_probe_at: string | null
   created_at: string
   updated_at: string
 }
