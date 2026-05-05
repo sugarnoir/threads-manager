@@ -27,6 +27,9 @@ export interface Account {
   use_unified_headers: boolean
   reply_ban_status: 'ok' | 'banned' | null
   reply_ban_checked_at: string | null
+  pinned_post_url: string | null
+  pinned_post_status: 'alive' | 'deleted' | 'unknown' | null
+  pinned_checked_at: string | null
   created_at: string
   updated_at: string
 }
@@ -552,6 +555,11 @@ declare global {
         botStart: () => Promise<{ ok: boolean; error?: string }>
         botStop: () => Promise<{ ok: boolean }>
         botStatus: () => Promise<{ running: boolean }>
+      }
+      pinned: {
+        checkAll: () => Promise<{ total: number; alive: number; deleted: number; unknown: number; no_pin: number }>
+        checkOne: (accountId: number) => Promise<{ success: boolean; status?: string | null; url?: string; error?: string; message?: string }>
+        onProgress: (cb: (data: { completed: number; total: number; message: string }) => void) => () => void
       }
       proxyPresets: {
         list:   () => Promise<ProxyPreset[]>

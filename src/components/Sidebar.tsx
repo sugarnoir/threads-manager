@@ -1157,6 +1157,9 @@ export function Sidebar({
                           {account.reply_ban_status === 'banned' && (
                             <span className="shrink-0 text-red-400" title="リプBAN">⚠️</span>
                           )}
+                          {account.pinned_post_status === 'deleted' && (
+                            <span className="shrink-0 text-red-400" title={`ピン削除 (${account.pinned_checked_at ?? ''})`}>📌</span>
+                          )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">
                           @{account.username}

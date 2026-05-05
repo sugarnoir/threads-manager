@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Account, AccountAutopostStatus, api } from '../lib/ipc'
+import { PinnedPostChecker } from '../components/PinnedPostChecker'
 
 interface Props {
   accounts: Account[]
@@ -292,23 +293,26 @@ export function StatusCheck({ accounts, onCheckOne, onCheckAll }: Props) {
           <p className="text-white font-semibold text-sm">ステータス確認</p>
           <p className="text-zinc-500 text-xs mt-0.5">{accounts.length} アカウント</p>
         </div>
-        <button
-          onClick={handleCheckAll}
-          disabled={isChecking || accounts.length === 0}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
-        >
-          {isChecking ? (
-            <>
-              <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              確認中 {progress.done}/{progress.total}
-            </>
-          ) : (
-            <>
-              <span>🔍</span>
-              全アカウント一括確認
-            </>
-          )}
-        </button>
+        <div className="flex items-center gap-2">
+          <PinnedPostChecker accounts={accounts} />
+          <button
+            onClick={handleCheckAll}
+            disabled={isChecking || accounts.length === 0}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+          >
+            {isChecking ? (
+              <>
+                <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                確認中 {progress.done}/{progress.total}
+              </>
+            ) : (
+              <>
+                <span>🔍</span>
+                全アカウント一括確認
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* ── Progress bar ─────────────────────────────────────────────────── */}
