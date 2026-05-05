@@ -9,7 +9,7 @@
  *   2. session + useSessionCookies でホームページHTMLをスクレイプ
  */
 
-import { net, session, Session } from 'electron'
+import { net, session, Session, app } from 'electron'
 import { prePostDelay, typingDelay, mediaConfigureDelay } from '../lib/delay'
 import { analyzeAndLog } from '../lib/response-analyzer'
 import { getBloksVersionId }            from '../lib/app-config'
@@ -31,6 +31,37 @@ function dbgLog(line: string) {
 import { extractPageApiTokens, fetchViaView, autoPostViaUI, restPostTextViaView, restPostMediaViaView, configureSidecarViaView, ensureViewLoaded } from '../browser-views/view-manager'
 import { IPHONE_UA_LIST }               from '../utils/iphone-ua'
 import fs from 'fs'
+import path from 'path'
+import { spawn as cpSpawn, execFile as cpExecFile } from 'child_process'
+
+// ── Python/ig_tools バイナリ呼び出しヘルパー ──────────────────────────────────
+
+/**
+ * ig_tools のコマンドを実行する。
+ * 配布版: バンドルされた ig_tools バイナリ
+ * 開発時: python3 + 個別スクリプト
+ */
+function resolveIgToolsCommand(subcommand: 'story' | 'reel' | 'rename' | 'rename-pw'): {
+  command: string
+  prefixArgs: string[]
+} {
+  if (app.isPackaged) {
+    // 配布版: PyInstaller バイナリ
+    const binaryName = process.platform === 'win32' ? 'ig_tools.exe' : 'ig_tools'
+    const binaryPath = path.join(process.resourcesPath, 'scripts', binaryName)
+    return { command: binaryPath, prefixArgs: [subcommand] }
+  } else {
+    // 開発時: python3 + スクリプトファイル
+    const scriptMap: Record<string, string> = {
+      'story':     'story_post.py',
+      'reel':      'reel_post.py',
+      'rename':    'change_name_api.py',
+      'rename-pw': 'change_name_playwright.py',
+    }
+    const scriptPath = path.join(app.getAppPath(), 'electron', 'scripts', scriptMap[subcommand])
+    return { command: 'python3', prefixArgs: [scriptPath] }
+  }
+}
 
 const THREADS_URL  = 'https://www.threads.com'
 const IG_APP_ID    = '238260118697367'
@@ -1029,47 +1060,42 @@ export async function autoRenameJapaneseFemale(
   const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
   const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
 
-  const { spawn } = await import('child_process')
-  const pathMod = await import('path')
-  const { app } = await import('electron')
+  // 配布版: ig_tools rename (API版、Pythonブラウザ不要)
+  // 開発時: python3 + change_name_playwright.py (Playwright版)
+  const subcommand = app.isPackaged ? 'rename' : 'rename-pw'
+  const { command: igCmd, prefixArgs } = resolveIgToolsCommand(subcommand)
 
-  const isDev = !app.isPackaged
-  // 常に Playwright 版を使用（プロキシなしで実行）
-  const scriptPath = isDev
-    ? pathMod.join(app.getAppPath(), 'electron', 'scripts', 'change_name_playwright.py')
-    : pathMod.join(process.resourcesPath, 'scripts', 'change_name_playwright.py')
-
-  const args = [
-    scriptPath,
+  const scriptArgs = [
     '--sessionid', sessionid,
     '--csrftoken', csrftoken,
     '--ds_user_id', dsUserId,
     '--new_name', newName,
   ]
-  if (mid)   args.push('--mid', mid)
-  if (igDid) args.push('--ig_did', igDid)
-  if (rur)   args.push('--rur', rur)
+  if (mid)   scriptArgs.push('--mid', mid)
+  if (igDid) scriptArgs.push('--ig_did', igDid)
+  if (rur)   scriptArgs.push('--rur', rur)
   // プロキシは渡さない（名前変更はプロキシなしで実行）
 
-  console.log(`[autoRename] python3 ${args.slice(0, 3).join(' ')}... new_name=${newName}`)
+  const finalArgs = [...prefixArgs, ...scriptArgs]
+  console.log(`[autoRename] ${igCmd} ${finalArgs.slice(0, 3).join(' ')}... new_name=${newName}`)
 
   return new Promise((resolve) => {
-    const proc = spawn('python3', args, { timeout: 300_000 })
+    const proc = cpSpawn(igCmd, finalArgs, { timeout: 300_000 })
     let stdout = ''
     let stderr = ''
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
     proc.on('close', (code) => {
-      console.log(`[autoRename] python exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 200)}`)
+      console.log(`[autoRename] exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 200)}`)
       try {
         const result = JSON.parse(stdout.trim())
         resolve(result)
       } catch {
-        resolve({ success: false, error: stderr || stdout || `python exit code ${code}` })
+        resolve({ success: false, error: stderr || stdout || `exit code ${code}` })
       }
     })
     proc.on('error', (err) => {
-      resolve({ success: false, error: `python spawn error: ${err.message}` })
+      resolve({ success: false, error: `spawn error: ${err.message}` })
     })
   })
 }
@@ -1648,15 +1674,19 @@ export async function postStory(
     console.log(`[postStory] account=${accountId} partial link detected (w=${linkSticker!.width} h=${linkSticker!.height}), skipping Playwright`)
   }
 
-  // ── 2nd: Python (instagrapi) フォールバック ────────────────────────────────
-  // Python3 の存在確認
-  const hasPython = await checkPythonAvailable()
-  if (!hasPython) {
-    console.warn(`[postStory] account=${accountId} Python3 not found, skipping Python fallback`)
-    return { success: false, error: 'Playwright経路で失敗、Python3が見つからないためフォールバック不可' }
+  // ── 2nd: ig_tools / Python (instagrapi) フォールバック ───────────────────
+  const { command: igCmd, prefixArgs } = resolveIgToolsCommand('story')
+
+  // 開発時のみ Python 存在チェック（配布版はバイナリがあるので不要）
+  if (!app.isPackaged) {
+    const hasPython = await checkPythonAvailable()
+    if (!hasPython) {
+      console.warn(`[postStory] account=${accountId} Python3 not found, skipping instagrapi fallback`)
+      return { success: false, error: 'Playwright経路で失敗、Python3が見つからないためフォールバック不可' }
+    }
   }
 
-  console.log(`[postStory] account=${accountId} falling back to Python (instagrapi)`)
+  console.log(`[postStory] account=${accountId} falling back to ig_tools/instagrapi (cmd=${igCmd})`)
 
   const allCookies = await session.fromPartition(`persist:account-${accountId}`).cookies.get({}).catch(() => [])
   const sessionid = allCookies.find(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))?.value
@@ -1667,15 +1697,6 @@ export async function postStory(
     return { success: false, error: 'Cookie 不足 (sessionid/csrftoken/ds_user_id)' }
   }
 
-  const { spawn } = await import('child_process')
-  const path = await import('path')
-  const { app } = await import('electron')
-
-  const isDev = !app.isPackaged
-  const scriptPath = isDev
-    ? path.join(app.getAppPath(), 'electron', 'scripts', 'story_post.py')
-    : path.join(process.resourcesPath, 'scripts', 'story_post.py')
-
   const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
   const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
   const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
@@ -1683,23 +1704,22 @@ export async function postStory(
   lazyEnsureDeviceIds(accountId)
   const freshAcct = getAccountById(accountId)
 
-  const args = [
-    scriptPath,
+  const scriptArgs = [
     '--sessionid', sessionid,
     '--csrftoken', csrftoken,
     '--ds_user_id', dsUserId,
     '--image', imagePath,
   ]
-  if (mid)   args.push('--mid', mid)
-  if (igDid) args.push('--ig_did', igDid)
-  if (rur)   args.push('--rur', rur)
+  if (mid)   scriptArgs.push('--mid', mid)
+  if (igDid) scriptArgs.push('--ig_did', igDid)
+  if (rur)   scriptArgs.push('--rur', rur)
 
-  if (freshAcct?.device_id)   args.push('--device_id',   freshAcct.device_id)
-  if (freshAcct?.device_uuid) args.push('--device_uuid', freshAcct.device_uuid)
-  if (freshAcct?.phone_id)    args.push('--phone_id',    freshAcct.phone_id)
-  if (freshAcct?.adid)        args.push('--adid',        freshAcct.adid)
+  if (freshAcct?.device_id)   scriptArgs.push('--device_id',   freshAcct.device_id)
+  if (freshAcct?.device_uuid) scriptArgs.push('--device_uuid', freshAcct.device_uuid)
+  if (freshAcct?.phone_id)    scriptArgs.push('--phone_id',    freshAcct.phone_id)
+  if (freshAcct?.adid)        scriptArgs.push('--adid',        freshAcct.adid)
 
-  args.push('--ua', getBrowserUA())
+  scriptArgs.push('--ua', getBrowserUA())
 
   if (acct.proxy_url) {
     let proxyForPython = acct.proxy_url
@@ -1709,36 +1729,37 @@ export async function postStory(
       u.password = acct.proxy_password ?? ''
       proxyForPython = u.toString()
     }
-    args.push('--proxy', proxyForPython)
+    scriptArgs.push('--proxy', proxyForPython)
   }
 
   if (linkSticker?.url) {
-    args.push('--link_url', linkSticker.url)
-    args.push('--link_x', String(linkSticker.x ?? 0.5))
-    args.push('--link_y', String(linkSticker.y ?? 0.5))
-    args.push('--link_width', String(linkSticker.width ?? 0.3))
-    args.push('--link_height', String(linkSticker.height ?? 0.1))
+    scriptArgs.push('--link_url', linkSticker.url)
+    scriptArgs.push('--link_x', String(linkSticker.x ?? 0.5))
+    scriptArgs.push('--link_y', String(linkSticker.y ?? 0.5))
+    scriptArgs.push('--link_width', String(linkSticker.width ?? 0.3))
+    scriptArgs.push('--link_height', String(linkSticker.height ?? 0.1))
   }
 
-  console.log(`[postStory] python3 ${args.join(' ').slice(0, 200)}...`)
+  const finalArgs = [...prefixArgs, ...scriptArgs]
+  console.log(`[postStory] ${igCmd} ${finalArgs.join(' ').slice(0, 200)}...`)
 
   return new Promise((resolve) => {
-    const proc = spawn('python3', args, { timeout: 120_000 })
+    const proc = cpSpawn(igCmd, finalArgs, { timeout: 120_000 })
     let stdout = ''
     let stderr = ''
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
     proc.on('close', (code) => {
-      console.log(`[postStory] python exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
+      console.log(`[postStory] exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
       try {
         const result = JSON.parse(stdout.trim())
         resolve(result)
       } catch {
-        resolve({ success: false, error: stderr || stdout || `python exit code ${code}` })
+        resolve({ success: false, error: stderr || stdout || `exit code ${code}` })
       }
     })
     proc.on('error', (err) => {
-      resolve({ success: false, error: `python spawn error: ${err.message}` })
+      resolve({ success: false, error: `spawn error: ${err.message}` })
     })
   })
 }
@@ -1747,9 +1768,8 @@ export async function postStory(
 let _pythonAvailable: boolean | null = null
 async function checkPythonAvailable(): Promise<boolean> {
   if (_pythonAvailable !== null) return _pythonAvailable
-  const { execFile } = await import('child_process')
   return new Promise((resolve) => {
-    execFile('python3', ['--version'], { timeout: 5000 }, (err) => {
+    cpExecFile('python3', ['--version'], { timeout: 5000 }, (err) => {
       _pythonAvailable = !err
       if (!_pythonAvailable) console.log('[postStory] python3 not found on this system')
       resolve(_pythonAvailable)
@@ -1784,14 +1804,7 @@ export async function postReel(
     return { success: false, error: 'Cookie 不足 (sessionid/csrftoken/ds_user_id)' }
   }
 
-  const { spawn } = await import('child_process')
-  const path = await import('path')
-  const { app } = await import('electron')
-
-  const isDev = !app.isPackaged
-  const scriptPath = isDev
-    ? path.join(app.getAppPath(), 'electron', 'scripts', 'reel_post.py')
-    : path.join(process.resourcesPath, 'scripts', 'reel_post.py')
+  const { command: igCmd, prefixArgs } = resolveIgToolsCommand('reel')
 
   const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
   const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
@@ -1800,25 +1813,24 @@ export async function postReel(
   lazyEnsureDeviceIds(accountId)
   const freshAcct = getAccountById(accountId)
 
-  const args = [
-    scriptPath,
+  const scriptArgs = [
     '--sessionid', sessionid,
     '--csrftoken', csrftoken,
     '--ds_user_id', dsUserId,
     '--video', videoPath,
     '--caption', caption,
   ]
-  if (thumbnailPath) args.push('--thumbnail', thumbnailPath)
-  if (mid)   args.push('--mid', mid)
-  if (igDid) args.push('--ig_did', igDid)
-  if (rur)   args.push('--rur', rur)
+  if (thumbnailPath) scriptArgs.push('--thumbnail', thumbnailPath)
+  if (mid)   scriptArgs.push('--mid', mid)
+  if (igDid) scriptArgs.push('--ig_did', igDid)
+  if (rur)   scriptArgs.push('--rur', rur)
 
-  if (freshAcct?.device_id)   args.push('--device_id',   freshAcct.device_id)
-  if (freshAcct?.device_uuid) args.push('--device_uuid', freshAcct.device_uuid)
-  if (freshAcct?.phone_id)    args.push('--phone_id',    freshAcct.phone_id)
-  if (freshAcct?.adid)        args.push('--adid',        freshAcct.adid)
+  if (freshAcct?.device_id)   scriptArgs.push('--device_id',   freshAcct.device_id)
+  if (freshAcct?.device_uuid) scriptArgs.push('--device_uuid', freshAcct.device_uuid)
+  if (freshAcct?.phone_id)    scriptArgs.push('--phone_id',    freshAcct.phone_id)
+  if (freshAcct?.adid)        scriptArgs.push('--adid',        freshAcct.adid)
 
-  args.push('--ua', getBrowserUA())
+  scriptArgs.push('--ua', getBrowserUA())
 
   if (acct.proxy_url) {
     let proxyForPython = acct.proxy_url
@@ -1828,13 +1840,14 @@ export async function postReel(
       u.password = acct.proxy_password ?? ''
       proxyForPython = u.toString()
     }
-    args.push('--proxy', proxyForPython)
+    scriptArgs.push('--proxy', proxyForPython)
   }
 
-  console.log(`[postReel] python3 ${args.join(' ').slice(0, 200)}...`)
+  const finalArgs = [...prefixArgs, ...scriptArgs]
+  console.log(`[postReel] ${igCmd} ${finalArgs.join(' ').slice(0, 200)}...`)
 
   return new Promise((resolve) => {
-    const proc = spawn('python3', args, { timeout: 600_000 })
+    const proc = cpSpawn(igCmd, finalArgs, { timeout: 600_000 })
     let stdout = ''
     let stderr = ''
 
@@ -1848,17 +1861,17 @@ export async function postReel(
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
     proc.on('close', (code) => {
       clearTimeout(timer)
-      console.log(`[postReel] python exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
+      console.log(`[postReel] exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
       try {
         const result = JSON.parse(stdout.trim())
         resolve(result)
       } catch {
-        resolve({ success: false, error: stderr || stdout || `python exit code ${code}` })
+        resolve({ success: false, error: stderr || stdout || `exit code ${code}` })
       }
     })
     proc.on('error', (err) => {
       clearTimeout(timer)
-      resolve({ success: false, error: `python spawn error: ${err.message}` })
+      resolve({ success: false, error: `spawn error: ${err.message}` })
     })
   })
 }

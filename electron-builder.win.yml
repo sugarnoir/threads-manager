@@ -40,3 +40,6 @@ extraResources:
       - "*.node"
   - from: electron/scripts
     to: scripts
+    filter:
+      - "ig_tools.exe"
+      - "*.py"

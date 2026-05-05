@@ -8,3 +8,7 @@ sessions/
 CLAUDE.md
 .env
 .env.*
+__pycache__/
+*.spec
+electron/scripts/build/
+electron/scripts/dist/
