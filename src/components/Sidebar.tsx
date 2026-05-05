@@ -1158,13 +1158,13 @@ export function Sidebar({
                             <span className="shrink-0 text-red-400" title="リプBAN">⚠️</span>
                           )}
                           {account.pinned_post_status === 'deleted' && (
-                            <span className="shrink-0 text-red-400" title={`ピン削除 (${account.pinned_checked_at ?? ''})`}>📌❌</span>
+                            <span className="shrink-0 px-1 py-0 rounded bg-red-500/20 text-red-400 text-[8px] font-bold leading-tight border border-red-500/30" title={`ピン削除検出 (${account.pinned_checked_at ?? ''})`}>ピン削除</span>
                           )}
                           {account.pinned_post_status === 'alive' && (
-                            <span className="shrink-0 text-emerald-500/60" title={`ピン生存 (${account.pinned_checked_at ?? ''})`}>📌</span>
+                            <span className="shrink-0 px-1 py-0 rounded bg-emerald-500/15 text-emerald-400 text-[8px] font-bold leading-tight" title={`ピン生存確認 (${account.pinned_checked_at ?? ''})`}>PIN✓</span>
                           )}
                           {account.pinned_checked_at && !account.pinned_post_url && (
-                            <span className="shrink-0 text-zinc-600" title={`ピン無し (${account.pinned_checked_at ?? ''})`}>📌⚫</span>
+                            <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-500 text-[8px] font-bold leading-tight" title={`ピン投稿なし (${account.pinned_checked_at ?? ''})`}>ピン無</span>
                           )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">
