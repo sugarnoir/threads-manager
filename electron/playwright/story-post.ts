@@ -58,7 +58,7 @@ export async function postStoryViaPlaywright(
 
   // プロキシ設定
   const launchOptions: Record<string, unknown> = {
-    headless: false,
+    headless: true,
     args: ['--no-sandbox', '--disable-gpu'],
   }
   if (acct.proxy_url) {
