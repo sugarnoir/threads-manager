@@ -29,6 +29,9 @@ export interface Account {
   use_unified_headers: boolean
   reply_ban_status: 'ok' | 'banned' | null
   reply_ban_checked_at: string | null
+  pinned_post_url: string | null
+  pinned_post_status: 'alive' | 'deleted' | 'unknown' | null
+  pinned_checked_at: string | null
   created_at: string
   updated_at: string
 }
@@ -187,6 +190,16 @@ export function updateReplyBanStatus(id: number, status: 'ok' | 'banned', checke
   getDb()
     .prepare("UPDATE accounts SET reply_ban_status = ?, reply_ban_checked_at = ?, updated_at = datetime('now') WHERE id = ?")
     .run(status, checkedAt, id)
+}
+
+export function updatePinnedPostStatus(
+  id: number,
+  url: string | null,
+  status: 'alive' | 'deleted' | 'unknown' | null,
+): void {
+  getDb()
+    .prepare("UPDATE accounts SET pinned_post_url = ?, pinned_post_status = ?, pinned_checked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+    .run(url, status, id)
 }
 
 export function updateAccountTotpSecret(id: number, totp_secret: string | null): void {

@@ -186,6 +186,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     botStatus: () => ipcRenderer.invoke('settings:bot-status'),
   },
 
+  // Pinned Post Check
+  pinned: {
+    checkAll: () => ipcRenderer.invoke('pinned:check-all'),
+    checkOne: (accountId: number) => ipcRenderer.invoke('pinned:check-one', accountId),
+    onProgress: (cb: (data: { completed: number; total: number; message: string }) => void) => {
+      ipcRenderer.on('pinned:progress', (_e, data) => cb(data))
+      return () => { ipcRenderer.removeAllListeners('pinned:progress') }
+    },
+  },
+
   // Proxy Presets
   proxyPresets: {
     list:   () => ipcRenderer.invoke('proxy-presets:list'),

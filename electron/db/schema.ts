@@ -313,6 +313,15 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('reply_ban_checked_at')) {
     db.exec("ALTER TABLE accounts ADD COLUMN reply_ban_checked_at TEXT")
   }
+  if (!colNames.includes('pinned_post_url')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN pinned_post_url TEXT")
+  }
+  if (!colNames.includes('pinned_post_status')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN pinned_post_status TEXT")  // 'alive' | 'deleted' | 'unknown' | null
+  }
+  if (!colNames.includes('pinned_checked_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN pinned_checked_at TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]

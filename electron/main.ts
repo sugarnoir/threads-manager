@@ -25,6 +25,7 @@ import { registerProxyPresetHandlers } from './ipc/proxy-presets'
 import { registerMasterKeyHandlers } from './ipc/master-key'
 import { registerAutoReplyHandlers } from './ipc/auto-reply'
 import { registerStoryScheduleHandlers } from './ipc/story-schedule'
+import { registerPinnedCheckHandlers } from './ipc/pinned-check'
 import { registerReelScheduleHandlers } from './ipc/reel-schedule'
 import { registerResponseAlertHandlers } from './ipc/response-alerts'
 import { initAutoUpdater } from './updater'
@@ -93,6 +94,7 @@ app.whenReady().then(() => {
   registerAppConfigHandlers()
   registerStoryScheduleHandlers()
   registerReelScheduleHandlers()
+  registerPinnedCheckHandlers()
   registerResponseAlertHandlers()
   initAppConfig() // fire-and-forget: 起動を遅延させない
   registerGroupHandlers()
