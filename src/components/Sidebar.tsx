@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Account, Group, AutopostConfig, api } from '../lib/ipc'
+import { parseCombo, detectFormat, type ComboFormat } from '../lib/parse-combo'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 
@@ -243,6 +244,7 @@ export function Sidebar({
   const [cookieNewGroupName, setCookieNewGroupName] = useState('')
   const [cookieProxyMode,    setCookieProxyMode]    = useState<'auto' | 'manual' | 'none'>('auto')
   const [cookieProxyStart,   setCookieProxyStart]   = useState('')
+  const [comboFormat,        setComboFormat]        = useState<ComboFormat>('auto')
   // トピック XLSX 一括追加用
   const [topicGroupSel,     setTopicGroupSel]     = useState<string>('__all__')
   const [topicImporting,    setTopicImporting]    = useState(false)
@@ -458,40 +460,16 @@ export function Sidebar({
 
     setCsvImporting(true)
     try {
-      const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
-      // フォーマット: username|password|token|[cookiesJSON]|email
-      const payload = lines.map((line) => {
-        // パイプ区切りだが cookies JSON 内に | が含まれる可能性は低い
-        // [cookies] の部分を安全に抽出: 最初の [ から最後の ] まで
-        const bracketStart = line.indexOf('[')
-        const bracketEnd   = line.lastIndexOf(']')
-
-        let username = '', password = '', token = '', email = ''
-        let cookies: unknown[] = []
-
-        if (bracketStart !== -1 && bracketEnd !== -1 && bracketEnd > bracketStart) {
-          const before = line.slice(0, bracketStart).replace(/\|$/, '')
-          const cookieStr = line.slice(bracketStart, bracketEnd + 1)
-          const after  = line.slice(bracketEnd + 1).replace(/^\|/, '')
-
-          const beforeParts = before.split('|')
-          username = (beforeParts[0] ?? '').trim()
-          password = (beforeParts[1] ?? '').trim()
-          token    = (beforeParts[2] ?? '').trim()
-          email    = after.split('|').filter(Boolean).pop()?.trim() ?? ''
-
-          try { cookies = JSON.parse(cookieStr) } catch { cookies = [] }
-        } else {
-          // [ ] がない場合はシンプルにパイプ分割
-          const parts = line.split('|')
-          username = (parts[0] ?? '').trim()
-          password = (parts[1] ?? '').trim()
-          token    = (parts[2] ?? '').trim()
-          email    = (parts[4] ?? '').trim()
-        }
-
-        return { username, password, token, cookies, email, group_name: targetGroup }
-      }).filter(r => r.username)
+      const parsed = parseCombo(text, comboFormat)
+      const payload = parsed.map(r => ({
+        username: r.username,
+        password: r.password,
+        token: r.token,
+        cookies: r.cookies,
+        email: r.email,
+        totp_secret: r.totpSecret || undefined,
+        group_name: targetGroup,
+      })).filter(r => r.username)
 
       if (payload.length === 0) { showCsvToast('有効な行がありません', false); return }
 
@@ -1417,21 +1395,55 @@ export function Sidebar({
 
           {csvMode === 'cookie' && (
             <>
+              {/* フォーマット選択 */}
+              <label className="block text-zinc-500 text-[10px] mb-1">フォーマット</label>
+              <div className="flex gap-0.5 bg-zinc-800/60 p-0.5 rounded-lg mb-2">
+                {([
+                  { id: 'auto'       as const, label: '自動検出' },
+                  { id: 'npprteam'   as const, label: 'npprteam' },
+                  { id: 'accsmarket' as const, label: 'AccsMarket' },
+                ]).map(opt => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setComboFormat(opt.id)}
+                    className={`flex-1 py-1 text-[10px] font-semibold rounded-md transition-colors ${
+                      comboFormat === opt.id
+                        ? 'bg-violet-600 text-white'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
               <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
-                <p className="text-zinc-300 text-[10px] font-semibold mb-1">フォーマット（1行1垢）</p>
-                <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono whitespace-pre-wrap break-all">
-                  username|password|token|[cookies]|email
-                </code>
-                <p className="text-zinc-500 text-[9px] leading-tight mt-1">
-                  cookies は JSON 配列。sessionid を含む場合は active に設定。
-                </p>
+                {(comboFormat === 'auto' || comboFormat === 'npprteam') && (
+                  <>
+                    <p className="text-zinc-300 text-[10px] font-semibold mb-0.5">npprteam（pipe区切り）</p>
+                    <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono break-all">
+                      username|password|token|[cookies]|email
+                    </code>
+                  </>
+                )}
+                {comboFormat === 'auto' && <div className="border-t border-zinc-800 my-1.5" />}
+                {(comboFormat === 'auto' || comboFormat === 'accsmarket') && (
+                  <>
+                    <p className="text-zinc-300 text-[10px] font-semibold mb-0.5">AccsMarket（colon区切り）</p>
+                    <code className="block text-[9px] leading-relaxed text-amber-300 font-mono break-all">
+                      username:password:totp_secret
+                    </code>
+                  </>
+                )}
               </div>
 
               <textarea
                 value={cookieText}
                 onChange={(e) => setCookieText(e.target.value)}
                 rows={5}
-                placeholder={'user1|pass1|token1|[{"name":"sessionid","value":"...","domain":".instagram.com"}]|email@example.com'}
+                placeholder={comboFormat === 'accsmarket'
+                  ? 'user1:pass1:TOTPSECRET\nuser2:pass2:TOTPSECRET'
+                  : 'user1|pass1|token1|[{"name":"sessionid","value":"...","domain":".instagram.com"}]|email@example.com'}
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-[10px] text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 mb-2 resize-none font-mono leading-tight"
               />
 

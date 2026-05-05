@@ -791,6 +791,7 @@ export function registerAccountHandlers(): void {
       token:     string
       cookies:   unknown[]
       email:     string
+      totp_secret?: string
       group_name?: string | null
     }>,
     options?: {
@@ -918,6 +919,7 @@ export function registerAccountHandlers(): void {
         stampUA(account.id)
         stampDeviceIds(account.id, username)
         if (row.group_name) updateAccountGroup(account.id, row.group_name)
+        if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)
         createAndSaveFingerprint(account.id)
 
         // ── Cookie sanitize + UA 選択 + Probe ──────────────────────────────
