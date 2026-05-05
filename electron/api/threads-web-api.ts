@@ -1622,12 +1622,32 @@ export async function postStory(
   imagePath:   string,
   linkSticker?: StoryLinkSticker,
 ): Promise<{ success: boolean; status?: number; mediaId?: string; error?: string }> {
-  // instagrapi (Python) 経由でストーリー投稿
-  const ig = await getIgCookieHeaders(accountId)
-  if (!ig) return { success: false, error: 'instagram.com sessionid not found' }
-
   const acct = getAccountById(accountId)
   if (!acct) return { success: false, error: 'アカウントが見つかりません' }
+
+  // ── 1st: Playwright 経路（Python不要、配布版で確実に動く）──────────────────
+  console.log(`[postStory] account=${accountId} trying Playwright route first`)
+  try {
+    const { postStoryViaPlaywright } = await import('../playwright/story-post')
+    const pwResult = await postStoryViaPlaywright(accountId, imagePath, linkSticker)
+    if (pwResult.success) {
+      console.log(`[postStory] account=${accountId} Playwright success`)
+      return pwResult
+    }
+    console.warn(`[postStory] account=${accountId} Playwright failed: ${pwResult.error}`)
+  } catch (pwErr) {
+    console.warn(`[postStory] account=${accountId} Playwright error: ${pwErr instanceof Error ? pwErr.message : pwErr}`)
+  }
+
+  // ── 2nd: Python (instagrapi) フォールバック ────────────────────────────────
+  // Python3 の存在確認
+  const hasPython = await checkPythonAvailable()
+  if (!hasPython) {
+    console.warn(`[postStory] account=${accountId} Python3 not found, skipping Python fallback`)
+    return { success: false, error: 'Playwright経路で失敗、Python3が見つからないためフォールバック不可' }
+  }
+
+  console.log(`[postStory] account=${accountId} falling back to Python (instagrapi)`)
 
   const allCookies = await session.fromPartition(`persist:account-${accountId}`).cookies.get({}).catch(() => [])
   const sessionid = allCookies.find(c => c.name === 'sessionid' && c.domain?.includes('instagram.com'))?.value
@@ -1642,18 +1662,15 @@ export async function postStory(
   const path = await import('path')
   const { app } = await import('electron')
 
-  // Python スクリプトのパスを解決（dev: electron/scripts, prod: extraResources/scripts）
   const isDev = !app.isPackaged
   const scriptPath = isDev
     ? path.join(app.getAppPath(), 'electron', 'scripts', 'story_post.py')
     : path.join(process.resourcesPath, 'scripts', 'story_post.py')
 
-  // 追加 Cookie（mid, ig_did, rur）
   const mid   = allCookies.find(c => c.name === 'mid'    && c.domain?.includes('instagram.com'))?.value
   const igDid = allCookies.find(c => c.name === 'ig_did' && c.domain?.includes('instagram.com'))?.value
   const rur   = allCookies.find(c => c.name === 'rur'    && c.domain?.includes('instagram.com'))?.value
 
-  // デバイスID lazy生成（初回ストーリー投稿時に device_id と共に確定する）
   lazyEnsureDeviceIds(accountId)
   const freshAcct = getAccountById(accountId)
 
@@ -1668,16 +1685,13 @@ export async function postStory(
   if (igDid) args.push('--ig_did', igDid)
   if (rur)   args.push('--rur', rur)
 
-  // 永続化デバイスID（通常投稿と整合させる）
   if (freshAcct?.device_id)   args.push('--device_id',   freshAcct.device_id)
   if (freshAcct?.device_uuid) args.push('--device_uuid', freshAcct.device_uuid)
   if (freshAcct?.phone_id)    args.push('--phone_id',    freshAcct.phone_id)
   if (freshAcct?.adid)        args.push('--adid',        freshAcct.adid)
 
-  // Instagram アプリ UA（instagrapi はモバイルアプリ UA を期待する）
   args.push('--ua', getBrowserUA())
 
-  // プロキシ
   if (acct.proxy_url) {
     let proxyForPython = acct.proxy_url
     if (acct.proxy_username) {
@@ -1689,7 +1703,6 @@ export async function postStory(
     args.push('--proxy', proxyForPython)
   }
 
-  // リンクスタンプ
   if (linkSticker?.url) {
     args.push('--link_url', linkSticker.url)
     args.push('--link_x', String(linkSticker.x ?? 0.5))
@@ -1717,6 +1730,20 @@ export async function postStory(
     })
     proc.on('error', (err) => {
       resolve({ success: false, error: `python spawn error: ${err.message}` })
+    })
+  })
+}
+
+/** Python3 が利用可能か確認（キャッシュ付き） */
+let _pythonAvailable: boolean | null = null
+async function checkPythonAvailable(): Promise<boolean> {
+  if (_pythonAvailable !== null) return _pythonAvailable
+  const { execFile } = await import('child_process')
+  return new Promise((resolve) => {
+    execFile('python3', ['--version'], { timeout: 5000 }, (err) => {
+      _pythonAvailable = !err
+      if (!_pythonAvailable) console.log('[postStory] python3 not found on this system')
+      resolve(_pythonAvailable)
     })
   })
 }
