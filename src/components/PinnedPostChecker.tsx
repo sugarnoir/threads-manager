@@ -106,6 +106,23 @@ export function PinnedPostChecker({ accounts, onComplete }: Props) {
               </div>
             )}
 
+            {result.no_pin > 0 && (
+              <details className="mb-4">
+                <summary className="text-zinc-400 text-xs cursor-pointer hover:text-zinc-300">
+                  ピン無し垢を表示 ({result.no_pin}垢)
+                </summary>
+                <div className="mt-2 bg-zinc-800/40 border border-zinc-700/40 rounded-lg p-3 max-h-40 overflow-y-auto">
+                  <div className="space-y-0.5">
+                    {accounts
+                      .filter(a => a.status === 'active' && !a.pinned_post_url && a.pinned_checked_at)
+                      .map(a => (
+                        <p key={a.id} className="text-zinc-400 text-[11px] font-mono">@{a.username}</p>
+                      ))}
+                  </div>
+                </div>
+              </details>
+            )}
+
             <button
               onClick={() => setShowResult(false)}
               className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-sm transition-colors"
