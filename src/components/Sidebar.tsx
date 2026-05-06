@@ -240,7 +240,6 @@ export function Sidebar({
   const [acctNewGroupName,      setAcctNewGroupName]      = useState('')
   // 一括削除
   const [bulkDeleting, setBulkDeleting] = useState(false)
-  const [showBulkConfirm, setShowBulkConfirm] = useState(false)
   // Cookieログインインポート用
   const [cookieText,         setCookieText]         = useState('')
   const [cookieGroupSel,     setCookieGroupSel]     = useState<string>('__none__')
@@ -914,7 +913,19 @@ export function Sidebar({
           >解除</button>
           <div className="flex-1" />
           <button
-            onClick={() => setShowBulkConfirm(true)}
+            onClick={async () => {
+              if (!confirm(`${selectedIds.size}件のアカウントを削除しますか？\nこの操作は取り消せません。`)) return
+              setBulkDeleting(true)
+              try {
+                await api.accounts.bulkDelete([...selectedIds])
+                setSelectedIds(new Set())
+                window.dispatchEvent(new CustomEvent('accounts-changed'))
+              } catch (err) {
+                alert(`削除エラー: ${err instanceof Error ? err.message : err}`)
+              } finally {
+                setBulkDeleting(false)
+              }
+            }}
             disabled={bulkDeleting}
             className="px-2 py-0.5 bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white text-[10px] font-semibold rounded transition-colors"
           >
@@ -923,42 +934,6 @@ export function Sidebar({
         </div>
       )}
 
-      {/* ── 一括削除確認ダイアログ ── */}
-      {showBulkConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowBulkConfirm(false)}>
-          <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 w-[360px] shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-red-400 font-bold text-sm mb-2">一括削除の確認</h3>
-            <p className="text-zinc-400 text-xs mb-3">以下の {selectedIds.size} 件を削除します。この操作は取り消せません。</p>
-            <div className="bg-zinc-800 rounded-lg p-2 mb-3 max-h-40 overflow-y-auto">
-              {accounts.filter(a => selectedIds.has(a.id)).map(a => (
-                <p key={a.id} className="text-zinc-300 text-[11px] font-mono">@{a.username}</p>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowBulkConfirm(false)}
-                className="flex-1 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-sm transition-colors"
-              >キャンセル</button>
-              <button
-                onClick={async () => {
-                  setShowBulkConfirm(false)
-                  setBulkDeleting(true)
-                  try {
-                    await api.accounts.bulkDelete([...selectedIds])
-                    setSelectedIds(new Set())
-                    window.dispatchEvent(new CustomEvent('accounts-changed'))
-                  } catch (err) {
-                    alert(`削除エラー: ${err instanceof Error ? err.message : err}`)
-                  } finally {
-                    setBulkDeleting(false)
-                  }
-                }}
-                className="flex-1 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-semibold transition-colors"
-              >削除する</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Account list ── */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
