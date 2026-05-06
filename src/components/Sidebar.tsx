@@ -1182,6 +1182,12 @@ export function Sidebar({
                           {account.pinned_checked_at && !account.pinned_post_url && (
                             <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-500 text-[8px] font-bold leading-tight" title={`ピン投稿なし (${account.pinned_checked_at ?? ''})`}>ピン無</span>
                           )}
+                          {account.paused_until === '永続' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-red-600/30 text-red-400 text-[8px] font-bold leading-tight" title={account.pause_reason ?? '永久停止'}>⏸停止</span>
+                          )}
+                          {account.paused_until && account.paused_until !== '永続' && new Date(account.paused_until) > new Date() && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-amber-600/20 text-amber-400 text-[8px] font-bold leading-tight" title={`${account.pause_reason ?? ''} (${account.paused_until}まで)`}>⏸</span>
+                          )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">
                           @{account.username}

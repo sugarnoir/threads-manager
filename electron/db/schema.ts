@@ -340,6 +340,15 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('giveup')) {
     db.exec("ALTER TABLE accounts ADD COLUMN giveup INTEGER DEFAULT 0")
   }
+  if (!colNames.includes('paused_until')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN paused_until TEXT")  // null=通常, '永続'=永久停止, ISO日時=一時停止
+  }
+  if (!colNames.includes('pause_reason')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN pause_reason TEXT")
+  }
+  if (!colNames.includes('consecutive_failures')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN consecutive_failures INTEGER DEFAULT 0")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]

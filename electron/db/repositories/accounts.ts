@@ -38,6 +38,9 @@ export interface Account {
   next_login_attempt_at: string | null
   login_attempt_count: number
   giveup: number
+  paused_until: string | null
+  pause_reason: string | null
+  consecutive_failures: number
   created_at: string
   updated_at: string
 }
@@ -196,6 +199,31 @@ export function updateReplyBanStatus(id: number, status: 'ok' | 'banned', checke
   getDb()
     .prepare("UPDATE accounts SET reply_ban_status = ?, reply_ban_checked_at = ?, updated_at = datetime('now') WHERE id = ?")
     .run(status, checkedAt, id)
+}
+
+export function pauseAccount(id: number, until: string, reason: string): void {
+  getDb()
+    .prepare("UPDATE accounts SET paused_until = ?, pause_reason = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(until, reason, id)
+}
+
+export function unpauseAccount(id: number): void {
+  getDb()
+    .prepare("UPDATE accounts SET paused_until = NULL, pause_reason = NULL, consecutive_failures = 0, updated_at = datetime('now') WHERE id = ?")
+    .run(id)
+}
+
+export function incrementFailures(id: number): number {
+  const db = getDb()
+  db.prepare("UPDATE accounts SET consecutive_failures = consecutive_failures + 1, updated_at = datetime('now') WHERE id = ?").run(id)
+  const row = db.prepare("SELECT consecutive_failures FROM accounts WHERE id = ?").get(id) as { consecutive_failures: number } | undefined
+  return row?.consecutive_failures ?? 0
+}
+
+export function resetFailures(id: number): void {
+  getDb()
+    .prepare("UPDATE accounts SET consecutive_failures = 0, updated_at = datetime('now') WHERE id = ?")
+    .run(id)
 }
 
 export function updateProbeStatus(

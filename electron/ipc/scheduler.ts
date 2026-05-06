@@ -29,6 +29,7 @@ import { createEngagement } from '../db/repositories/engagements'
 import { sendPost } from './post'
 import { apiPostText, apiPostWithMedia, fetchFollowerCount } from '../api/threads-web-api'
 import { shouldSkipForStatus } from '../lib/account-guard'
+import { handlePostResult } from '../lib/post-failure-handler'
 import { resolveImagePaths } from '../utils/image-download'
 import { apiGetUserId, apiGetUserPosts, apiLikePost, apiFollowUser, apiReplyToPost, apiFetchNotifications } from '../api/threads-engage-api'
 import {
@@ -721,6 +722,12 @@ export function startScheduler(win: BrowserWindow): void {
             next_at:          nextAt,
             last_executed_at: execTime.toISOString(),
           })
+
+          // 投稿失敗時の自動停止判定
+          const acctForGuard = getAccountById(config.account_id)
+          if (acctForGuard) {
+            handlePostResult(config.account_id, acctForGuard.username, result.success, result.error)
+          }
 
           const fmt = (d: Date) => d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour12: false })
           console.log(

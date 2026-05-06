@@ -36,6 +36,9 @@ export interface Account {
   next_login_attempt_at: string | null
   login_attempt_count: number
   giveup: number
+  paused_until: string | null
+  pause_reason: string | null
+  consecutive_failures: number
   created_at: string
   updated_at: string
 }

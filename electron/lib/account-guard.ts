@@ -1,10 +1,12 @@
 /**
  * アカウントステータスによる投稿ガード
  *
- * 全投稿経路で共通利用。将来の { force?: boolean } 拡張を想定した設計。
+ * 全投稿経路で共通利用。
+ * ステータスチェック + paused_until チェックの統合。
  */
 
 import type { Account } from '../db/repositories/accounts'
+import { unpauseAccount } from '../db/repositories/accounts'
 
 const STATUS_REASONS: Record<string, string> = {
   challenge:   'チャレンジ認証が必要です',
@@ -21,15 +23,28 @@ export interface GuardResult {
 
 /**
  * アカウントが投稿可能かチェック。
- * @param account アカウント情報
- * @param options 将来拡張用（force?: boolean）
- * @returns skip=true ならスキップすべき、reason にスキップ理由
+ * 1. paused_until による停止チェック（期限切れなら自動再開）
+ * 2. status による投稿可否チェック
  */
 export function shouldSkipForStatus(
-  account: Pick<Account, 'status' | 'username'>,
+  account: Pick<Account, 'id' | 'status' | 'username' | 'paused_until' | 'pause_reason'>,
   _options?: { force?: boolean },
 ): GuardResult {
-  // 将来: if (_options?.force) return { skip: false }
+  // 1. 停止チェック
+  if (account.paused_until) {
+    if (account.paused_until === '永続') {
+      return { skip: true, reason: `永久停止中: ${account.pause_reason ?? '不明'}` }
+    }
+    const until = new Date(account.paused_until)
+    if (until > new Date()) {
+      const remainMin = Math.ceil((until.getTime() - Date.now()) / 60_000)
+      return { skip: true, reason: `一時停止中 (残り${remainMin}分): ${account.pause_reason ?? ''}` }
+    }
+    // 期限切れ → 自動再開
+    unpauseAccount(account.id)
+  }
+
+  // 2. ステータスチェック
   if (account.status === 'active') {
     return { skip: false }
   }
