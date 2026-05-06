@@ -432,6 +432,7 @@ declare global {
         check: (id: number) => Promise<{ status: string; message?: string }>
         checkAll: () => Promise<{ success: boolean }>
         delete: (id: number) => Promise<{ success: boolean }>
+        bulkDelete: (ids: number[]) => Promise<{ ok: boolean; deletedCount?: number; errors?: { id: number; error: string }[] }>
         fingerprint: (id: number) => Promise<FingerprintData | null>
         proxyUrlCounts: () => Promise<Record<string, number>>
         proxyPortStats: () => Promise<Array<{

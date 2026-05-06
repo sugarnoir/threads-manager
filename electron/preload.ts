@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     check: (id: number) => ipcRenderer.invoke('accounts:check', id),
     checkAll: () => ipcRenderer.invoke('accounts:check-all'),
     delete: (id: number) => ipcRenderer.invoke('accounts:delete', id),
+    bulkDelete: (ids: number[]) => ipcRenderer.invoke('accounts:bulk-delete', ids),
     fingerprint: (id: number) => ipcRenderer.invoke('accounts:fingerprint', id),
     autoRegister: (data: {
       name: string; email: string; password: string

@@ -721,6 +721,33 @@ export function registerAccountHandlers(): void {
     return { success: true }
   })
 
+  ipcMain.handle('accounts:bulk-delete', async (_event, ids: number[]) => {
+    const errors: Array<{ id: number; error: string }> = []
+    let deletedCount = 0
+
+    for (const id of ids) {
+      try {
+        const account = getAccountById(id)
+        await closeContext(id)
+        if (account?.session_dir) {
+          try { fs.rmSync(account.session_dir, { recursive: true, force: true }) } catch { /* */ }
+        }
+        setSetting(`session_cookies_${id}`, '')
+        try {
+          const sess = session.fromPartition(`persist:account-${id}`)
+          await sess.clearStorageData()
+        } catch { /* */ }
+        try { getViewManager().closeView(id) } catch { /* */ }
+        deleteAccount(id)
+        deletedCount++
+      } catch (err) {
+        errors.push({ id, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+
+    return { ok: errors.length === 0, deletedCount, errors }
+  })
+
   ipcMain.handle('accounts:fingerprint', (_event, id: number) => {
     const json = getAccountFingerprint(id)
     if (!json) return null
