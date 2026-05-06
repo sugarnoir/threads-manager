@@ -1159,23 +1159,6 @@ export function Sidebar({
                         ⠿
                       </span>
 
-                      {/* チェックボックス */}
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(account.id)}
-                        onChange={(e) => {
-                          e.stopPropagation()
-                          setSelectedIds(prev => {
-                            const next = new Set(prev)
-                            if (next.has(account.id)) next.delete(account.id)
-                            else next.add(account.id)
-                            return next
-                          })
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        className="shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer"
-                      />
-
                       {/* 番号バッジ */}
                       {showNumbers && (
                         <span className="shrink-0 w-6 text-center text-[10px] font-mono font-semibold text-zinc-500 leading-none tabular-nums">
