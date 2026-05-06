@@ -460,12 +460,15 @@ export function registerAccountHandlers(): void {
           proxyUser = row.proxy_user ?? undefined
           proxyPass = row.proxy_pass ?? undefined
         } else if (proxyMode === 'auto' && autoProxyHost && allPorts.length > 0) {
-          // CSV にプロキシなし + auto モード → 使用数が少ないポートを割り当て
-          const portEntry = allPorts[i % allPorts.length]
-          proxyUrl  = `${autoProxyType}://${autoProxyHost}:${portEntry.port}`
+          // CSV にプロキシなし + auto モード → 未使用優先、少使用フォールバック
+          const minCount = Math.min(...allPorts.map(p => p.count))
+          const candidates = allPorts.filter(p => p.count === minCount)
+          const pick = candidates[Math.floor(Math.random() * candidates.length)]
+          pick.count++
+          proxyUrl  = `${autoProxyType}://${autoProxyHost}:${pick.port}`
           proxyUser = autoProxyUsername ?? undefined
           proxyPass = autoProxyPassword ?? undefined
-          console.log(`[bulk-import] row[${i}] auto proxy=${proxyUrl} (was ${portEntry.count}垢)`)
+          console.log(`[bulk-import] row[${i}] auto proxy=${proxyUrl} (was ${pick.count - 1}垢→${pick.count}垢)`)
         }
         // proxyMode === 'none' or no host → proxyUrl は undefined
 
@@ -913,12 +916,15 @@ export function registerAccountHandlers(): void {
         continue
       }
 
-      // プロキシ割り当て
+      // プロキシ割り当て: 未使用優先 → 少使用フォールバック
       let assignedProxyUrl: string | undefined
       if (proxyMode === 'auto' && proxyHost && allPorts.length > 0) {
-        const portEntry = allPorts[i % allPorts.length]
-        assignedProxyUrl = `${proxyType}://${proxyHost}:${portEntry.port}`
-        console.log(`[import-cookie-login] row[${i}] auto proxy=${assignedProxyUrl} (was ${portEntry.count}垢)`)
+        const minCount = Math.min(...allPorts.map(p => p.count))
+        const candidates = allPorts.filter(p => p.count === minCount)
+        const pick = candidates[Math.floor(Math.random() * candidates.length)]
+        pick.count++ // 同バッチ内での重複割り当てを防ぐ
+        assignedProxyUrl = `${proxyType}://${proxyHost}:${pick.port}`
+        console.log(`[import-cookie-login] row[${i}] auto proxy=${assignedProxyUrl} (was ${pick.count - 1}垢→${pick.count}垢)`)
       } else if (proxyMode === 'manual' && proxyHost && options?.proxyStartPort) {
         const port = options.proxyStartPort + i
         assignedProxyUrl = `${proxyType}://${proxyHost}:${port}`
