@@ -374,6 +374,7 @@ export function registerAccountHandlers(): void {
         proxy_user:  string | null
         proxy_pass:  string | null
         proxy_type?: string | null
+        totp_secret?: string
         group_name?: string | null
       }>,
       options?: {
@@ -491,6 +492,7 @@ export function registerAccountHandlers(): void {
           stampUA(account.id)
           stampDeviceIds(account.id, username)
           if (row.group_name) updateAccountGroup(account.id, row.group_name)
+          if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)
           createAndSaveFingerprint(account.id)
           updateAccountStatus(account.id, 'needs_login')
           results.imported++

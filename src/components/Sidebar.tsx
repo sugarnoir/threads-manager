@@ -233,9 +233,8 @@ export function Sidebar({
 
   // CSVインポートのモード（ストック or アカウント）
   const [csvMode, setCsvMode] = useState<'stock' | 'account' | 'cookie' | 'topic'>('stock')
-  // アカウント一括インポート用: 連番ポート
-  const [acctSequentialPort,    setAcctSequentialPort]    = useState(false)
-  const [acctSequentialStart,   setAcctSequentialStart]   = useState('')
+  // アカウント一括インポート用
+  const [acctText,              setAcctText]              = useState('')
   const [acctGroupSel,          setAcctGroupSel]          = useState<string>('__none__')
   const [acctNewGroupName,      setAcctNewGroupName]      = useState('')
   // 一括削除
@@ -358,8 +357,8 @@ export function Sidebar({
 
   // ── アカウント一括インポート (CSV) ───────────────────────────────────────
   const handleAccountBulkImport = async () => {
-    const fileResult = await api.dialog.openFile()
-    if (!fileResult) return
+    const text = acctText.trim()
+    if (!text) { showCsvToast('テキストを入力してください', false); return }
 
     // グループ決定
     let targetGroup: string | null = null
@@ -375,66 +374,75 @@ export function Sidebar({
 
     setCsvImporting(true)
     try {
-      let matrix: string[][]
-      const buf = new Uint8Array(fileResult.data)
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
 
-      if (fileResult.name.endsWith('.xlsx')) {
-        const wb = XLSX.read(buf, { type: 'array' })
-        const ws = wb.Sheets[wb.SheetNames[0]]
-        matrix = (XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][])
-          .filter(row => row.some(cell => String(cell).trim() !== ''))
-          .map(row => row.map(cell => String(cell)))
-      } else {
-        const text = new TextDecoder().decode(buf)
-        const result = Papa.parse(text, { delimiter: ',', skipEmptyLines: true })
-        matrix = result.data as string[][]
+      // ヘッダー行���キップ
+      const first = lines[0].toLowerCase()
+      const dataLines = (first.startsWith('username') || first.startsWith('user')) ? lines.slice(1) : lines
+
+      // 区切り文字自動判定: pipe or comma or colon
+      const detectDelim = (line: string): string => {
+        if (line.includes('|')) return '|'
+        if (line.includes(',')) return ','
+        if (line.includes(':')) return ':'
+        return ','
       }
-      if (matrix.length === 0) { showCsvToast('空のCSVです', false); return }
+      const delim = detectDelim(dataLines[0] ?? '')
 
-      // 1行目がヘッダーの場合は除外
-      const firstRow = matrix[0].map(c => c.trim().toLowerCase())
-      const hasHeader = firstRow.includes('username') || firstRow[0] === 'username'
-      const dataRows = hasHeader ? matrix.slice(1) : matrix
-
-      // 連番ポート
-      const seqStartPort = acctSequentialPort ? parseInt(acctSequentialStart, 10) : NaN
-      if (acctSequentialPort && (!Number.isFinite(seqStartPort) || seqStartPort <= 0)) {
-        showCsvToast('連番の開始ポートが無効です', false)
-        return
-      }
-
-      const payload = dataRows.map((row, i) => {
-        const username = (row[0] ?? '').trim()
-        const password = (row[1] ?? '').trim() || null
-        const proxy_host = (row[2] ?? '').trim() || null
+      const payload = dataLines.map(line => {
+        const parts = line.split(delim).map(s => s.trim())
+        const username = parts[0] ?? ''
+        const password = parts[1] ?? null
+        // 3番目: proxy_host or totp_secret を判定
+        const third = parts[2] ?? ''
+        let proxy_host: string | null = null
         let proxy_port: number | null = null
-        if (acctSequentialPort && proxy_host) {
-          proxy_port = seqStartPort + i
-        } else {
-          const p = parseInt((row[3] ?? '').trim(), 10)
+        let proxy_user: string | null = null
+        let proxy_pass: string | null = null
+        let totp_secret: string | undefined
+
+        if (third && /^\d+$/.test(third)) {
+          // 数字のみ → port (前の列が host)
+          proxy_host = parts[1] ?? null
+          proxy_port = parseInt(third, 10)
+          proxy_user = (parts[3] ?? '').trim() || null
+          proxy_pass = (parts[4] ?? '').trim() || null
+        } else if (third && third.length >= 16 && /^[A-Z2-7=]+$/i.test(third)) {
+          // Base32 → TOTP secret
+          totp_secret = third
+        } else if (third && third.includes('.')) {
+          // ドット含む → proxy host
+          proxy_host = third
+          const p = parseInt(parts[3] ?? '', 10)
           proxy_port = Number.isFinite(p) && p > 0 ? p : null
+          proxy_user = (parts[4] ?? '').trim() || null
+          proxy_pass = (parts[5] ?? '').trim() || null
         }
-        const proxy_user = (row[4] ?? '').trim() || null
-        const proxy_pass = (row[5] ?? '').trim() || null
+
         return {
           username,
-          password,
+          password: password || null,
           proxy_host,
           proxy_port,
           proxy_user,
           proxy_pass,
+          totp_secret,
           group_name: targetGroup,
         }
       }).filter(r => r.username)
 
       if (payload.length === 0) { showCsvToast('インポート対象の行がありません', false); return }
 
-      const res = await api.accounts.bulkImport(payload)
-      const parts = [`${res.imported}件追加`]
-      if (res.skipped > 0)       parts.push(`スキップ(重複): ${res.skipped}件`)
-      if (res.errors.length > res.skipped) parts.push(`エラー: ${res.errors.length - res.skipped}件`)
-      showCsvToast(parts.join(' / '), res.imported > 0)
-      setCsvPanelOpen(false)
+      const res = await api.accounts.bulkImport(payload, { proxyMode: 'auto' })
+      const parts2 = [`${res.imported}件追加`]
+      if (res.skipped > 0) parts2.push(`スキップ(重複): ${res.skipped}件`)
+      if (res.errors.length > res.skipped) parts2.push(`エラー: ${res.errors.length - res.skipped}件`)
+      showCsvToast(parts2.join(' / '), res.imported > 0)
+      if (res.imported > 0) {
+        setAcctText('')
+        setCsvPanelOpen(false)
+        window.dispatchEvent(new CustomEvent('accounts-changed'))
+      }
       if (res.imported > 0) window.dispatchEvent(new CustomEvent('accounts-changed'))
     } catch (err) {
       showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
@@ -1376,15 +1384,23 @@ export function Sidebar({
           {csvMode === 'account' && (
             <>
               <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
-                <p className="text-zinc-300 text-[10px] font-semibold mb-1">CSVフォーマット</p>
-                <code className="block text-[9px] leading-tight text-emerald-300 font-mono whitespace-pre">
-                  username,password,{'\n'}proxy_host,proxy_port,{'\n'}proxy_user,proxy_pass
+                <p className="text-zinc-300 text-[10px] font-semibold mb-1">対応フォーマット（1行1垢、自動判定）</p>
+                <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono whitespace-pre-wrap break-all">
+                  username,password{'\n'}username,password,totp_secret{'\n'}username|password|totp_secret{'\n'}username:password:totp_secret
                 </code>
-                <p className="text-zinc-500 text-[9px] leading-tight mt-1.5">
-                  1行目がヘッダー行の場合は自動判定。<br/>
-                  パスワード・プロキシは省略可。
+                <p className="text-zinc-500 text-[9px] leading-tight mt-1">
+                  区切り: カンマ / パイプ / コロン 自動判定。<br/>
+                  プロキシは自動割り当て（未使用ポート優先）。
                 </p>
               </div>
+
+              <textarea
+                value={acctText}
+                onChange={e => setAcctText(e.target.value)}
+                rows={5}
+                placeholder={'user1,pass1,TOTPSECRET\nuser2,pass2\nuser3|pass3|TOTP'}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-[10px] text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 mb-2 resize-none font-mono leading-tight"
+              />
 
               <label className="block text-zinc-500 text-[10px] mb-1">追加先グループ</label>
               <select
@@ -1408,40 +1424,15 @@ export function Sidebar({
                 />
               )}
 
-              {/* 連番ポートオプション */}
-              <label className="flex items-center gap-1.5 mb-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={acctSequentialPort}
-                  onChange={e => setAcctSequentialPort(e.target.checked)}
-                  className="accent-blue-500"
-                />
-                <span className="text-zinc-300 text-[10px]">ポートを連番生成（CSVのport列を無視）</span>
-              </label>
-              {acctSequentialPort && (
-                <input
-                  type="number"
-                  value={acctSequentialStart}
-                  onChange={e => setAcctSequentialStart(e.target.value)}
-                  placeholder="開始ポート (例: 10001)"
-                  className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2 placeholder-zinc-600"
-                />
-              )}
-
               <button
                 onClick={handleAccountBulkImport}
-                disabled={
-                  csvImporting ||
-                  (acctGroupSel === '__new__' && !acctNewGroupName.trim()) ||
-                  (acctSequentialPort && !acctSequentialStart.trim())
-                }
+                disabled={csvImporting || !acctText.trim() || (acctGroupSel === '__new__' && !acctNewGroupName.trim())}
                 className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
               >
-                {csvImporting ? '読込中...' : 'ファイルを選択'}
+                {csvImporting ? 'インポート中...' : 'インポート実行'}
               </button>
               <p className="text-zinc-600 text-[9px] mt-1.5 leading-tight">
-                ※ インポートしたアカウントはログイン未完了状態になります。<br/>
-                サイドバーから個別にログインしてください。
+                ※ needs_login 状態で登録。プロキシは自動割り���て。
               </p>
             </>
           )}
