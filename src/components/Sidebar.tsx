@@ -475,6 +475,15 @@ export function Sidebar({
 
       if (payload.length === 0) { showCsvToast('有効な行がありません', false); return }
 
+      // プロキシなし警告
+      if (cookieProxyMode === 'none') {
+        if (!confirm(
+          `${payload.length}垢をプロキシなしでインポートします。\n` +
+          `自宅IPでログイ��するとIP特定リスクがあります。\n\n` +
+          `続行しますか？`
+        )) return
+      }
+
       console.log(`[CookieImport] payload count=${payload.length}`)
       payload.forEach((p, i) => console.log(`[CookieImport] [${i}] user=${p.username} pw=${p.password?.slice(0,4)}... cookies=${p.cookies?.length} email=${p.email}`))
 

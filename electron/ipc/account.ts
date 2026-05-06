@@ -1000,6 +1000,7 @@ export function registerAccountHandlers(): void {
           console.log(`[import-cookie-login] row[${i}] session dead, skipping WebView`)
           updateAccountStatus(account.id, 'needs_login')
           results.imported++
+          if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
           continue
         }
 
@@ -1037,6 +1038,11 @@ export function registerAccountHandlers(): void {
         } else {
           results.errors.push({ username, message: msg })
         }
+      }
+
+      // レート制限対策: 垢間に 2-3秒待機
+      if (i < rows.length - 1) {
+        await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
       }
     }
 
