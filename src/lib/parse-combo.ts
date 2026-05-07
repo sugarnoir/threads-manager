@@ -2,12 +2,13 @@
  * アカウントコンボのパーサー
  *
  * 対応フォーマット:
- * - npprteam: username|password|token|[cookies JSON]|email (pipe区切り、cookie あり)
- * - accsmarket: username:password:totp_secret (colon区切り、cookie なし)
- * - auto: 区切り文字とフィールド数から自動検出
+ * - cookie-pipe: username|password|token|[cookies JSON]|email
+ * - simple-colon: username:password:totp_secret
+ * - mobile-session: [user:pass:2fa]|[UA]|[DeviceIDs]|[Headers]|[ID]
+ * - auto: 自動検出
  */
 
-export type ComboFormat = 'npprteam' | 'accsmarket' | 'auto'
+export type ComboFormat = 'npprteam' | 'accsmarket' | 'mobile-session' | 'auto'
 
 export interface AccountInput {
   username: string
@@ -16,6 +17,13 @@ export interface AccountInput {
   cookies: unknown[]
   email: string
   totpSecret: string
+  // モバイルセッション情報 (mobile-session 形式)
+  userAgent?: string
+  deviceId?: string
+  deviceUuid?: string
+  phoneId?: string
+  adid?: string
+  mobileHeaders?: Record<string, string>
 }
 
 /**
@@ -25,21 +33,30 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
   if (lines.length === 0) return []
 
-  const effectiveFormat = format === 'auto' ? detectFormat(lines[0]) : format
-
   return lines
-    .map(line => effectiveFormat === 'npprteam' ? parseNpprteam(line) : parseAccsmarket(line))
+    .map(line => {
+      const fmt = format === 'auto' ? detectFormat(line) : format
+      if (fmt === 'mobile-session') return parseMobileSession(line)
+      if (fmt === 'npprteam') return parseCookiePipe(line)
+      return parseSimpleColon(line)
+    })
     .filter((r): r is AccountInput => r !== null)
 }
 
 /**
- * 最初の行から自動検出。
- * - [ が含まれる or | が2つ以上 → npprteam
- * - : が2つ以上 → accsmarket
- * - | が含まれる → npprteam
- * - fallback → accsmarket
+ * 行ごとに自動検出。
+ * - 列2が "Instagram " で始まる → mobile-session
+ * - [ が含まれる → cookie-pipe (npprteam)
+ * - | が2つ以上 → mobile-session or cookie-pipe を列2で判定
+ * - : が2つ以上 → simple-colon
  */
-export function detectFormat(line: string): 'npprteam' | 'accsmarket' {
+export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' {
+  // mobile-session: パイプ区切りで列2が "Instagram " で始まる
+  const pipeParts = line.split('|')
+  if (pipeParts.length >= 4 && (pipeParts[1] ?? '').trim().startsWith('Instagram ')) {
+    return 'mobile-session'
+  }
+
   if (line.includes('[')) return 'npprteam'
   const pipes = (line.match(/\|/g) || []).length
   const colons = (line.match(/:/g) || []).length
@@ -50,9 +67,9 @@ export function detectFormat(line: string): 'npprteam' | 'accsmarket' {
 }
 
 /**
- * npprteam フォーマット: username|password|token|[cookies JSON]|email
+ * Cookie pipe フォーマット: username|password|token|[cookies JSON]|email
  */
-function parseNpprteam(line: string): AccountInput | null {
+function parseCookiePipe(line: string): AccountInput | null {
   const bracketStart = line.indexOf('[')
   const bracketEnd = line.lastIndexOf(']')
 
@@ -84,48 +101,83 @@ function parseNpprteam(line: string): AccountInput | null {
 }
 
 /**
- * AccsMarket フォーマット: username:password:totp_secret
- * バリエーション:
- * - username:password:totp
- * - username:password
- * - email:username:password:totp
+ * Simple colon フォーマット: username:password:totp_secret
  */
-function parseAccsmarket(line: string): AccountInput | null {
+function parseSimpleColon(line: string): AccountInput | null {
   const parts = line.split(':').map(s => s.trim())
 
   if (parts.length >= 4) {
-    // email:username:password:totp
-    return {
-      username: parts[1],
-      password: parts[2],
-      token: '',
-      cookies: [],
-      email: parts[0],
-      totpSecret: parts[3],
-    }
+    return { username: parts[1], password: parts[2], token: '', cookies: [], email: parts[0], totpSecret: parts[3] }
   }
   if (parts.length === 3) {
-    // username:password:totp
-    return {
-      username: parts[0],
-      password: parts[1],
-      token: '',
-      cookies: [],
-      email: '',
-      totpSecret: parts[2],
-    }
+    return { username: parts[0], password: parts[1], token: '', cookies: [], email: '', totpSecret: parts[2] }
   }
   if (parts.length === 2) {
-    // username:password
-    return {
-      username: parts[0],
-      password: parts[1],
-      token: '',
-      cookies: [],
-      email: '',
-      totpSecret: '',
+    return { username: parts[0], password: parts[1], token: '', cookies: [], email: '', totpSecret: '' }
+  }
+  return null
+}
+
+/**
+ * Mobile session フォーマット (trend-sns.com 等):
+ * [user:pass:2fa]|[UA]|[device_id;uuid;phone_id;adid]|[headers]|[id]
+ *
+ * 列1: username:password:TOTP (コロン区切り、TOTP にスペース含む可能性)
+ * 列2: Instagram モバイルアプリ UA
+ * 列3: デバイスID群 (セミコロン区切り)
+ * 列4: ヘッダー/Cookie (セミコロン区切り key=value)
+ * 列5: 内部ID (無視)
+ */
+function parseMobileSession(line: string): AccountInput | null {
+  const parts = line.split('|')
+  if (parts.length < 4) return null
+
+  // 列1: username:password:2FA
+  const credParts = (parts[0] ?? '').split(':')
+  const username = (credParts[0] ?? '').trim()
+  const password = (credParts[1] ?? '').trim()
+  // TOTP: 残りを結合（コロンが含まれない場合も対応）、スペース除去
+  const totpRaw = credParts.slice(2).join(':').trim()
+  const totpSecret = totpRaw.replace(/\s+/g, '')
+
+  if (!username) return null
+
+  // 列2: User-Agent
+  const userAgent = (parts[1] ?? '').trim()
+
+  // 列3: Device IDs (セミコロン区切り)
+  const deviceParts = (parts[2] ?? '').split(';').map(s => s.trim())
+  const deviceId = deviceParts[0] || undefined
+  const deviceUuid = deviceParts[1] || undefined
+  const phoneId = deviceParts[2] || undefined
+  const adid = deviceParts[3] || undefined
+
+  // 列4: Headers/Cookies (セミコロン区切り key=value)
+  const headerStr = (parts[3] ?? '').trim()
+  const mobileHeaders: Record<string, string> = {}
+  if (headerStr) {
+    for (const pair of headerStr.split(';')) {
+      const eqIdx = pair.indexOf('=')
+      if (eqIdx > 0) {
+        const key = pair.slice(0, eqIdx).trim()
+        const val = pair.slice(eqIdx + 1).trim()
+        if (key && val) mobileHeaders[key] = val
+      }
     }
   }
 
-  return null
+  return {
+    username,
+    password,
+    token: '',
+    cookies: [],
+    email: '',
+    totpSecret,
+    userAgent: userAgent || undefined,
+    deviceId,
+    deviceUuid,
+    phoneId,
+    adid,
+    mobileHeaders: Object.keys(mobileHeaders).length > 0 ? mobileHeaders : undefined,
+  }
 }

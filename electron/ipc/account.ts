@@ -824,6 +824,12 @@ export function registerAccountHandlers(): void {
       cookies:   unknown[]
       email:     string
       totp_secret?: string
+      user_agent?: string
+      device_id?: string
+      device_uuid?: string
+      phone_id?: string
+      adid?: string
+      mobile_headers?: Record<string, string>
       group_name?: string | null
     }>,
     options?: {
@@ -944,14 +950,26 @@ export function registerAccountHandlers(): void {
         const account = createAccount({
           username,
           session_dir:    sessionDir,
-          user_agent:     pickRandomIphoneUA(),
+          user_agent:     row.user_agent || pickRandomIphoneUA(),
           ig_password:    row.password || undefined,
           proxy_url:      assignedProxyUrl,
           proxy_username: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
           proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
         })
         console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
-        stampUA(account.id)
+        // モバイルセッション付きの場合は UA とデバイスIDを上書き
+        if (row.user_agent) {
+          updateAccountUserAgent(account.id, row.user_agent)
+        } else {
+          stampUA(account.id)
+        }
+        if (row.device_id && row.device_uuid && row.phone_id && row.adid) {
+          updateAccountDeviceIds(account.id, {
+            device_id: row.device_id, device_uuid: row.device_uuid,
+            phone_id: row.phone_id, adid: row.adid,
+          })
+          console.log(`[import-cookie-login] row[${i}] device IDs set from mobile session`)
+        }
         stampDeviceIds(account.id, username)
         if (row.group_name) updateAccountGroup(account.id, row.group_name)
         if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)

@@ -478,6 +478,12 @@ export function Sidebar({
         cookies: r.cookies,
         email: r.email,
         totp_secret: r.totpSecret || undefined,
+        user_agent: r.userAgent || undefined,
+        device_id: r.deviceId || undefined,
+        device_uuid: r.deviceUuid || undefined,
+        phone_id: r.phoneId || undefined,
+        adid: r.adid || undefined,
+        mobile_headers: r.mobileHeaders || undefined,
         group_name: targetGroup,
       })).filter(r => r.username)
 
@@ -1444,12 +1450,16 @@ export function Sidebar({
                 <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono break-all">
                   username|password|token|[cookies]|email
                 </code>
-                <div className="border-t border-zinc-800 my-1.5" />
+                <div className="border-t border-zinc-800 my-1" />
                 <code className="block text-[9px] leading-relaxed text-amber-300 font-mono break-all">
                   username:password:totp_secret
                 </code>
+                <div className="border-t border-zinc-800 my-1" />
+                <code className="block text-[9px] leading-relaxed text-sky-300 font-mono break-all">
+                  user:pass:2FA|UA|DeviceIDs|Headers|ID
+                </code>
                 <p className="text-zinc-500 text-[9px] leading-tight mt-1">
-                  区切り文字 (pipe / colon) と列構成を自動判定します。
+                  区切り文字と列構成を自動判定。UA・デバイスID付きも対応。
                 </p>
               </div>
 
