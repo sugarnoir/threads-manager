@@ -986,6 +986,19 @@ export function registerAccountHandlers(): void {
         if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)
         createAndSaveFingerprint(account.id)
 
+        // ── モバイルセッション形式の場合: Cookie不要 → そのまま登録 ──────
+        const hasMobileAuth = !!(row.mobile_headers && (
+          row.mobile_headers['Authorization'] || row.mobile_headers['X-MID']
+        ))
+        if (hasMobileAuth && (!row.cookies || row.cookies.length === 0)) {
+          console.log(`[import-cookie-login] row[${i}] mobile session (no cookies) → registered as needs_login`)
+          updateAccountStatus(account.id, 'needs_login')
+          results.imported++
+          console.log(`[import-cookie-login] row[${i}] SUCCESS (mobile session) imported=${results.imported}`)
+          if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
+          continue
+        }
+
         // ── Cookie sanitize + UA 選択 + Probe ──────────────────────────────
         const inputCookies = (row.cookies ?? []).map((c: unknown) => {
           const o = c as Record<string, unknown>
