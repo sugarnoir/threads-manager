@@ -1,9 +1,11 @@
 /**
- * Authorization Bearer Token から Cookie (sessionid, ds_user_id) を抽出する。
+ * Authorization Bearer Token から Cookie (sessionid, ds_user_id 等) を抽出する。
  *
  * Token 形式: "Bearer IGT:2:{Base64}"
  * Base64 デコード結果: { "ds_user_id": "...", "sessionid": "..." }
  */
+
+import crypto from 'crypto'
 
 export interface ExtractedCookie {
   name: string
@@ -15,13 +17,30 @@ export interface ExtractedCookie {
   sameSite: string
 }
 
+function generateCsrfToken(): string {
+  return crypto.randomBytes(16).toString('hex') // 32文字の英数字
+}
+
+function generateIgDid(): string {
+  return crypto.randomUUID().toUpperCase()
+}
+
 /**
- * Authorization Bearer Token から sessionid と ds_user_id を抽出して Cookie 配列として返す。
- * パース失敗時は null。
+ * Authorization Bearer Token + モバイルヘッダーから IG Cookie セットを生成する。
+ *
+ * 生成される Cookie:
+ * - sessionid (Token から抽出)
+ * - ds_user_id (Token から抽出)
+ * - csrftoken (ランダム生成)
+ * - ig_did (ランダム生成)
+ * - mid (ヘッダーから、あれば)
+ * - rur (ヘッダーから、あれば)
  */
-export function extractCookiesFromMobileAuth(authorization: string): ExtractedCookie[] | null {
+export function extractCookiesFromMobileAuth(
+  authorization: string,
+  headers?: Record<string, string>,
+): ExtractedCookie[] | null {
   try {
-    // "Bearer IGT:2:eyJ..." → Base64 部分を取得
     const match = authorization.match(/Bearer\s+IGT:\d+:(.+)/)
     if (!match) {
       console.log('[extractCookies] Authorization does not match Bearer IGT pattern')
@@ -40,28 +59,29 @@ export function extractCookiesFromMobileAuth(authorization: string): ExtractedCo
       return null
     }
 
-    console.log(`[extractCookies] extracted ds_user_id=${dsUserId} sessionid=${sessionid.slice(0, 20)}...`)
+    const csrftoken = generateCsrfToken()
+    console.log(`[extractCookies] extracted ds_user_id=${dsUserId} sessionid=${sessionid.slice(0, 20)}... csrftoken=${csrftoken.slice(0, 8)}...`)
+
+    const base = { domain: '.instagram.com', path: '/', secure: true, sameSite: 'no_restriction' }
 
     const cookies: ExtractedCookie[] = [
-      {
-        name: 'sessionid',
-        value: sessionid,
-        domain: '.instagram.com',
-        path: '/',
-        secure: true,
-        httpOnly: true,
-        sameSite: 'no_restriction',
-      },
-      {
-        name: 'ds_user_id',
-        value: dsUserId,
-        domain: '.instagram.com',
-        path: '/',
-        secure: true,
-        httpOnly: false,
-        sameSite: 'no_restriction',
-      },
+      { ...base, name: 'sessionid',  value: sessionid, httpOnly: true },
+      { ...base, name: 'ds_user_id', value: dsUserId,  httpOnly: false },
+      { ...base, name: 'csrftoken',  value: csrftoken,  httpOnly: false },
+      { ...base, name: 'ig_did',     value: generateIgDid(), httpOnly: true },
     ]
+
+    // mid (X-MID ヘッダーから)
+    const mid = headers?.['X-MID']
+    if (mid) {
+      cookies.push({ ...base, name: 'mid', value: mid, httpOnly: true })
+    }
+
+    // rur (IG-U-RUR ヘッダーから)
+    const rur = headers?.['IG-U-RUR']
+    if (rur) {
+      cookies.push({ ...base, name: 'rur', value: rur, httpOnly: true })
+    }
 
     return cookies
   } catch (err) {

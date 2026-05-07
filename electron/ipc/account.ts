@@ -994,16 +994,8 @@ export function registerAccountHandlers(): void {
         if (hasMobileAuth && (!row.cookies || row.cookies.length === 0)) {
           const auth = row.mobile_headers?.['Authorization']
           if (auth) {
-            const extracted = extractCookiesFromMobileAuth(auth)
+            const extracted = extractCookiesFromMobileAuth(auth, row.mobile_headers)
             if (extracted && extracted.length > 0) {
-              // mid もあれば追加
-              if (row.mobile_headers?.['X-MID']) {
-                extracted.push({
-                  name: 'mid', value: row.mobile_headers['X-MID'],
-                  domain: '.instagram.com', path: '/', secure: true, httpOnly: true, sameSite: 'no_restriction',
-                })
-              }
-              // csrftoken 生成（sessionid から最初の数値部分で簡易生成はしない、空で注入）
               const permSess = session.fromPartition(`persist:account-${account.id}`)
               const hasSession = await injectCookies(extracted as RawCookie[], permSess)
               console.log(`[import-cookie-login] row[${i}] cookies extracted from Bearer token → injected: hasSession=${hasSession}`)
