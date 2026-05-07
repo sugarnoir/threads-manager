@@ -1439,55 +1439,25 @@ export function Sidebar({
 
           {csvMode === 'cookie' && (
             <>
-              {/* フォーマット選択 */}
-              <label className="block text-zinc-500 text-[10px] mb-1">フォーマット</label>
-              <div className="flex gap-0.5 bg-zinc-800/60 p-0.5 rounded-lg mb-2">
-                {([
-                  { id: 'auto'       as const, label: '自動検出' },
-                  { id: 'npprteam'   as const, label: 'npprteam' },
-                  { id: 'accsmarket' as const, label: 'AccsMarket' },
-                ]).map(opt => (
-                  <button
-                    key={opt.id}
-                    onClick={() => setComboFormat(opt.id)}
-                    className={`flex-1 py-1 text-[10px] font-semibold rounded-md transition-colors ${
-                      comboFormat === opt.id
-                        ? 'bg-violet-600 text-white'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-
               <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
-                {(comboFormat === 'auto' || comboFormat === 'npprteam') && (
-                  <>
-                    <p className="text-zinc-300 text-[10px] font-semibold mb-0.5">npprteam（pipe区切り）</p>
-                    <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono break-all">
-                      username|password|token|[cookies]|email
-                    </code>
-                  </>
-                )}
-                {comboFormat === 'auto' && <div className="border-t border-zinc-800 my-1.5" />}
-                {(comboFormat === 'auto' || comboFormat === 'accsmarket') && (
-                  <>
-                    <p className="text-zinc-300 text-[10px] font-semibold mb-0.5">AccsMarket（colon区切り）</p>
-                    <code className="block text-[9px] leading-relaxed text-amber-300 font-mono break-all">
-                      username:password:totp_secret
-                    </code>
-                  </>
-                )}
+                <p className="text-zinc-300 text-[10px] font-semibold mb-1">対応フォーマット（自動判定）</p>
+                <code className="block text-[9px] leading-relaxed text-emerald-300 font-mono break-all">
+                  username|password|token|[cookies]|email
+                </code>
+                <div className="border-t border-zinc-800 my-1.5" />
+                <code className="block text-[9px] leading-relaxed text-amber-300 font-mono break-all">
+                  username:password:totp_secret
+                </code>
+                <p className="text-zinc-500 text-[9px] leading-tight mt-1">
+                  区切り文字 (pipe / colon) と列構成を自動判定します。
+                </p>
               </div>
 
               <textarea
                 value={cookieText}
                 onChange={(e) => setCookieText(e.target.value)}
                 rows={5}
-                placeholder={comboFormat === 'accsmarket'
-                  ? 'user1:pass1:TOTPSECRET\nuser2:pass2:TOTPSECRET'
-                  : 'user1|pass1|token1|[{"name":"sessionid","value":"...","domain":".instagram.com"}]|email@example.com'}
+                placeholder={'user1|pass1|token|[{"name":"sessionid",...}]|email\nuser2:pass2:TOTPSECRET'}
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-[10px] text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 mb-2 resize-none font-mono leading-tight"
               />
 
