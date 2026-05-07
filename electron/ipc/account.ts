@@ -68,7 +68,7 @@ import type { StoryLinkSticker } from '../api/threads-web-api'
 import { sanitizeCookies, isCookieSetUsable } from '../ig/cookie-sanitizer'
 import { selectUA } from '../ig/ua-selector'
 import { probeAccountHealth } from '../ig/health-probe'
-import { updateProbeStatus } from '../db/repositories/accounts'
+import { updateProbeStatus, updateAccountMobileSession } from '../db/repositories/accounts'
 
 export function registerAccountHandlers(): void {
   ipcMain.handle('accounts:list', () => getAllAccounts())
@@ -969,6 +969,17 @@ export function registerAccountHandlers(): void {
             phone_id: row.phone_id, adid: row.adid,
           })
           console.log(`[import-cookie-login] row[${i}] device IDs set from mobile session`)
+        }
+        // モバイルセッションヘッダー保存 (Authorization Bearer 等)
+        if (row.mobile_headers && Object.keys(row.mobile_headers).length > 0) {
+          updateAccountMobileSession(account.id, {
+            authorization: row.mobile_headers['Authorization'] ?? null,
+            www_claim: row.mobile_headers['X-IG-WWW-Claim'] ?? null,
+            mid: row.mobile_headers['X-MID'] ?? null,
+            ds_user_id: row.mobile_headers['IG-U-DS-USER-ID'] ?? null,
+            rur: row.mobile_headers['IG-U-RUR'] ?? null,
+          })
+          console.log(`[import-cookie-login] row[${i}] mobile session headers saved`)
         }
         stampDeviceIds(account.id, username)
         if (row.group_name) updateAccountGroup(account.id, row.group_name)

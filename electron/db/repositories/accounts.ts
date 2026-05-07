@@ -41,6 +41,11 @@ export interface Account {
   paused_until: string | null
   pause_reason: string | null
   consecutive_failures: number
+  mobile_authorization: string | null
+  mobile_www_claim: string | null
+  mobile_mid: string | null
+  mobile_ds_user_id: string | null
+  mobile_rur: string | null
   created_at: string
   updated_at: string
 }
@@ -199,6 +204,35 @@ export function updateReplyBanStatus(id: number, status: 'ok' | 'banned', checke
   getDb()
     .prepare("UPDATE accounts SET reply_ban_status = ?, reply_ban_checked_at = ?, updated_at = datetime('now') WHERE id = ?")
     .run(status, checkedAt, id)
+}
+
+export function updateAccountMobileSession(
+  id: number,
+  data: {
+    authorization?: string | null
+    www_claim?: string | null
+    mid?: string | null
+    ds_user_id?: string | null
+    rur?: string | null
+  },
+): void {
+  getDb()
+    .prepare(`UPDATE accounts SET
+      mobile_authorization = COALESCE(?, mobile_authorization),
+      mobile_www_claim = COALESCE(?, mobile_www_claim),
+      mobile_mid = COALESCE(?, mobile_mid),
+      mobile_ds_user_id = COALESCE(?, mobile_ds_user_id),
+      mobile_rur = COALESCE(?, mobile_rur),
+      updated_at = datetime('now')
+    WHERE id = ?`)
+    .run(
+      data.authorization ?? null,
+      data.www_claim ?? null,
+      data.mid ?? null,
+      data.ds_user_id ?? null,
+      data.rur ?? null,
+      id,
+    )
 }
 
 export function pauseAccount(id: number, until: string, reason: string): void {

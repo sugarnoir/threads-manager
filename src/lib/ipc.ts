@@ -39,6 +39,11 @@ export interface Account {
   paused_until: string | null
   pause_reason: string | null
   consecutive_failures: number
+  mobile_authorization: string | null
+  mobile_www_claim: string | null
+  mobile_mid: string | null
+  mobile_ds_user_id: string | null
+  mobile_rur: string | null
   created_at: string
   updated_at: string
 }

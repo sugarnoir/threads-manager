@@ -349,6 +349,21 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('consecutive_failures')) {
     db.exec("ALTER TABLE accounts ADD COLUMN consecutive_failures INTEGER DEFAULT 0")
   }
+  if (!colNames.includes('mobile_authorization')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN mobile_authorization TEXT")
+  }
+  if (!colNames.includes('mobile_www_claim')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN mobile_www_claim TEXT")
+  }
+  if (!colNames.includes('mobile_mid')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN mobile_mid TEXT")
+  }
+  if (!colNames.includes('mobile_ds_user_id')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN mobile_ds_user_id TEXT")
+  }
+  if (!colNames.includes('mobile_rur')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN mobile_rur TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]
