@@ -69,6 +69,7 @@ import { sanitizeCookies, isCookieSetUsable } from '../ig/cookie-sanitizer'
 import { selectUA } from '../ig/ua-selector'
 import { probeAccountHealth } from '../ig/health-probe'
 import { updateProbeStatus, updateAccountMobileSession } from '../db/repositories/accounts'
+import { extractCookiesFromMobileAuth } from '../ig/extract-cookies-from-token'
 
 export function registerAccountHandlers(): void {
   ipcMain.handle('accounts:list', () => getAllAccounts())
@@ -986,15 +987,36 @@ export function registerAccountHandlers(): void {
         if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)
         createAndSaveFingerprint(account.id)
 
-        // ── モバイルセッション形式の場合: Cookie不要 → そのまま登録 ──────
+        // ── モバイルセッション形式の場合: Token から Cookie 抽出 → 注入 ──
         const hasMobileAuth = !!(row.mobile_headers && (
           row.mobile_headers['Authorization'] || row.mobile_headers['X-MID']
         ))
         if (hasMobileAuth && (!row.cookies || row.cookies.length === 0)) {
-          console.log(`[import-cookie-login] row[${i}] mobile session (no cookies) → registered as needs_login`)
+          const auth = row.mobile_headers?.['Authorization']
+          if (auth) {
+            const extracted = extractCookiesFromMobileAuth(auth)
+            if (extracted && extracted.length > 0) {
+              // mid もあれば追加
+              if (row.mobile_headers?.['X-MID']) {
+                extracted.push({
+                  name: 'mid', value: row.mobile_headers['X-MID'],
+                  domain: '.instagram.com', path: '/', secure: true, httpOnly: true, sameSite: 'no_restriction',
+                })
+              }
+              // csrftoken 生成（sessionid から最初の数値部分で簡易生成はしない、空で注入）
+              const permSess = session.fromPartition(`persist:account-${account.id}`)
+              const hasSession = await injectCookies(extracted as RawCookie[], permSess)
+              console.log(`[import-cookie-login] row[${i}] cookies extracted from Bearer token → injected: hasSession=${hasSession}`)
+              updateAccountStatus(account.id, hasSession ? 'active' : 'needs_login')
+              results.imported++
+              if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
+              continue
+            }
+          }
+          // 抽出失敗 → needs_login
+          console.log(`[import-cookie-login] row[${i}] mobile session (no extractable cookies) → needs_login`)
           updateAccountStatus(account.id, 'needs_login')
           results.imported++
-          console.log(`[import-cookie-login] row[${i}] SUCCESS (mobile session) imported=${results.imported}`)
           if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
           continue
         }
