@@ -8,7 +8,7 @@
  * - auto: 自動検出
  */
 
-export type ComboFormat = 'npprteam' | 'accsmarket' | 'mobile-session' | 'auto'
+export type ComboFormat = 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' | 'auto'
 
 export interface AccountInput {
   username: string
@@ -37,6 +37,7 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
     .map(line => {
       const fmt = format === 'auto' ? detectFormat(line) : format
       if (fmt === 'mobile-session') return parseMobileSession(line)
+      if (fmt === 'cookie-string-pipe') return parseCookieStringPipe(line)
       if (fmt === 'npprteam') return parseCookiePipe(line)
       return parseSimpleColon(line)
     })
@@ -50,14 +51,25 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
  * - | が2つ以上 → mobile-session or cookie-pipe を列2で判定
  * - : が2つ以上 → simple-colon
  */
-export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' {
-  // mobile-session: パイプ区切りで列2が "Instagram " で始まる
+export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' {
   const pipeParts = line.split('|')
+
+  // mobile-session: 列2が "Instagram " で始まる
   if (pipeParts.length >= 4 && (pipeParts[1] ?? '').trim().startsWith('Instagram ')) {
     return 'mobile-session'
   }
 
+  // cookie-string-pipe: 4列パイプ、列4が key=value; 形式 (sessionid= を含む)
+  if (pipeParts.length >= 4) {
+    const col4 = (pipeParts[3] ?? '').trim()
+    if (col4.includes('sessionid=') || col4.includes('csrftoken=')) {
+      return 'cookie-string-pipe'
+    }
+  }
+
+  // cookie-pipe (JSON配列): [ が含まれる
   if (line.includes('[')) return 'npprteam'
+
   const pipes = (line.match(/\|/g) || []).length
   const colons = (line.match(/:/g) || []).length
   if (pipes >= 2) return 'npprteam'
@@ -180,4 +192,76 @@ function parseMobileSession(line: string): AccountInput | null {
     adid,
     mobileHeaders: Object.keys(mobileHeaders).length > 0 ? mobileHeaders : undefined,
   }
+}
+
+/**
+ * Cookie string pipe フォーマット (Web版購入垢):
+ * username|password|totp_secret|key=value;key=value;...
+ *
+ * Cookie 文字列を key=value で分割し、Cookie オブジェクト配列に変換。
+ * 引用符付きの値 (rur="EAG ...") も対応。
+ */
+function parseCookieStringPipe(line: string): AccountInput | null {
+  const parts = line.split('|')
+  if (parts.length < 4) return null
+
+  const username = (parts[0] ?? '').trim()
+  const password = (parts[1] ?? '').trim()
+  const totpSecret = (parts[2] ?? '').trim()
+  const cookieStr = parts.slice(3).join('|').trim() // 列4以降を結合（値に | が含まれる可能性対応）
+
+  if (!username) return null
+
+  // Cookie 文字列をパース: key=value; で分割
+  const cookies: Array<{ name: string; value: string; domain: string; path: string; secure: boolean; httpOnly: boolean }> = []
+
+  // セミコロンで分割（ただし引用符内のセミコロンは無視）
+  for (const pair of splitCookieString(cookieStr)) {
+    const eqIdx = pair.indexOf('=')
+    if (eqIdx <= 0) continue
+    const name = pair.slice(0, eqIdx).trim()
+    let value = pair.slice(eqIdx + 1).trim()
+    // 引用符除去
+    if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1)
+    }
+    if (!name || !value) continue
+    cookies.push({
+      name,
+      value,
+      domain: '.instagram.com',
+      path: '/',
+      secure: true,
+      httpOnly: name === 'sessionid' || name === 'rur' || name === 'mid' || name === 'ig_did' || name === 'datr',
+    })
+  }
+
+  return {
+    username,
+    password,
+    token: '',
+    cookies,
+    email: '',
+    totpSecret,
+  }
+}
+
+/** Cookie 文字列をセミコロンで分割（引用符内は無視） */
+function splitCookieString(str: string): string[] {
+  const results: string[] = []
+  let current = ''
+  let inQuote = false
+  for (const ch of str) {
+    if (ch === '"') { inQuote = !inQuote; current += ch; continue }
+    if (ch === ';' && !inQuote) {
+      const trimmed = current.trim()
+      if (trimmed) results.push(trimmed)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  const trimmed = current.trim()
+  if (trimmed) results.push(trimmed)
+  return results
 }

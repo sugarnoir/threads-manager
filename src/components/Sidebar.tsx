@@ -1458,6 +1458,10 @@ export function Sidebar({
                 <code className="block text-[9px] leading-relaxed text-sky-300 font-mono break-all">
                   user:pass:2FA|UA|DeviceIDs|Headers|ID
                 </code>
+                <div className="border-t border-zinc-800 my-1" />
+                <code className="block text-[9px] leading-relaxed text-purple-300 font-mono break-all">
+                  user|pass|TOTP|key=val;key=val;...
+                </code>
                 <p className="text-zinc-500 text-[9px] leading-tight mt-1">
                   区切り文字と列構成を自動判定。UA・デバイスID付きも対応。
                 </p>
