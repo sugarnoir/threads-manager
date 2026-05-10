@@ -712,32 +712,8 @@ export class ViewManager {
       console.error(`[CDP] Network.enable failed (auto) account=${accountId}:`, e)
     })
 
-    // ── yuki_chukimaru のみ: モバイルエミュレーション + DevTools ─────────────
+    // ── yuki_chukimaru のみ: DevTools キーバインド ─────────────────────────
     if (isMobileEmu) {
-      console.log(`[makeView] account=${accountId} (${MOBILE_EMU_ACCOUNT}): enabling mobile emulation`)
-      // iPhone 15 Pro エミュレーション
-      dbgAuto.sendCommand('Emulation.setDeviceMetricsOverride', {
-        width: 390,
-        height: 844,
-        deviceScaleFactor: 3,
-        mobile: true,
-        screenOrientation: { type: 'portraitPrimary', angle: 0 },
-      }).catch(() => {})
-      dbgAuto.sendCommand('Emulation.setTouchEmulationEnabled', {
-        enabled: true,
-        maxTouchPoints: 5,
-      }).catch(() => {})
-      dbgAuto.sendCommand('Emulation.setUserAgentOverride', {
-        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-        platform: 'iPhone',
-        userAgentMetadata: {
-          platform: 'iOS',
-          platformVersion: '17.0',
-          mobile: true,
-          model: 'iPhone',
-        },
-      }).catch(() => {})
-      // F12 / Cmd+Alt+I で DevTools 開閉
       view.webContents.on('before-input-event', (_event, input) => {
         if (input.key === 'F12' || (input.meta && input.alt && input.key === 'i')) {
           view.webContents.toggleDevTools()
@@ -1870,6 +1846,41 @@ export class ViewManager {
     } catch (err) { console.error(`[_bgInitView] setProxy error account=${accountId}:`, err) }
 
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
+
+    // ── yuki_chukimaru のみ: CDP モバイルエミュレーション ─────────────────────
+    try {
+      const acctEmu = getAccountById(accountId)
+      if (acctEmu?.username === 'yuki_chukimaru') {
+        const dbg = entry.view.webContents.debugger
+        if (dbg.isAttached()) {
+          console.log(`[mobile-emu] start account=${accountId}`)
+
+          await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
+            width: 390,
+            height: 844,
+            deviceScaleFactor: 3,
+            mobile: true,
+          })
+          console.log('[mobile-emu] device metrics OK')
+
+          await dbg.sendCommand('Emulation.setTouchEmulationEnabled', {
+            enabled: true,
+            maxTouchPoints: 5,
+          })
+          console.log('[mobile-emu] touch OK')
+
+          await dbg.sendCommand('Emulation.setUserAgentOverride', {
+            userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            platform: 'iPhone',
+          })
+          console.log('[mobile-emu] UA override OK')
+        } else {
+          console.warn('[mobile-emu] debugger not attached, skipping')
+        }
+      }
+    } catch (e) {
+      console.error(`[mobile-emu] FAILED account=${accountId}:`, e instanceof Error ? e.message : e)
+    }
 
     // ── リトライ付きロード ───────────────────────────────────────────────────
     // プロキシ接続は初回タイムアウトすることがあるため最大 MAX_RETRIES 回リトライする。
