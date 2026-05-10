@@ -1847,36 +1847,32 @@ export class ViewManager {
 
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
 
-    // ── yuki_chukimaru のみ: CDP モバイルエミュレーション ─────────────────────
+    // ── yuki_chukimaru のみ: モバイル表示 (UA + CSS + touch JS) ─────────────
+    // CDP Emulation.setDeviceMetricsOverride は WebContentsView で SIGSEGV するため使わない
     try {
       const acctEmu = getAccountById(accountId)
       if (acctEmu?.username === 'yuki_chukimaru') {
-        const dbg = entry.view.webContents.debugger
-        if (dbg.isAttached()) {
-          console.log(`[mobile-emu] start account=${accountId}`)
-
-          await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
-            width: 390,
-            height: 844,
-            deviceScaleFactor: 3,
-            mobile: true,
-          })
-          console.log('[mobile-emu] device metrics OK')
-
-          await dbg.sendCommand('Emulation.setTouchEmulationEnabled', {
-            enabled: true,
-            maxTouchPoints: 5,
-          })
-          console.log('[mobile-emu] touch OK')
-
-          await dbg.sendCommand('Emulation.setUserAgentOverride', {
-            userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-            platform: 'iPhone',
-          })
-          console.log('[mobile-emu] UA override OK')
-        } else {
-          console.warn('[mobile-emu] debugger not attached, skipping')
-        }
+        console.log(`[mobile-emu] applying CSS/JS mobile emulation for account=${accountId}`)
+        // touch エミュレーション + viewport meta を JS で注入
+        const mobileScript = `
+          ;(function() {
+            // maxTouchPoints を 5 に偽装
+            try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5, configurable: true }) } catch {}
+            // viewport meta 追加 (モバイル表示を強制)
+            if (!document.querySelector('meta[name="viewport"]')) {
+              var meta = document.createElement('meta')
+              meta.name = 'viewport'
+              meta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no'
+              document.head.appendChild(meta)
+            }
+          })()
+        `
+        entry.view.webContents.on('dom-ready', () => {
+          if (!entry.view.webContents.isDestroyed()) {
+            entry.view.webContents.executeJavaScript(mobileScript).catch(() => {})
+          }
+        })
+        console.log('[mobile-emu] CSS/JS injection registered')
       }
     } catch (e) {
       console.error(`[mobile-emu] FAILED account=${accountId}:`, e instanceof Error ? e.message : e)
