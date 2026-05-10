@@ -475,10 +475,19 @@ export class ViewManager {
     //   fire-and-forget にすると loadURL 開始後に proxy が設定され、
     //   Chromium が接続を再確立 → did-finish-load が複数回発火 →
     //   nudgeRepaint の setTimeout が干渉して黒画面になるため。
+    // yuki_chukimaru (id=3) のみモバイルエミュレーション + DevTools 有効化
+    const MOBILE_EMU_ACCOUNT = 'yuki_chukimaru'
+    const acctForEmu = getAccountById(accountId)
+    const isMobileEmu = acctForEmu?.username === MOBILE_EMU_ACCOUNT
+
     const fp = loadOrCreateFingerprint(accountId)
     const overrideScript = buildOverrideScript(fp)
 
-    sess.setUserAgent(fp.userAgent)
+    if (isMobileEmu) {
+      sess.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
+    } else {
+      sess.setUserAgent(fp.userAgent)
+    }
 
     // Accept-Language ヘッダーをフィンガープリントに合わせて設定
     sess.webRequest.onBeforeSendHeaders(
@@ -499,7 +508,7 @@ export class ViewManager {
         session: sess,
         nodeIntegration: false,
         contextIsolation: true,
-        devTools: false,
+        devTools: isMobileEmu,  // テスト垢のみ DevTools 有効
         backgroundThrottling: false,
       },
     })
@@ -702,6 +711,39 @@ export class ViewManager {
     dbgAuto.sendCommand('Network.enable').catch((e: unknown) => {
       console.error(`[CDP] Network.enable failed (auto) account=${accountId}:`, e)
     })
+
+    // ── yuki_chukimaru のみ: モバイルエミュレーション + DevTools ─────────────
+    if (isMobileEmu) {
+      console.log(`[makeView] account=${accountId} (${MOBILE_EMU_ACCOUNT}): enabling mobile emulation`)
+      // iPhone 15 Pro エミュレーション
+      dbgAuto.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 3,
+        mobile: true,
+        screenOrientation: { type: 'portraitPrimary', angle: 0 },
+      }).catch(() => {})
+      dbgAuto.sendCommand('Emulation.setTouchEmulationEnabled', {
+        enabled: true,
+        maxTouchPoints: 5,
+      }).catch(() => {})
+      dbgAuto.sendCommand('Emulation.setUserAgentOverride', {
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        platform: 'iPhone',
+        userAgentMetadata: {
+          platform: 'iOS',
+          platformVersion: '17.0',
+          mobile: true,
+          model: 'iPhone',
+        },
+      }).catch(() => {})
+      // F12 / Cmd+Alt+I で DevTools 開閉
+      view.webContents.on('before-input-event', (_event, input) => {
+        if (input.key === 'F12' || (input.meta && input.alt && input.key === 'i')) {
+          view.webContents.toggleDevTools()
+        }
+      })
+    }
 
     // requestId → X-FB-Friendly-Name の対応表（リクエスト→レスポンス紐付け用）
     const friendlyNames = new Map<string, string>()
