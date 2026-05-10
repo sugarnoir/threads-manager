@@ -1853,12 +1853,41 @@ export class ViewManager {
       const acctEmu = getAccountById(accountId)
       if (acctEmu?.username === 'yuki_chukimaru') {
         console.log(`[mobile-emu] applying CSS/JS mobile emulation for account=${accountId}`)
-        // touch エミュレーション + viewport meta を JS で注入
         const mobileScript = `
           ;(function() {
-            // maxTouchPoints を 5 に偽装
             try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5, configurable: true }) } catch {}
-            // viewport meta 追加 (モバイル表示を強制)
+
+            // orientation 偽装 (portrait-primary)
+            try { Object.defineProperty(window, 'orientation', { get: () => 0, configurable: true }) } catch {}
+            try {
+              Object.defineProperty(screen, 'orientation', {
+                get: () => ({
+                  type: 'portrait-primary', angle: 0,
+                  addEventListener: function(){}, removeEventListener: function(){},
+                  dispatchEvent: function(){ return true },
+                  onchange: null,
+                }),
+                configurable: true,
+              })
+            } catch {}
+
+            // screen サイズを portrait に偽装
+            try { Object.defineProperty(screen, 'width',       { get: () => 390,  configurable: true }) } catch {}
+            try { Object.defineProperty(screen, 'height',      { get: () => 844,  configurable: true }) } catch {}
+            try { Object.defineProperty(screen, 'availWidth',  { get: () => 390,  configurable: true }) } catch {}
+            try { Object.defineProperty(screen, 'availHeight', { get: () => 844,  configurable: true }) } catch {}
+
+            // matchMedia 偽装 (orientation クエリ)
+            var _origMM = window.matchMedia
+            if (_origMM) {
+              window.matchMedia = function(q) {
+                if (q && q.indexOf('portrait') >= 0)  return { matches: true,  media: q, addListener: function(){}, removeListener: function(){}, addEventListener: function(){}, removeEventListener: function(){}, dispatchEvent: function(){ return true }, onchange: null }
+                if (q && q.indexOf('landscape') >= 0) return { matches: false, media: q, addListener: function(){}, removeListener: function(){}, addEventListener: function(){}, removeEventListener: function(){}, dispatchEvent: function(){ return true }, onchange: null }
+                return _origMM.call(window, q)
+              }
+            }
+
+            // viewport meta
             if (!document.querySelector('meta[name="viewport"]')) {
               var meta = document.createElement('meta')
               meta.name = 'viewport'
