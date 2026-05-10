@@ -354,14 +354,28 @@ export class ViewManager {
   }
 
   // x と width はウィンドウサイズと SIDEBAR_WIDTH 定数から算出する
-  private calcBounds(y: number, height: number): Electron.Rectangle {
+  private calcBounds(y: number, height: number, accountId?: number): Electron.Rectangle {
     const cb = this.mainWindow.getContentBounds()
-    const bounds = {
-      x:      SIDEBAR_WIDTH,
-      y,
-      width:  Math.max(cb.width - SIDEBAR_WIDTH, 0),
-      height: Math.max(height, 0),
+    const containerW = Math.max(cb.width - SIDEBAR_WIDTH, 0)
+    const containerH = Math.max(height, 0)
+
+    // yuki_chukimaru のみ: スマホ枠 (390x844) に絞って中央配置
+    if (accountId != null) {
+      const acct = getAccountById(accountId)
+      if (acct?.username === 'yuki_chukimaru') {
+        const phoneW = 390
+        const phoneH = 844
+        const scale = Math.min(containerW / phoneW, containerH / phoneH, 1)
+        const w = Math.round(phoneW * scale)
+        const h = Math.round(phoneH * scale)
+        const x = SIDEBAR_WIDTH + Math.round((containerW - w) / 2)
+        const yPos = y + Math.round((containerH - h) / 2)
+        console.log('[calcBounds] mobile-emu: phone frame', { x, y: yPos, width: w, height: h, scale })
+        return { x, y: yPos, width: w, height: h }
+      }
     }
+
+    const bounds = { x: SIDEBAR_WIDTH, y, width: containerW, height: containerH }
     console.log('[calcBounds] contentBounds=', cb, '→ viewBounds=', bounds)
     return bounds
   }
@@ -1755,7 +1769,7 @@ export class ViewManager {
     if (existing && !existing.view.webContents.isDestroyed()) {
       // 既存ビューを再利用 — setBounds で表示するだけ、loadURL は呼ばない
       this.activeAccountId = accountId
-      const existBounds = this.calcBounds(y, height)
+      const existBounds = this.calcBounds(y, height, accountId)
       console.log(`[showView] EXISTING account=${accountId} y=${y} height=${height} → setBounds`, existBounds)
       existing.view.setBounds(existBounds)
       console.log(`[showView] getBounds after set=`, existing.view.getBounds())
@@ -1810,7 +1824,7 @@ export class ViewManager {
 
     // アタッチしてから setBounds（Electron 仕様: アタッチ前の setBounds は無効）
     this.mainWindow.contentView.addChildView(view)
-    const newBounds = this.calcBounds(y, height)
+    const newBounds = this.calcBounds(y, height, accountId)
     console.log(`[showView] NEW account=${accountId} y=${y} height=${height} → setBounds`, newBounds)
     view.setBounds(newBounds)
     console.log(`[showView] getBounds after set=`, view.getBounds())
@@ -2104,7 +2118,7 @@ export class ViewManager {
     if (this.activeAccountId !== accountId) return
     const entry = this.views.get(accountId)
     if (entry && !entry.view.webContents.isDestroyed()) {
-      entry.view.setBounds(this.calcBounds(y, height))
+      entry.view.setBounds(this.calcBounds(y, height, accountId))
       try { entry.view.webContents.invalidate() } catch {}
     }
   }
