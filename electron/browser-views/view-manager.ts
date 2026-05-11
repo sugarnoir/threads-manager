@@ -1924,23 +1924,42 @@ export class ViewManager {
             const dbg = entry.view.webContents.debugger
             if (dbg.isAttached()) {
               await dbg.sendCommand('Fetch.enable', {
-                patterns: [{ urlPattern: '*configure_to_story*', requestStage: 'Request' }],
+                patterns: [
+                  { urlPattern: '*configure_to_story*', requestStage: 'Request' },
+                  { urlPattern: '*configure_to_story*', requestStage: 'Response' },
+                ],
               })
-              console.log(`[link-inject] Fetch.enable OK, will inject link: ${linkUrl}`)
+              console.log(`[link-inject] Fetch.enable OK (request+response), will inject link: ${linkUrl}`)
 
               dbg.on('message', async (_ev: unknown, method: string, params: Record<string, unknown>) => {
                 if (method !== 'Fetch.requestPaused') return
                 const requestId = params.requestId as string
-                const request = params.request as { url?: string; postData?: string; headers?: Record<string, string> } | undefined
+                const responseStatusCode = params.responseStatusCode as number | undefined
+
+                // ── レスポンスキャプチャ ──
+                if (responseStatusCode != null) {
+                  console.log(`[link-inject] response status=${responseStatusCode}`)
+                  try {
+                    const bodyResult = await dbg.sendCommand('Fetch.getResponseBody', { requestId }) as { body: string; base64Encoded: boolean }
+                    const body = bodyResult.base64Encoded ? Buffer.from(bodyResult.body, 'base64').toString() : bodyResult.body
+                    console.log(`[link-inject] response body: ${body.slice(0, 500)}`)
+                  } catch { /* ignore */ }
+                  dbg.sendCommand('Fetch.continueResponse', { requestId }).catch(() => {})
+                  return
+                }
+
+                // ── リクエストインターセプト ──
+                const request = params.request as { url?: string; postData?: string } | undefined
                 if (!request?.url?.includes('configure_to_story')) {
                   dbg.sendCommand('Fetch.continueRequest', { requestId }).catch(() => {})
                   return
                 }
 
                 console.log(`[link-inject] intercepted configure_to_story request`)
+                console.log(`[link-inject] original postData (first 300): ${(request.postData ?? '').slice(0, 300)}`)
                 let postData = request.postData ?? ''
 
-                // story_cta を注入
+                // 1. story_cta (旧形式、念のため)
                 const storyCta = JSON.stringify([{
                   links: [{
                     linkType: 1,
@@ -1955,16 +1974,32 @@ export class ViewManager {
                     appInstallObjectiveInvalidationBehavior: null,
                   }],
                 }])
-
                 if (postData.includes('story_cta=')) {
-                  // 既存の story_cta を上書き
                   postData = postData.replace(/story_cta=[^&]*/, `story_cta=${encodeURIComponent(storyCta)}`)
                 } else {
-                  // story_cta を追加
                   postData += (postData ? '&' : '') + `story_cta=${encodeURIComponent(storyCta)}`
                 }
 
-                console.log(`[link-inject] story_cta injected (${linkUrl})`)
+                // 2. story_link_stickers (現代形式)
+                const storyLinkStickers = JSON.stringify([{
+                  x: 0.5126011,
+                  y: 0.5168225,
+                  z: 0,
+                  width: 0.50998676,
+                  height: 0.25875,
+                  rotation: 0.0,
+                  story_link: {
+                    url: linkUrl,
+                    link_type: 'web',
+                  },
+                }])
+                if (postData.includes('story_link_stickers=')) {
+                  postData = postData.replace(/story_link_stickers=[^&]*/, `story_link_stickers=${encodeURIComponent(storyLinkStickers)}`)
+                } else {
+                  postData += `&story_link_stickers=${encodeURIComponent(storyLinkStickers)}`
+                }
+
+                console.log(`[link-inject] story_cta + story_link_stickers injected (${linkUrl})`)
 
                 dbg.sendCommand('Fetch.continueRequest', {
                   requestId,
