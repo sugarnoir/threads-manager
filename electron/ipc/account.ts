@@ -1406,6 +1406,13 @@ export function registerAccountHandlers(): void {
     return { success: true }
   })
 
+  ipcMain.handle('accounts:save-story-link-url', (_event, data: { id: number; story_link_url: string | null }) => {
+    const { getDb } = require('../db')
+    getDb().prepare("UPDATE accounts SET story_link_url = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(data.story_link_url, data.id)
+    return { success: true }
+  })
+
   /** TOTP コード生成 */
   ipcMain.handle('accounts:generate-totp', (_event, secret: string) => {
     try {

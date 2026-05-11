@@ -1916,6 +1916,69 @@ export class ViewManager {
           }
         })
         console.log('[mobile-emu] CSS/JS injection registered')
+
+        // ── CDP Fetch: ストーリー投稿リクエストにリンクスタンプ注入 ──────────
+        const linkUrl = acctEmu.story_link_url
+        if (linkUrl) {
+          try {
+            const dbg = entry.view.webContents.debugger
+            if (dbg.isAttached()) {
+              await dbg.sendCommand('Fetch.enable', {
+                patterns: [{ urlPattern: '*configure_to_story*', requestStage: 'Request' }],
+              })
+              console.log(`[link-inject] Fetch.enable OK, will inject link: ${linkUrl}`)
+
+              dbg.on('message', async (_ev: unknown, method: string, params: Record<string, unknown>) => {
+                if (method !== 'Fetch.requestPaused') return
+                const requestId = params.requestId as string
+                const request = params.request as { url?: string; postData?: string; headers?: Record<string, string> } | undefined
+                if (!request?.url?.includes('configure_to_story')) {
+                  dbg.sendCommand('Fetch.continueRequest', { requestId }).catch(() => {})
+                  return
+                }
+
+                console.log(`[link-inject] intercepted configure_to_story request`)
+                let postData = request.postData ?? ''
+
+                // story_cta を注入
+                const storyCta = JSON.stringify([{
+                  links: [{
+                    linkType: 1,
+                    webUri: linkUrl,
+                    androidClass: '',
+                    package: '',
+                    deeplinkUri: '',
+                    callToActionTitle: '',
+                    redirectUri: null,
+                    leadGenFormId: '',
+                    igUserId: '',
+                    appInstallObjectiveInvalidationBehavior: null,
+                  }],
+                }])
+
+                if (postData.includes('story_cta=')) {
+                  // 既存の story_cta を上書き
+                  postData = postData.replace(/story_cta=[^&]*/, `story_cta=${encodeURIComponent(storyCta)}`)
+                } else {
+                  // story_cta を追加
+                  postData += (postData ? '&' : '') + `story_cta=${encodeURIComponent(storyCta)}`
+                }
+
+                console.log(`[link-inject] story_cta injected (${linkUrl})`)
+
+                dbg.sendCommand('Fetch.continueRequest', {
+                  requestId,
+                  postData: Buffer.from(postData).toString('base64'),
+                }).catch((err: unknown) => {
+                  console.error(`[link-inject] continueRequest failed:`, err)
+                  dbg.sendCommand('Fetch.continueRequest', { requestId }).catch(() => {})
+                })
+              })
+            }
+          } catch (fetchErr) {
+            console.error(`[link-inject] Fetch setup failed:`, fetchErr instanceof Error ? fetchErr.message : fetchErr)
+          }
+        }
       }
     } catch (e) {
       console.error(`[mobile-emu] FAILED account=${accountId}:`, e instanceof Error ? e.message : e)

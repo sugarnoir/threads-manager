@@ -44,6 +44,7 @@ export interface Account {
   mobile_mid: string | null
   mobile_ds_user_id: string | null
   mobile_rur: string | null
+  story_link_url: string | null
   created_at: string
   updated_at: string
 }

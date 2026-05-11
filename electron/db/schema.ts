@@ -364,6 +364,9 @@ export function initializeSchema(db: Database.Database): void {
   if (!colNames.includes('mobile_rur')) {
     db.exec("ALTER TABLE accounts ADD COLUMN mobile_rur TEXT")
   }
+  if (!colNames.includes('story_link_url')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN story_link_url TEXT")
+  }
 
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]
