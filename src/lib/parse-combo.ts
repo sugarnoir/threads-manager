@@ -52,16 +52,21 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
  * - : が2つ以上 → simple-colon
  */
 export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' {
-  const pipeParts = line.split('|')
+  // 末尾の空パイプを除去してから判定
+  const rawParts = line.split('|')
+  const pipeParts = rawParts.slice()
+  while (pipeParts.length > 0 && (pipeParts[pipeParts.length - 1] ?? '').trim() === '') {
+    pipeParts.pop()
+  }
 
-  // mobile-session: 列2が "Instagram " で始まる、または列4に Authorization=Bearer がある
+  // mobile-session: 列2が "Instagram " で始まる
   if (pipeParts.length >= 4 && (pipeParts[1] ?? '').trim().startsWith('Instagram ')) {
     return 'mobile-session'
   }
+  // mobile-session: 最後の列に Authorization=Bearer or sessionid= + 列3がデバイスID風
   if (pipeParts.length >= 4) {
     const lastCol = pipeParts[pipeParts.length - 1] ?? ''
     if (lastCol.includes('Authorization=Bearer') || lastCol.includes('sessionid=')) {
-      // 列3がデバイスID風 (android- or UUID) → mobile-session
       const col3 = (pipeParts[2] ?? '').trim()
       if (col3.startsWith('android-') || /^[0-9a-f]{8}-/.test(col3)) {
         return 'mobile-session'
