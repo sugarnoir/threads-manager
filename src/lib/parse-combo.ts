@@ -54,9 +54,19 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
 export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' {
   const pipeParts = line.split('|')
 
-  // mobile-session: 列2が "Instagram " で始まる
+  // mobile-session: 列2が "Instagram " で始まる、または列4に Authorization=Bearer がある
   if (pipeParts.length >= 4 && (pipeParts[1] ?? '').trim().startsWith('Instagram ')) {
     return 'mobile-session'
+  }
+  if (pipeParts.length >= 4) {
+    const lastCol = pipeParts[pipeParts.length - 1] ?? ''
+    if (lastCol.includes('Authorization=Bearer') || lastCol.includes('sessionid=')) {
+      // 列3がデバイスID風 (android- or UUID) → mobile-session
+      const col3 = (pipeParts[2] ?? '').trim()
+      if (col3.startsWith('android-') || /^[0-9a-f]{8}-/.test(col3)) {
+        return 'mobile-session'
+      }
+    }
   }
 
   // cookie-string-pipe: 4列パイプ、列4が key=value; 形式 (sessionid= を含む)
