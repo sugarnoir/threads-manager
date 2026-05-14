@@ -383,8 +383,10 @@ export function initializeSchema(db: Database.Database): void {
   db.exec('CREATE INDEX IF NOT EXISTS idx_pin_check_history_account ON pin_check_history(account_id)')
 
   // accounts に pin_check_enabled カラム追加
+  // デフォルト0 (無効): 明示的に有効化された垢のみチェック対象。
+  // 全垢一括有効化は連鎖凍結リスクのため非推奨。
   if (!colNames.includes('pin_check_enabled')) {
-    db.exec("ALTER TABLE accounts ADD COLUMN pin_check_enabled INTEGER DEFAULT 1")
+    db.exec("ALTER TABLE accounts ADD COLUMN pin_check_enabled INTEGER DEFAULT 0")
   }
 
   // post_templates テーブルへの account_id カラム追加

@@ -43,8 +43,8 @@ function getScheduledMinute(accountId: number): number {
  * ジッター付きの実行時刻判定。±15分のランダム幅。
  */
 function isDueNow(account: Account): boolean {
-  // pin_check_enabled チェック
-  if ((account as any).pin_check_enabled === 0) return false
+  // pin_check_enabled チェック (デフォルト0=無効、明示的に1にした垢のみ対象)
+  if ((account as any).pin_check_enabled !== 1) return false
 
   // 最終チェックから24時間経過していなければスキップ
   if (account.pinned_checked_at) {
