@@ -47,6 +47,7 @@ export interface Account {
   mobile_ds_user_id: string | null
   mobile_rur: string | null
   story_link_url: string | null
+  pin_check_enabled: number
   created_at: string
   updated_at: string
 }

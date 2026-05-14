@@ -15,7 +15,7 @@ const THREADS_BASE = 'https://www.threads.com'
  * プロフィールページからピン留め投稿のURLを取得する。
  * ピンがなければ null を返す。
  */
-async function detectPinnedPost(accountId: number, username: string): Promise<string | null> {
+export async function detectPinnedPost(accountId: number, username: string): Promise<string | null> {
   try {
     return await withContext(accountId, async (ctx) => {
       const page = ctx.pages()[0] || await ctx.newPage()
@@ -72,7 +72,7 @@ async function detectPinnedPost(accountId: number, username: string): Promise<st
 /**
  * ピン留め投稿の URL にアクセスして生存確認する。
  */
-async function checkPostAlive(accountId: number, postUrl: string): Promise<'alive' | 'deleted' | 'unknown'> {
+export async function checkPostAlive(accountId: number, postUrl: string): Promise<'alive' | 'deleted' | 'unknown'> {
   try {
     return await withContext(accountId, async (ctx) => {
       const page = ctx.pages()[0] || await ctx.newPage()

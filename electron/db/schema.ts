@@ -368,6 +368,25 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN story_link_url TEXT")
   }
 
+  // pin_check_history テーブル
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pin_check_history (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id    INTEGER NOT NULL,
+      checked_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      is_pinned     INTEGER NOT NULL DEFAULT 0,
+      pin_post_url  TEXT,
+      status        TEXT,
+      error_message TEXT
+    )
+  `)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_pin_check_history_account ON pin_check_history(account_id)')
+
+  // accounts に pin_check_enabled カラム追加
+  if (!colNames.includes('pin_check_enabled')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN pin_check_enabled INTEGER DEFAULT 1")
+  }
+
   // post_templates テーブルへの account_id カラム追加
   const templateCols = db.prepare("PRAGMA table_info(post_templates)").all() as { name: string }[]
   if (!templateCols.map(c => c.name).includes('account_id')) {
