@@ -12,10 +12,33 @@
  */
 
 import { withContext } from '../playwright/browser-manager'
+import type { Page } from 'playwright'
 
 export interface SetupResult {
   status: 'completed' | 'skipped' | 'failed'
   error?: string
+}
+
+/** タイムアウト時にデバッグ情報をログ出力 */
+async function logDebugInfo(page: Page, accountId: number, step: string): Promise<void> {
+  try {
+    const url = page.url()
+    const screenshotPath = `/tmp/threads-setup-${accountId}-${step}-${Date.now()}.png`
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {})
+    console.error(`[threads-setup] DEBUG account=${accountId} step=${step} url=${url} screenshot=${screenshotPath}`)
+
+    // クリック可能な要素を列挙
+    const elements = await page.locator('[role="button"], button, a').all()
+    const texts = await Promise.all(
+      elements.slice(0, 20).map(async (el) => {
+        const text = (await el.textContent().catch(() => '')) ?? ''
+        const tag = await el.evaluate('e => e.tagName').catch(() => '?')
+        const role = await el.getAttribute('role').catch(() => null)
+        return `<${tag}${role ? ` role="${role}"` : ''}> "${text.trim().slice(0, 40)}"`
+      })
+    )
+    console.error(`[threads-setup] DEBUG clickable elements:`, texts.join(' | '))
+  } catch { /* ignore */ }
 }
 
 export async function setupThreadsAccount(accountId: number): Promise<SetupResult> {
@@ -45,22 +68,20 @@ export async function setupThreadsAccount(accountId: number): Promise<SetupResul
         return { status: 'skipped' }
       }
 
-      // 2. ログインモーダル
+      // 2. ログインモーダル (tag非依存: text-based)
       console.log(`[threads-setup] account=${accountId} waiting for login modal`)
-      const loginBtn = page.locator('text=Instagramでログイン').first()
-        .or(page.locator('text=Log in with Instagram').first())
+      const loginBtn = page.getByText(/Instagramでログイン|Log in with Instagram/).first()
       const hasLogin = await loginBtn.isVisible({ timeout: 15_000 }).catch(() => false)
 
       if (!hasLogin) {
-        // セキュリティチャレンジ検出
         const bodyText = await page.textContent('body').catch(() => '') ?? ''
         if (/captcha|認証|verify|安全のため|challenge/i.test(bodyText)) {
           throw new Error('Security challenge detected')
         }
-        // オンボーディングに直接居る場合
         if (url.includes('/onboarding')) {
           console.log(`[threads-setup] account=${accountId} already on onboarding page`)
         } else {
+          await logDebugInfo(page, accountId, 'login-modal')
           throw new Error(`Login modal not found (url=${url})`)
         }
       } else {
@@ -74,31 +95,38 @@ export async function setupThreadsAccount(accountId: number): Promise<SetupResul
       await page.waitForURL(/\/onboarding/, { timeout: 15_000 }).catch(() => {})
       await page.waitForTimeout(2000 + Math.random() * 3000)
 
-      const privacyTitle = page.locator('text=プライバシー設定').first()
-        .or(page.locator('text=Privacy settings').first())
-      const hasPrivacy = await privacyTitle.isVisible({ timeout: 10_000 }).catch(() => false)
+      const hasPrivacy = await page.getByText(/プライバシー設定|Privacy settings/).first()
+        .isVisible({ timeout: 10_000 }).catch(() => false)
 
       if (hasPrivacy) {
-        const nextBtn = page.locator('button:has-text("次へ")').last()
-          .or(page.locator('button:has-text("Next")').last())
-        await page.waitForTimeout(1000 + Math.random() * 2000)
-        await nextBtn.click()
-        console.log(`[threads-setup] account=${accountId} clicked next (privacy)`)
+        // 「次へ」: tag/role 非依存、テキストマッチ
+        const nextBtn = page.getByText(/^次へ$|^Next$/).last()
+        try {
+          await page.waitForTimeout(1000 + Math.random() * 2000)
+          await nextBtn.click({ timeout: 15_000 })
+          console.log(`[threads-setup] account=${accountId} clicked next (privacy)`)
+        } catch {
+          await logDebugInfo(page, accountId, 'privacy-next')
+          throw new Error('次へ button click failed on privacy page')
+        }
       }
 
       // 4. 規約画面
       await page.waitForTimeout(2000 + Math.random() * 3000)
 
-      const aboutTitle = page.locator('text=Threadsのしくみ').first()
-        .or(page.locator('text=How Threads works').first())
-      const hasAbout = await aboutTitle.isVisible({ timeout: 10_000 }).catch(() => false)
+      const hasAbout = await page.getByText(/Threadsのしくみ|How Threads works/).first()
+        .isVisible({ timeout: 10_000 }).catch(() => false)
 
       if (hasAbout) {
-        const joinBtn = page.locator('button:has-text("Threadsに参加する")').first()
-          .or(page.locator('button:has-text("Join Threads")').first())
-        await page.waitForTimeout(1000 + Math.random() * 2000)
-        await joinBtn.click()
-        console.log(`[threads-setup] account=${accountId} clicked join`)
+        const joinBtn = page.getByText(/Threadsに参加する|Join Threads/).first()
+        try {
+          await page.waitForTimeout(1000 + Math.random() * 2000)
+          await joinBtn.click({ timeout: 15_000 })
+          console.log(`[threads-setup] account=${accountId} clicked join`)
+        } catch {
+          await logDebugInfo(page, accountId, 'join-threads')
+          throw new Error('Threadsに参加する button click failed')
+        }
       }
 
       // 5. 完了判定
@@ -107,12 +135,12 @@ export async function setupThreadsAccount(accountId: number): Promise<SetupResul
         console.log(`[threads-setup] account=${accountId} onboarding complete!`)
         return { status: 'completed' }
       } catch {
-        // URL判定失敗でもフィードに居れば成功
         const finalUrl = page.url()
         if (finalUrl.match(/threads\.com\/@/) || finalUrl === 'https://www.threads.com/') {
           console.log(`[threads-setup] account=${accountId} completed (feed reached)`)
           return { status: 'completed' }
         }
+        await logDebugInfo(page, accountId, 'completion')
         throw new Error(`Onboarding did not complete (url=${finalUrl})`)
       }
 
