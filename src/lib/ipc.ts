@@ -46,6 +46,10 @@ export interface Account {
   mobile_rur: string | null
   story_link_url: string | null
   pin_check_enabled: number
+  threads_setup_status: string | null
+  threads_setup_at: string | null
+  threads_setup_error: string | null
+  threads_setup_attempts: number
   created_at: string
   updated_at: string
 }

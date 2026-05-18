@@ -29,6 +29,7 @@ import { registerPinnedCheckHandlers } from './ipc/pinned-check'
 import { registerReelScheduleHandlers } from './ipc/reel-schedule'
 import { startAutoLoginScheduler } from './ig/auto-login-scheduler'
 import { startPinCheckJob } from './jobs/pin-check-job'
+import { startThreadsSetupJob } from './jobs/threads-setup-job'
 import { registerResponseAlertHandlers } from './ipc/response-alerts'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
@@ -100,6 +101,7 @@ app.whenReady().then(() => {
   registerResponseAlertHandlers()
   startAutoLoginScheduler()
   startPinCheckJob()
+  startThreadsSetupJob()
   initAppConfig() // fire-and-forget: 起動を遅延させない
   registerGroupHandlers()
   registerResearchHandlers()

@@ -958,6 +958,11 @@ export function registerAccountHandlers(): void {
           proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
         })
         console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
+        // 新規垢 → Threads セットアップ待ちに設定
+        try {
+          const { getDb: getDatabase } = require('../db')
+          getDatabase().prepare("UPDATE accounts SET threads_setup_status = 'pending' WHERE id = ?").run(account.id)
+        } catch { /* ignore */ }
         // モバイルセッション付きの場合は UA とデバイスIDを上書き
         if (row.user_agent) {
           updateAccountUserAgent(account.id, row.user_agent)

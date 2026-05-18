@@ -368,6 +368,21 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN story_link_url TEXT")
   }
 
+  // Threads セットアップ管理カラム
+  // NULL=既存垢(対象外), 'pending'=処理待ち, 'in_progress'=処理中, 'completed'=完了, 'failed'=失敗, 'skipped'=既存
+  if (!colNames.includes('threads_setup_status')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN threads_setup_status TEXT")
+  }
+  if (!colNames.includes('threads_setup_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN threads_setup_at TEXT")
+  }
+  if (!colNames.includes('threads_setup_error')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN threads_setup_error TEXT")
+  }
+  if (!colNames.includes('threads_setup_attempts')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN threads_setup_attempts INTEGER DEFAULT 0")
+  }
+
   // pin_check_history テーブル
   db.exec(`
     CREATE TABLE IF NOT EXISTS pin_check_history (

@@ -1211,6 +1211,15 @@ export function Sidebar({
                           {account.paused_until && account.paused_until !== '永続' && new Date(account.paused_until) > new Date() && (
                             <span className="shrink-0 px-1 py-0 rounded bg-amber-600/20 text-amber-400 text-[8px] font-bold leading-tight" title={`${account.pause_reason ?? ''} (${account.paused_until}まで)`}>⏸</span>
                           )}
+                          {account.threads_setup_status === 'pending' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-400 text-[8px] font-bold leading-tight">T待</span>
+                          )}
+                          {account.threads_setup_status === 'in_progress' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-amber-600/20 text-amber-300 text-[8px] font-bold leading-tight">T…</span>
+                          )}
+                          {account.threads_setup_status === 'failed' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-red-500/20 text-red-400 text-[8px] font-bold leading-tight" title={account.threads_setup_error ?? ''}>T✗</span>
+                          )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">
                           @{account.username}
