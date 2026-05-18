@@ -86,7 +86,7 @@ export async function setupThreadsAccount(accountId: number): Promise<SetupResul
         }
       } else {
         await page.waitForTimeout(1000 + Math.random() * 2000)
-        await loginBtn.click()
+        await loginBtn.click({ force: true })
         console.log(`[threads-setup] account=${accountId} clicked login`)
       }
 
@@ -103,7 +103,7 @@ export async function setupThreadsAccount(accountId: number): Promise<SetupResul
         const nextBtn = page.getByText(/^次へ$|^Next$/).last()
         try {
           await page.waitForTimeout(1000 + Math.random() * 2000)
-          await nextBtn.click({ timeout: 15_000 })
+          await nextBtn.click({ force: true, timeout: 15_000 })
           console.log(`[threads-setup] account=${accountId} clicked next (privacy)`)
         } catch {
           await logDebugInfo(page, accountId, 'privacy-next')
@@ -121,7 +121,7 @@ export async function setupThreadsAccount(accountId: number): Promise<SetupResul
         const joinBtn = page.getByText(/Threadsに参加する|Join Threads/).first()
         try {
           await page.waitForTimeout(1000 + Math.random() * 2000)
-          await joinBtn.click({ timeout: 15_000 })
+          await joinBtn.click({ force: true, timeout: 15_000 })
           console.log(`[threads-setup] account=${accountId} clicked join`)
         } catch {
           await logDebugInfo(page, accountId, 'join-threads')
