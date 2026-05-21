@@ -71,6 +71,321 @@ import { probeAccountHealth } from '../ig/health-probe'
 import { updateProbeStatus, updateAccountMobileSession } from '../db/repositories/accounts'
 import { extractCookiesFromMobileAuth } from '../ig/extract-cookies-from-token'
 
+// ── Cookie インポート共通型・ロジック ────────────────────────────────────
+export interface CookieImportRow {
+  username:  string
+  password:  string
+  token:     string
+  cookies:   unknown[]
+  email:     string
+  totp_secret?: string
+  user_agent?: string
+  device_id?: string
+  device_uuid?: string
+  phone_id?: string
+  adid?: string
+  mobile_headers?: Record<string, string>
+  group_name?: string | null
+}
+
+export interface CookieImportOptions {
+  proxyMode?:      'auto' | 'manual' | 'none'
+  proxyStartPort?: number
+  lightweight?:    boolean
+}
+
+export interface CookieImportResult {
+  imported: number
+  skipped:  number
+  errors:   Array<{ username: string; message: string }>
+}
+
+/**
+ * Cookie インポートのコアロジック。
+ * IPC ハンドラと予約インポートの両方から呼ばれる。
+ */
+export async function importCookieLoginBatch(
+  rows: CookieImportRow[],
+  options?: CookieImportOptions,
+): Promise<CookieImportResult> {
+  console.log(`[import-cookie-login] START rows=${rows?.length ?? 'undefined'}`)
+  if (!rows || !Array.isArray(rows)) {
+    console.error(`[import-cookie-login] rows is not array:`, typeof rows, rows)
+    return { imported: 0, skipped: 0, errors: [{ username: '', message: 'rows が不正' }] }
+  }
+
+  // ── ISP Dedicated プロキシ自動割り当て準備 ────────────────────────────
+  const existingAccounts = getAllAccounts()
+  const decodoAccounts = existingAccounts.filter(a =>
+    a.proxy_url && a.proxy_url.includes('decodo')
+  )
+
+  let proxyType = 'http'
+  let proxyHost = ''
+  let proxyUsername: string | null = null
+  let proxyPassword: string | null = null
+  if (decodoAccounts.length > 0) {
+    const ref = decodoAccounts[0]
+    try {
+      const url = new URL(ref.proxy_url!)
+      proxyType = url.protocol.replace(':', '')
+      proxyHost = url.hostname
+    } catch { /* ignore */ }
+    proxyUsername = ref.proxy_username
+    proxyPassword = ref.proxy_password
+  }
+
+  const portCountMap = new Map<number, number>()
+  let minPort = Infinity, maxPort = -Infinity
+  for (const a of decodoAccounts) {
+    try {
+      const url = new URL(a.proxy_url!)
+      const p = parseInt(url.port, 10)
+      if (!isNaN(p)) {
+        portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
+        if (p < minPort) minPort = p
+        if (p > maxPort) maxPort = p
+      }
+    } catch { /* ignore */ }
+  }
+
+  const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
+  const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
+  if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = cfgStart
+  if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = cfgEnd
+
+  const allPorts: Array<{ port: number; count: number }> = []
+  if (proxyHost && minPort <= maxPort) {
+    for (let p = minPort; p <= maxPort; p++) {
+      allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
+    }
+    allPorts.sort((a, b) => {
+      if (a.count !== b.count) return a.count - b.count
+      return Math.random() - 0.5
+    })
+  }
+  const proxyMode = options?.proxyMode ?? 'auto'
+  console.log(`[import-cookie-login] proxyMode=${proxyMode} host=${proxyHost || 'NONE'} type=${proxyType} ports=${allPorts.length} user=${proxyUsername ?? 'NONE'}`)
+  if (proxyMode === 'auto' && allPorts.length > 0) {
+    console.log(`[import-cookie-login] top 5 least-used ports: ${allPorts.slice(0, 5).map(p => `${p.port}(${p.count}垢)`).join(', ')}`)
+  }
+  if (proxyMode === 'manual') {
+    console.log(`[import-cookie-login] manual start port: ${options?.proxyStartPort}`)
+  }
+
+  const results: CookieImportResult = {
+    imported: 0,
+    skipped:  0,
+    errors:   [],
+  }
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    console.log(`[import-cookie-login] row[${i}] username=${row.username} password=${row.password?.slice(0, 4)}... cookies.length=${row.cookies?.length ?? 'N/A'} email=${row.email}`)
+    const username = row.username?.trim()
+    if (!username) {
+      console.log(`[import-cookie-login] row[${i}] SKIP: username empty`)
+      results.errors.push({ username: '', message: 'username が空' })
+      continue
+    }
+
+    let assignedProxyUrl: string | undefined
+    if (proxyMode === 'auto' && proxyHost && allPorts.length > 0) {
+      const minCount = Math.min(...allPorts.map(p => p.count))
+      const candidates = allPorts.filter(p => p.count === minCount)
+      const pick = candidates[Math.floor(Math.random() * candidates.length)]
+      pick.count++
+      assignedProxyUrl = `${proxyType}://${proxyHost}:${pick.port}`
+      console.log(`[import-cookie-login] row[${i}] auto proxy=${assignedProxyUrl} (was ${pick.count - 1}垢→${pick.count}垢)`)
+    } else if (proxyMode === 'manual' && proxyHost && options?.proxyStartPort) {
+      const port = options.proxyStartPort + i
+      assignedProxyUrl = `${proxyType}://${proxyHost}:${port}`
+      console.log(`[import-cookie-login] row[${i}] manual proxy=${assignedProxyUrl}`)
+    }
+
+    const sessionDir = path.join(
+      app.getPath('userData'), 'sessions',
+      `account-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    )
+
+    try {
+      console.log(`[import-cookie-login] row[${i}] creating account...`)
+      const account = createAccount({
+        username,
+        session_dir:    sessionDir,
+        user_agent:     row.user_agent || pickRandomIphoneUA(),
+        ig_password:    row.password || undefined,
+        proxy_url:      assignedProxyUrl,
+        proxy_username: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
+        proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
+      })
+      console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
+      // 一時停止: Threads 自動セットアップ無効化中
+      // try {
+      //   const { getDb: getDatabase } = require('../db')
+      //   getDatabase().prepare("UPDATE accounts SET threads_setup_status = 'pending' WHERE id = ?").run(account.id)
+      // } catch { /* ignore */ }
+      if (row.user_agent) {
+        updateAccountUserAgent(account.id, row.user_agent)
+      } else {
+        stampUA(account.id)
+      }
+      if (row.device_id && row.device_uuid && row.phone_id && row.adid) {
+        updateAccountDeviceIds(account.id, {
+          device_id: row.device_id, device_uuid: row.device_uuid,
+          phone_id: row.phone_id, adid: row.adid,
+        })
+        console.log(`[import-cookie-login] row[${i}] device IDs set from mobile session`)
+      }
+      if (row.mobile_headers && Object.keys(row.mobile_headers).length > 0) {
+        updateAccountMobileSession(account.id, {
+          authorization: row.mobile_headers['Authorization'] ?? null,
+          www_claim: row.mobile_headers['X-IG-WWW-Claim'] ?? null,
+          mid: row.mobile_headers['X-MID'] ?? null,
+          ds_user_id: row.mobile_headers['IG-U-DS-USER-ID'] ?? null,
+          rur: row.mobile_headers['IG-U-RUR'] ?? null,
+        })
+        console.log(`[import-cookie-login] row[${i}] mobile session headers saved`)
+      }
+      stampDeviceIds(account.id, username)
+      if (row.group_name) updateAccountGroup(account.id, row.group_name)
+      if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)
+      createAndSaveFingerprint(account.id)
+
+      // ── モバイルセッション形式の場合: Token から Cookie 抽出 → 注入 ──
+      const lightweight = options?.lightweight ?? false
+      const hasMobileAuth = !!(row.mobile_headers && (
+        row.mobile_headers['Authorization'] || row.mobile_headers['X-MID']
+      ))
+      if (hasMobileAuth && (!row.cookies || row.cookies.length === 0)) {
+        const auth = row.mobile_headers?.['Authorization']
+        if (auth) {
+          const extracted = extractCookiesFromMobileAuth(auth, row.mobile_headers)
+          if (extracted && extracted.length > 0) {
+            const permSess = session.fromPartition(`persist:account-${account.id}`)
+            const hasSession = await injectCookies(extracted as RawCookie[], permSess)
+            const mobileStatus = lightweight
+              ? (hasSession ? 'unverified' : 'needs_login')
+              : (hasSession ? 'active' : 'needs_login')
+            console.log(`[import-cookie-login] row[${i}] cookies extracted from Bearer token → injected: hasSession=${hasSession} lightweight=${lightweight} status=${mobileStatus}`)
+            updateAccountStatus(account.id, mobileStatus)
+            results.imported++
+            const delay = lightweight ? 100 + Math.random() * 200 : 2000 + Math.random() * 1000
+            if (i < rows.length - 1) await new Promise(r => setTimeout(r, delay))
+            continue
+          }
+        }
+        console.log(`[import-cookie-login] row[${i}] mobile session (no extractable cookies) → needs_login`)
+        updateAccountStatus(account.id, 'needs_login')
+        results.imported++
+        const delay = lightweight ? 100 + Math.random() * 200 : 2000 + Math.random() * 1000
+        if (i < rows.length - 1) await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+
+      // ── Cookie sanitize + UA 選択 + Probe ──────────────────────────────
+      const inputCookies = (row.cookies ?? []).map((c: unknown) => {
+        const o = c as Record<string, unknown>
+        return {
+          name:           String(o.name  ?? ''),
+          value:          String(o.value ?? ''),
+          domain:         (o.domain as string) ?? '.instagram.com',
+          path:           (o.path   as string) ?? '/',
+          secure:         o.secure  as boolean | undefined,
+          httpOnly:       o.httpOnly as boolean | undefined,
+          expirationDate: o.expirationDate as number | undefined,
+          expires:        o.expires as number | undefined,
+          sameSite:       o.sameSite as string | undefined,
+        }
+      })
+
+      const { sanitized, removed } = sanitizeCookies(inputCookies)
+      if (removed.length > 0) {
+        console.log(`[import-cookie-login] row[${i}] sanitized: removed ${removed.length} cookies:`, removed.map(r => `${r.name}(${r.reason})`).join(', '))
+      }
+      if (!isCookieSetUsable(sanitized)) {
+        console.warn(`[import-cookie-login] row[${i}] SKIP: missing required cookies after sanitize`)
+        results.errors.push({ username, message: '必須Cookie不足 (sessionid/csrftoken/ds_user_id)' })
+        continue
+      }
+
+      const { type: uaType, ua: selectedUA } = selectUA(sanitized)
+      console.log(`[import-cookie-login] row[${i}] UA type=${uaType}`)
+
+      if (lightweight) {
+        // ── 軽量モード: Health Probe スキップ、Cookie注入のみ ──
+        const permSess = session.fromPartition(`persist:account-${account.id}`)
+        const rawCookies: RawCookie[] = sanitized.map(c => ({
+          name: c.name, value: c.value, domain: c.domain, path: c.path,
+          secure: c.secure, httpOnly: c.httpOnly, expirationDate: c.expirationDate, sameSite: c.sameSite,
+        }))
+        console.log(`[import-cookie-login] row[${i}] LIGHTWEIGHT injecting ${rawCookies.length} cookies (no probe)`)
+        const hasSession = await injectCookies(rawCookies, permSess)
+        updateAccountStatus(account.id, hasSession ? 'unverified' : 'needs_login')
+        results.imported++
+        console.log(`[import-cookie-login] row[${i}] LIGHTWEIGHT done status=${hasSession ? 'unverified' : 'needs_login'}`)
+        if (i < rows.length - 1) await new Promise(r => setTimeout(r, 100 + Math.random() * 200))
+        continue
+      }
+
+      // ── 通常モード: Health Probe + Cookie注入 ──
+      const probe = await probeAccountHealth({
+        cookies: sanitized,
+        proxyUrl: assignedProxyUrl,
+        proxyUsername: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
+        proxyPassword: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
+      })
+      console.log(`[import-cookie-login] row[${i}] probe=${probe.status}${probe.status === 'alive' ? ` userId=${(probe as any).userId}` : ''}`)
+      updateProbeStatus(account.id, probe.status, uaType)
+
+      if (probe.status === 'login_required') {
+        console.log(`[import-cookie-login] row[${i}] session dead, skipping WebView`)
+        updateAccountStatus(account.id, 'needs_login')
+        results.imported++
+        if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
+        continue
+      }
+
+      const permSess = session.fromPartition(`persist:account-${account.id}`)
+      const rawCookies: RawCookie[] = sanitized.map(c => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        httpOnly: c.httpOnly,
+        expirationDate: c.expirationDate,
+        sameSite: c.sameSite,
+      }))
+      console.log(`[import-cookie-login] row[${i}] injecting ${rawCookies.length} sanitized cookies`)
+
+      const hasSession = await injectCookies(rawCookies, permSess)
+      console.log(`[import-cookie-login] row[${i}] injectCookies hasSession=${hasSession}`)
+
+      updateAccountStatus(account.id, hasSession ? 'active' : 'needs_login')
+
+      results.imported++
+      console.log(`[import-cookie-login] row[${i}] SUCCESS imported=${results.imported}`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[import-cookie-login] row[${i}] ERROR: ${msg}`)
+      if (msg.includes('UNIQUE constraint')) {
+        results.skipped++
+        results.errors.push({ username, message: '既に追加済み' })
+      } else {
+        results.errors.push({ username, message: msg })
+      }
+    }
+
+    if (i < rows.length - 1) {
+      await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
+    }
+  }
+
+  console.log(`[import-cookie-login] END imported=${results.imported} skipped=${results.skipped} errors=${results.errors.length}`)
+  return results
+}
+
 export function registerAccountHandlers(): void {
   ipcMain.handle('accounts:list', () => getAllAccounts())
 
@@ -818,299 +1133,10 @@ export function registerAccountHandlers(): void {
    */
   ipcMain.handle('accounts:import-cookie-login', async (
     _event,
-    rows: Array<{
-      username:  string
-      password:  string
-      token:     string
-      cookies:   unknown[]
-      email:     string
-      totp_secret?: string
-      user_agent?: string
-      device_id?: string
-      device_uuid?: string
-      phone_id?: string
-      adid?: string
-      mobile_headers?: Record<string, string>
-      group_name?: string | null
-    }>,
-    options?: {
-      proxyMode?:      'auto' | 'manual' | 'none'
-      proxyStartPort?: number
-    }
+    rows: CookieImportRow[],
+    options?: CookieImportOptions,
   ) => {
-    console.log(`[import-cookie-login] START rows=${rows?.length ?? 'undefined'}`)
-    if (!rows || !Array.isArray(rows)) {
-      console.error(`[import-cookie-login] rows is not array:`, typeof rows, rows)
-      return { imported: 0, skipped: 0, errors: [{ username: '', message: 'rows が不正' }] }
-    }
-
-    // ── ISP Dedicated プロキシ自動割り当て準備 ────────────────────────────
-    // 既存アカウントから isp.decodo.com のプロキシ情報を収集
-    const existingAccounts = getAllAccounts()
-    const decodoAccounts = existingAccounts.filter(a =>
-      a.proxy_url && a.proxy_url.includes('decodo')
-    )
-
-    // プロキシ認証情報を既存垢から取得（最初に見つかったもの）
-    let proxyType = 'http'
-    let proxyHost = ''
-    let proxyUsername: string | null = null
-    let proxyPassword: string | null = null
-    if (decodoAccounts.length > 0) {
-      const ref = decodoAccounts[0]
-      try {
-        const url = new URL(ref.proxy_url!)
-        proxyType = url.protocol.replace(':', '')
-        proxyHost = url.hostname
-      } catch { /* ignore */ }
-      proxyUsername = ref.proxy_username
-      proxyPassword = ref.proxy_password
-    }
-
-    // ポートごとの使用垢数を集計
-    const portCountMap = new Map<number, number>()
-    let minPort = Infinity, maxPort = -Infinity
-    for (const a of decodoAccounts) {
-      try {
-        const url = new URL(a.proxy_url!)
-        const p = parseInt(url.port, 10)
-        if (!isNaN(p)) {
-          portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
-          if (p < minPort) minPort = p
-          if (p > maxPort) maxPort = p
-        }
-      } catch { /* ignore */ }
-    }
-
-    // 設定されたポート範囲で上書き（設定がなければ既存アカウントから自動算出）
-    const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
-    const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
-    if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = cfgStart
-    if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = cfgEnd
-
-    // 使用垢数が少ない順にポートをソート（同数はランダム）
-    // 未使用ポート（範囲内で使われていないポート）も count=0 として含める
-    const allPorts: Array<{ port: number; count: number }> = []
-    if (proxyHost && minPort <= maxPort) {
-      for (let p = minPort; p <= maxPort; p++) {
-        allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
-      }
-      allPorts.sort((a, b) => {
-        if (a.count !== b.count) return a.count - b.count
-        return Math.random() - 0.5  // 同数はランダム
-      })
-    }
-    const proxyMode = options?.proxyMode ?? 'auto'
-    console.log(`[import-cookie-login] proxyMode=${proxyMode} host=${proxyHost || 'NONE'} type=${proxyType} ports=${allPorts.length} user=${proxyUsername ?? 'NONE'}`)
-    if (proxyMode === 'auto' && allPorts.length > 0) {
-      console.log(`[import-cookie-login] top 5 least-used ports: ${allPorts.slice(0, 5).map(p => `${p.port}(${p.count}垢)`).join(', ')}`)
-    }
-    if (proxyMode === 'manual') {
-      console.log(`[import-cookie-login] manual start port: ${options?.proxyStartPort}`)
-    }
-
-    const results = {
-      imported: 0,
-      skipped:  0,
-      errors:   [] as Array<{ username: string; message: string }>,
-    }
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]
-      console.log(`[import-cookie-login] row[${i}] username=${row.username} password=${row.password?.slice(0, 4)}... cookies.length=${row.cookies?.length ?? 'N/A'} email=${row.email}`)
-      const username = row.username?.trim()
-      if (!username) {
-        console.log(`[import-cookie-login] row[${i}] SKIP: username empty`)
-        results.errors.push({ username: '', message: 'username が空' })
-        continue
-      }
-
-      // プロキシ割り当て: 未使用優先 → 少使用フォールバック
-      let assignedProxyUrl: string | undefined
-      if (proxyMode === 'auto' && proxyHost && allPorts.length > 0) {
-        const minCount = Math.min(...allPorts.map(p => p.count))
-        const candidates = allPorts.filter(p => p.count === minCount)
-        const pick = candidates[Math.floor(Math.random() * candidates.length)]
-        pick.count++ // 同バッチ内での重複割り当てを防ぐ
-        assignedProxyUrl = `${proxyType}://${proxyHost}:${pick.port}`
-        console.log(`[import-cookie-login] row[${i}] auto proxy=${assignedProxyUrl} (was ${pick.count - 1}垢→${pick.count}垢)`)
-      } else if (proxyMode === 'manual' && proxyHost && options?.proxyStartPort) {
-        const port = options.proxyStartPort + i
-        assignedProxyUrl = `${proxyType}://${proxyHost}:${port}`
-        console.log(`[import-cookie-login] row[${i}] manual proxy=${assignedProxyUrl}`)
-      }
-      // proxyMode === 'none' → assignedProxyUrl は undefined のまま
-
-      const sessionDir = path.join(
-        app.getPath('userData'), 'sessions',
-        `account-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      )
-
-      try {
-        console.log(`[import-cookie-login] row[${i}] creating account...`)
-        const account = createAccount({
-          username,
-          session_dir:    sessionDir,
-          user_agent:     row.user_agent || pickRandomIphoneUA(),
-          ig_password:    row.password || undefined,
-          proxy_url:      assignedProxyUrl,
-          proxy_username: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
-          proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
-        })
-        console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
-        // 新規垢 → Threads セットアップ待ちに設定
-        try {
-          const { getDb: getDatabase } = require('../db')
-          getDatabase().prepare("UPDATE accounts SET threads_setup_status = 'pending' WHERE id = ?").run(account.id)
-        } catch { /* ignore */ }
-        // モバイルセッション付きの場合は UA とデバイスIDを上書き
-        if (row.user_agent) {
-          updateAccountUserAgent(account.id, row.user_agent)
-        } else {
-          stampUA(account.id)
-        }
-        if (row.device_id && row.device_uuid && row.phone_id && row.adid) {
-          updateAccountDeviceIds(account.id, {
-            device_id: row.device_id, device_uuid: row.device_uuid,
-            phone_id: row.phone_id, adid: row.adid,
-          })
-          console.log(`[import-cookie-login] row[${i}] device IDs set from mobile session`)
-        }
-        // モバイルセッションヘッダー保存 (Authorization Bearer 等)
-        if (row.mobile_headers && Object.keys(row.mobile_headers).length > 0) {
-          updateAccountMobileSession(account.id, {
-            authorization: row.mobile_headers['Authorization'] ?? null,
-            www_claim: row.mobile_headers['X-IG-WWW-Claim'] ?? null,
-            mid: row.mobile_headers['X-MID'] ?? null,
-            ds_user_id: row.mobile_headers['IG-U-DS-USER-ID'] ?? null,
-            rur: row.mobile_headers['IG-U-RUR'] ?? null,
-          })
-          console.log(`[import-cookie-login] row[${i}] mobile session headers saved`)
-        }
-        stampDeviceIds(account.id, username)
-        if (row.group_name) updateAccountGroup(account.id, row.group_name)
-        if (row.totp_secret) updateAccountTotpSecret(account.id, row.totp_secret)
-        createAndSaveFingerprint(account.id)
-
-        // ── モバイルセッション形式の場合: Token から Cookie 抽出 → 注入 ──
-        const hasMobileAuth = !!(row.mobile_headers && (
-          row.mobile_headers['Authorization'] || row.mobile_headers['X-MID']
-        ))
-        if (hasMobileAuth && (!row.cookies || row.cookies.length === 0)) {
-          const auth = row.mobile_headers?.['Authorization']
-          if (auth) {
-            const extracted = extractCookiesFromMobileAuth(auth, row.mobile_headers)
-            if (extracted && extracted.length > 0) {
-              const permSess = session.fromPartition(`persist:account-${account.id}`)
-              const hasSession = await injectCookies(extracted as RawCookie[], permSess)
-              console.log(`[import-cookie-login] row[${i}] cookies extracted from Bearer token → injected: hasSession=${hasSession}`)
-              updateAccountStatus(account.id, hasSession ? 'active' : 'needs_login')
-              results.imported++
-              if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
-              continue
-            }
-          }
-          // 抽出失敗 → needs_login
-          console.log(`[import-cookie-login] row[${i}] mobile session (no extractable cookies) → needs_login`)
-          updateAccountStatus(account.id, 'needs_login')
-          results.imported++
-          if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
-          continue
-        }
-
-        // ── Cookie sanitize + UA 選択 + Probe ──────────────────────────────
-        const inputCookies = (row.cookies ?? []).map((c: unknown) => {
-          const o = c as Record<string, unknown>
-          return {
-            name:           String(o.name  ?? ''),
-            value:          String(o.value ?? ''),
-            domain:         (o.domain as string) ?? '.instagram.com',
-            path:           (o.path   as string) ?? '/',
-            secure:         o.secure  as boolean | undefined,
-            httpOnly:       o.httpOnly as boolean | undefined,
-            expirationDate: o.expirationDate as number | undefined,
-            expires:        o.expires as number | undefined,
-            sameSite:       o.sameSite as string | undefined,
-          }
-        })
-
-        // 1. Sanitize
-        const { sanitized, removed } = sanitizeCookies(inputCookies)
-        if (removed.length > 0) {
-          console.log(`[import-cookie-login] row[${i}] sanitized: removed ${removed.length} cookies:`, removed.map(r => `${r.name}(${r.reason})`).join(', '))
-        }
-        if (!isCookieSetUsable(sanitized)) {
-          console.warn(`[import-cookie-login] row[${i}] SKIP: missing required cookies after sanitize`)
-          results.errors.push({ username, message: '必須Cookie不足 (sessionid/csrftoken/ds_user_id)' })
-          continue
-        }
-
-        // 2. UA 選択
-        const { type: uaType, ua: selectedUA } = selectUA(sanitized)
-        console.log(`[import-cookie-login] row[${i}] UA type=${uaType}`)
-
-        // 3. Health Probe (WebView 前に生死判定)
-        const probe = await probeAccountHealth({
-          cookies: sanitized,
-          proxyUrl: assignedProxyUrl,
-          proxyUsername: assignedProxyUrl ? (proxyUsername ?? undefined) : undefined,
-          proxyPassword: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
-        })
-        console.log(`[import-cookie-login] row[${i}] probe=${probe.status}${probe.status === 'alive' ? ` userId=${(probe as any).userId}` : ''}`)
-        updateProbeStatus(account.id, probe.status, uaType)
-
-        if (probe.status === 'login_required') {
-          console.log(`[import-cookie-login] row[${i}] session dead, skipping WebView`)
-          updateAccountStatus(account.id, 'needs_login')
-          results.imported++
-          if (i < rows.length - 1) await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
-          continue
-        }
-
-        // 4. Cookie を永続パーティションに注入
-        const permSess = session.fromPartition(`persist:account-${account.id}`)
-        const rawCookies: RawCookie[] = sanitized.map(c => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: c.path,
-          secure: c.secure,
-          httpOnly: c.httpOnly,
-          expirationDate: c.expirationDate,
-          sameSite: c.sameSite,
-        }))
-        console.log(`[import-cookie-login] row[${i}] injecting ${rawCookies.length} sanitized cookies`)
-
-        const hasSession = await injectCookies(rawCookies, permSess)
-        console.log(`[import-cookie-login] row[${i}] injectCookies hasSession=${hasSession}`)
-
-        // 5. UA をアカウントに設定
-        // (user_agent カラムは既に account 作成時に設定済みだが、probe 結果に基づいて上書き)
-
-        // Cookie セット後のステータス設定
-        updateAccountStatus(account.id, hasSession ? 'active' : 'needs_login')
-
-        results.imported++
-        console.log(`[import-cookie-login] row[${i}] SUCCESS imported=${results.imported}`)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.error(`[import-cookie-login] row[${i}] ERROR: ${msg}`)
-        if (msg.includes('UNIQUE constraint')) {
-          results.skipped++
-          results.errors.push({ username, message: '既に追加済み' })
-        } else {
-          results.errors.push({ username, message: msg })
-        }
-      }
-
-      // レート制限対策: 垢間に 2-3秒待機
-      if (i < rows.length - 1) {
-        await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
-      }
-    }
-
-    console.log(`[import-cookie-login] END imported=${results.imported} skipped=${results.skipped} errors=${results.errors.length}`)
-    return results
+    return importCookieLoginBatch(rows, options)
   })
 
   /**

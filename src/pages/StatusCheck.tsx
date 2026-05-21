@@ -77,6 +77,13 @@ const STATUS_CONFIG: Record<AccountStatus, {
     badge: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
     row: 'bg-yellow-500/5',
   },
+  unverified: {
+    label: '未検証',
+    icon: '?',
+    dot: 'bg-zinc-400',
+    badge: 'bg-zinc-700 text-zinc-300 border-zinc-600',
+    row: '',
+  },
 }
 
 // ── Time formatting ───────────────────────────────────────────────────────────
@@ -239,9 +246,9 @@ export function StatusCheck({ accounts, onCheckOne, onCheckAll }: Props) {
 
   const counts = accounts.reduce<Record<AccountStatus, number>>(
     (acc, a) => { acc[a.status] = (acc[a.status] ?? 0) + 1; return acc },
-    { active: 0, needs_login: 0, frozen: 0, error: 0, inactive: 0, challenge: 0 }
+    { active: 0, needs_login: 0, frozen: 0, error: 0, inactive: 0, challenge: 0, unverified: 0 }
   )
-  const problemCount = counts.needs_login + counts.frozen + counts.error + counts.challenge
+  const problemCount = counts.needs_login + counts.frozen + counts.error + counts.challenge + counts.unverified
 
   // ── Check all ─────────────────────────────────────────────────────────────
 
@@ -340,6 +347,7 @@ export function StatusCheck({ accounts, onCheckOne, onCheckAll }: Props) {
           <SummaryCard status="frozen"      count={counts.frozen}      total={accounts.length} />
           <SummaryCard status="error"       count={counts.error}       total={accounts.length} />
           <SummaryCard status="challenge"   count={counts.challenge}   total={accounts.length} />
+          <SummaryCard status="unverified"  count={counts.unverified}  total={accounts.length} />
           <SummaryCard status="inactive"    count={counts.inactive}    total={accounts.length} />
         </div>
       )}

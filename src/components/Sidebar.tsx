@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Account, Group, AutopostConfig, api } from '../lib/ipc'
+import { Account, Group, AutopostConfig, ScheduledImportProgress, api } from '../lib/ipc'
 import { parseCombo, detectFormat, type ComboFormat } from '../lib/parse-combo'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
@@ -43,6 +43,7 @@ const STATUS_COLOR: Record<Account['status'], string> = {
   frozen:      'bg-red-500',
   error:       'bg-red-400',
   challenge:   'bg-yellow-400',
+  unverified:  'bg-zinc-400',
 }
 const STATUS_LABEL: Record<Account['status'], string> = {
   active:      'ログイン中',
@@ -51,6 +52,7 @@ const STATUS_LABEL: Record<Account['status'], string> = {
   frozen:      '凍結',
   error:       'エラー',
   challenge:   '要確認（人間確認）',
+  unverified:  '未検証',
 }
 
 const GRADIENTS = [
@@ -245,7 +247,14 @@ export function Sidebar({
   const [cookieNewGroupName, setCookieNewGroupName] = useState('')
   const [cookieProxyMode,    setCookieProxyMode]    = useState<'auto' | 'manual' | 'none'>('auto')
   const [cookieProxyStart,   setCookieProxyStart]   = useState('')
+  const [cookieLightweight,  setCookieLightweight]  = useState(false)
   const [comboFormat,        setComboFormat]        = useState<ComboFormat>('auto')
+  // 予約インポート用
+  const [cookieImportMode,       setCookieImportMode]       = useState<'immediate' | 'scheduled'>('immediate')
+  const [scheduledIntervalMin,   setScheduledIntervalMin]   = useState(5)
+  const [scheduledCustomMin,     setScheduledCustomMin]     = useState('')
+  const [scheduledProgress,      setScheduledProgress]      = useState<ScheduledImportProgress | null>(null)
+  const [scheduledRunning,       setScheduledRunning]       = useState(false)
   // トピック XLSX 一括追加用
   const [topicGroupSel,     setTopicGroupSel]     = useState<string>('__all__')
   const [topicImporting,    setTopicImporting]    = useState(false)
@@ -504,6 +513,7 @@ export function Sidebar({
       const res = await api.accounts.importCookieLogin(payload, {
         proxyMode:      cookieProxyMode,
         proxyStartPort: cookieProxyMode === 'manual' ? parseInt(cookieProxyStart, 10) : undefined,
+        lightweight:    cookieLightweight,
       })
       const parts = [`${res.imported}件追加`]
       if (res.skipped > 0) parts.push(`スキップ(重複): ${res.skipped}件`)
@@ -520,6 +530,103 @@ export function Sidebar({
     } finally {
       setCsvImporting(false)
     }
+  }
+
+  // ── 予約インポート進捗リスナー ─────────────────────────────────────────
+  useEffect(() => {
+    const cleanup = api.on('scheduled-import:progress', (...args: unknown[]) => {
+      const data = args[0] as ScheduledImportProgress
+      setScheduledProgress(data)
+      if (data.status !== 'running') {
+        setScheduledRunning(false)
+        if (data.status === 'completed') {
+          showCsvToast(`予約インポート完了: ${data.total}垢`, true)
+          window.dispatchEvent(new CustomEvent('accounts-changed'))
+        } else if (data.status === 'cancelled') {
+          showCsvToast(`予約インポートをキャンセルしました (${data.done}/${data.total}垢完了)`, false)
+          window.dispatchEvent(new CustomEvent('accounts-changed'))
+        } else if (data.status === 'error') {
+          showCsvToast(`予約インポートエラー: ${data.error}`, false)
+        }
+      } else if (data.done > 0 && data.done % 5 === 0) {
+        // 5垢ごとにアカウント一覧を更新
+        window.dispatchEvent(new CustomEvent('accounts-changed'))
+      }
+    })
+    return cleanup
+  }, [])
+
+  // ── 予約インポート開始 ───────────────────────────────────────────────
+  const handleScheduledImport = async () => {
+    const text = cookieText.trim()
+    if (!text) { showCsvToast('テキストを入力してください', false); return }
+
+    const minutes = scheduledIntervalMin === -1 ? Number(scheduledCustomMin) : scheduledIntervalMin
+    if (!minutes || minutes < 1) {
+      showCsvToast('間隔は1分以上で指定してください', false)
+      return
+    }
+
+    // グループ決定
+    let targetGroup: string | null = null
+    if (cookieGroupSel === '__new__') {
+      const name = cookieNewGroupName.trim()
+      if (!name) { showCsvToast('グループ名を入力してください', false); return }
+      const r = await api.groups.create(name)
+      if (r.success) setGroups(prev => [...prev, r.group])
+      targetGroup = name
+    } else if (cookieGroupSel !== '__none__') {
+      targetGroup = cookieGroupSel
+    }
+
+    try {
+      const parsed = parseCombo(text, comboFormat)
+      const payload = parsed.map(r => ({
+        username: r.username,
+        password: r.password,
+        token: r.token,
+        cookies: r.cookies,
+        email: r.email,
+        totp_secret: r.totpSecret || undefined,
+        user_agent: r.userAgent || undefined,
+        device_id: r.deviceId || undefined,
+        device_uuid: r.deviceUuid || undefined,
+        phone_id: r.phoneId || undefined,
+        adid: r.adid || undefined,
+        mobile_headers: r.mobileHeaders || undefined,
+        group_name: targetGroup,
+      })).filter(r => r.username)
+
+      if (payload.length === 0) { showCsvToast('有効な行がありません', false); return }
+
+      if (cookieProxyMode === 'none') {
+        if (!confirm(
+          `${payload.length}垢をプロキシなしで予約インポートします。\n` +
+          `自宅IPでログインするとIP特定リスクがあります。\n\n続行しますか？`
+        )) return
+      }
+
+      setScheduledRunning(true)
+      setScheduledProgress(null)
+
+      await api.scheduledImport.start({
+        rows: payload,
+        intervalMs: minutes * 60_000,
+        importOptions: {
+          proxyMode:      cookieProxyMode,
+          proxyStartPort: cookieProxyMode === 'manual' ? parseInt(cookieProxyStart, 10) : undefined,
+        },
+      })
+
+      showCsvToast(`予約インポート開始: ${payload.length}垢を${minutes}分間隔で処理`, true)
+    } catch (err) {
+      setScheduledRunning(false)
+      showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+    }
+  }
+
+  const handleScheduledImportCancel = async () => {
+    await api.scheduledImport.cancel()
   }
 
   // ── トピック XLSX 一括追加 ──────────────────────────────────────────
@@ -1211,6 +1318,9 @@ export function Sidebar({
                           {account.paused_until && account.paused_until !== '永続' && new Date(account.paused_until) > new Date() && (
                             <span className="shrink-0 px-1 py-0 rounded bg-amber-600/20 text-amber-400 text-[8px] font-bold leading-tight" title={`${account.pause_reason ?? ''} (${account.paused_until}まで)`}>⏸</span>
                           )}
+                          {account.status === 'unverified' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-400 text-[8px] font-bold leading-tight" title="未検証 - 初回使用時に自動検証">未検証</span>
+                          )}
                           {account.threads_setup_status === 'pending' && (
                             <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-400 text-[8px] font-bold leading-tight">T待</span>
                           )}
@@ -1542,17 +1652,161 @@ export function Sidebar({
                 />
               )}
 
-              <button
-                onClick={handleCookieLoginImport}
-                disabled={
-                  csvImporting || !cookieText.trim() ||
-                  (cookieGroupSel === '__new__' && !cookieNewGroupName.trim()) ||
-                  (cookieProxyMode === 'manual' && !cookieProxyStart.trim())
-                }
-                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
-              >
-                {csvImporting ? '読込中...' : 'Cookieインポート実行'}
-              </button>
+              {/* 軽量モード */}
+              <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={cookieLightweight}
+                  onChange={e => setCookieLightweight(e.target.checked)}
+                  className="w-3 h-3 accent-emerald-500"
+                />
+                <span className="text-zinc-300 text-[10px]">軽量モード</span>
+                <span className="text-zinc-600 text-[9px]">（IG接続スキップ・瞬間完了）</span>
+              </label>
+
+              {/* インポートモード切替 */}
+              <label className="block text-zinc-500 text-[10px] mb-1">インポートモード</label>
+              <div className="flex gap-1 mb-2 bg-zinc-800/60 p-0.5 rounded-lg">
+                <button
+                  onClick={() => setCookieImportMode('immediate')}
+                  disabled={scheduledRunning}
+                  className={`flex-1 py-1 text-[10px] font-semibold rounded-md transition-colors ${
+                    cookieImportMode === 'immediate'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  } disabled:opacity-40`}
+                >
+                  即時
+                </button>
+                <button
+                  onClick={() => setCookieImportMode('scheduled')}
+                  disabled={csvImporting}
+                  className={`flex-1 py-1 text-[10px] font-semibold rounded-md transition-colors ${
+                    cookieImportMode === 'scheduled'
+                      ? 'bg-amber-600 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  } disabled:opacity-40`}
+                >
+                  予約
+                </button>
+              </div>
+
+              {cookieImportMode === 'scheduled' && (
+                <>
+                  <label className="block text-zinc-500 text-[10px] mb-1">インポート間隔</label>
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {[3, 5, 10].map(m => (
+                      <button
+                        key={m}
+                        onClick={() => setScheduledIntervalMin(m)}
+                        disabled={scheduledRunning}
+                        className={`px-2 py-1 text-[10px] font-semibold rounded-md transition-colors ${
+                          scheduledIntervalMin === m
+                            ? 'bg-amber-600 text-white'
+                            : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                        } disabled:opacity-40`}
+                      >
+                        {m}分
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setScheduledIntervalMin(-1)}
+                      disabled={scheduledRunning}
+                      className={`px-2 py-1 text-[10px] font-semibold rounded-md transition-colors ${
+                        scheduledIntervalMin === -1
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      } disabled:opacity-40`}
+                    >
+                      カスタム
+                    </button>
+                    {scheduledIntervalMin === -1 && (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={scheduledCustomMin}
+                          onChange={e => setScheduledCustomMin(e.target.value)}
+                          min="1"
+                          placeholder="分"
+                          disabled={scheduledRunning}
+                          className="w-12 px-1.5 py-1 bg-zinc-800 text-white text-[10px] rounded-md border border-zinc-700 focus:outline-none focus:border-amber-500 font-mono disabled:opacity-40"
+                        />
+                        <span className="text-zinc-500 text-[10px]">分</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 予約インポート進捗 */}
+                  {scheduledProgress && (
+                    <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
+                      {scheduledProgress.status === 'running' && (
+                        <p className="text-amber-300 text-[10px]">
+                          予約中... {scheduledProgress.done}/{scheduledProgress.total} 完了
+                          {scheduledProgress.currentUsername && (
+                            <span className="text-zinc-400"> (現在: {scheduledProgress.currentUsername})</span>
+                          )}
+                        </p>
+                      )}
+                      {scheduledProgress.status === 'completed' && (
+                        <p className="text-emerald-400 text-[10px]">完了: {scheduledProgress.total}垢インポート済み</p>
+                      )}
+                      {scheduledProgress.status === 'cancelled' && (
+                        <p className="text-zinc-400 text-[10px]">キャンセル済み ({scheduledProgress.done}/{scheduledProgress.total}垢完了)</p>
+                      )}
+                      {scheduledProgress.status === 'error' && (
+                        <p className="text-red-400 text-[10px]">エラー: {scheduledProgress.error}</p>
+                      )}
+                      {scheduledProgress.status === 'running' && (
+                        <div className="mt-1.5 w-full bg-zinc-800 rounded-full h-1">
+                          <div
+                            className="bg-amber-500 h-1 rounded-full transition-all"
+                            style={{ width: `${Math.round((scheduledProgress.done / scheduledProgress.total) * 100)}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!scheduledRunning ? (
+                    <button
+                      onClick={handleScheduledImport}
+                      disabled={
+                        !cookieText.trim() ||
+                        (cookieGroupSel === '__new__' && !cookieNewGroupName.trim()) ||
+                        (cookieProxyMode === 'manual' && !cookieProxyStart.trim()) ||
+                        (scheduledIntervalMin === -1 && (!scheduledCustomMin || Number(scheduledCustomMin) < 1))
+                      }
+                      className="w-full py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+                    >
+                      予約インポート開始
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleScheduledImportCancel}
+                      className="w-full py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded-lg transition-colors"
+                    >
+                      キャンセル
+                    </button>
+                  )}
+                  <p className="text-zinc-600 text-[9px] mt-1.5 leading-tight">
+                    TM を閉じると予約は失われます。
+                  </p>
+                </>
+              )}
+
+              {cookieImportMode === 'immediate' && (
+                <button
+                  onClick={handleCookieLoginImport}
+                  disabled={
+                    csvImporting || scheduledRunning || !cookieText.trim() ||
+                    (cookieGroupSel === '__new__' && !cookieNewGroupName.trim()) ||
+                    (cookieProxyMode === 'manual' && !cookieProxyStart.trim())
+                  }
+                  className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+                >
+                  {csvImporting ? '読込中...' : 'Cookieインポート実行'}
+                </button>
+              )}
             </>
           )}
 

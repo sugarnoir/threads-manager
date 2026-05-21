@@ -5,7 +5,7 @@ export interface Account {
   username: string
   display_name: string | null
   session_dir: string
-  status: 'active' | 'inactive' | 'needs_login' | 'frozen' | 'error' | 'challenge'
+  status: 'active' | 'inactive' | 'needs_login' | 'frozen' | 'error' | 'challenge' | 'unverified'
   avatar_url: string | null
   proxy_url: string | null
   proxy_username: string | null
@@ -127,6 +127,14 @@ export interface AccountAnalysis {
   followerCount: string | null
   avgLikes: number | null
   recentPosts: { text: string; likes: string; replies: string; reposts: string; url: string; imageUrl: string | null; timestamp: string | null }[]
+}
+
+export interface ScheduledImportProgress {
+  done:            number
+  total:           number
+  currentUsername: string | null
+  status:          'running' | 'completed' | 'cancelled' | 'error'
+  error?:          string
 }
 
 export interface SearchPost {
@@ -499,6 +507,7 @@ declare global {
         }>, options?: {
           proxyMode?:      'auto' | 'manual' | 'none'
           proxyStartPort?: number
+          lightweight?:    boolean
         }) => Promise<{
           imported: number
           skipped:  number
@@ -742,6 +751,12 @@ declare global {
         list:      (limit?: number, offset?: number) => Promise<ResponseAlertRow[]>
         byAccount: (accountId: number, limit?: number) => Promise<ResponseAlertRow[]>
         summary:   () => Promise<AlertSummary[]>
+      }
+      scheduledImport: {
+        start:  (args: { rows: unknown[]; intervalMs: number; importOptions: { proxyMode?: string; proxyStartPort?: number } }) =>
+                  Promise<{ started: boolean; total: number }>
+        cancel: () => Promise<{ cancelled: boolean }>
+        status: () => Promise<{ running: boolean }>
       }
       dialog: {
         openFile: () => Promise<{ name: string; path: string; data: number[] } | null>

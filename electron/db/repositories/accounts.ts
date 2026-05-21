@@ -5,7 +5,7 @@ export interface Account {
   username: string
   display_name: string | null
   session_dir: string
-  status: 'active' | 'inactive' | 'needs_login' | 'frozen' | 'error' | 'challenge'
+  status: 'active' | 'inactive' | 'needs_login' | 'frozen' | 'error' | 'challenge' | 'unverified'
   avatar_url: string | null
   proxy_url: string | null
   proxy_username: string | null

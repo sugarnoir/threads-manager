@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }>, options?: {
       proxyMode?:      'auto' | 'manual' | 'none'
       proxyStartPort?: number
+      lightweight?:    boolean
     }) => ipcRenderer.invoke('accounts:import-cookie-login', rows, options),
     checkReplyBan: (id: number) =>
       ipcRenderer.invoke('accounts:check-reply-ban', id) as Promise<{ success: boolean; status?: string; tweetCount?: number; error?: string }>,
@@ -427,6 +428,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     list:      (limit?: number, offset?: number) => ipcRenderer.invoke('alerts:list', limit, offset),
     byAccount: (accountId: number, limit?: number) => ipcRenderer.invoke('alerts:byAccount', accountId, limit),
     summary:   () => ipcRenderer.invoke('alerts:summary'),
+  },
+
+  scheduledImport: {
+    start: (args: { rows: unknown[]; intervalMs: number; importOptions: { proxyMode?: string; proxyStartPort?: number } }) =>
+      ipcRenderer.invoke('scheduled-import:start', args) as Promise<{ started: boolean; total: number }>,
+    cancel: () => ipcRenderer.invoke('scheduled-import:cancel') as Promise<{ cancelled: boolean }>,
+    status: () => ipcRenderer.invoke('scheduled-import:status') as Promise<{ running: boolean }>,
   },
 
   dialog: {

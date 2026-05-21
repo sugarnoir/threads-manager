@@ -29,8 +29,10 @@ import { registerPinnedCheckHandlers } from './ipc/pinned-check'
 import { registerReelScheduleHandlers } from './ipc/reel-schedule'
 import { startAutoLoginScheduler } from './ig/auto-login-scheduler'
 import { startPinCheckJob } from './jobs/pin-check-job'
+import { startUnverifiedCheckJob } from './jobs/unverified-check-job'
 import { startThreadsSetupJob } from './jobs/threads-setup-job'
 import { registerResponseAlertHandlers } from './ipc/response-alerts'
+import { registerScheduledImportHandlers } from './ipc/scheduled-import'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 import { registerAppConfigHandlers } from './ipc/app-config'
@@ -101,13 +103,15 @@ app.whenReady().then(() => {
   registerResponseAlertHandlers()
   startAutoLoginScheduler()
   startPinCheckJob()
-  startThreadsSetupJob()
+  startUnverifiedCheckJob()
+  // startThreadsSetupJob()  // 一時停止: Threads 自動セットアップ無効化中
   initAppConfig() // fire-and-forget: 起動を遅延させない
   registerGroupHandlers()
   registerResearchHandlers()
   registerStockHandlers()
   registerTemplateHandlers()
   registerAccountHandlers()
+  registerScheduledImportHandlers()
   registerPostHandlers()
   registerSchedulerHandlers()
   registerSettingsHandlers()

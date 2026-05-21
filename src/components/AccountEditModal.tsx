@@ -52,6 +52,7 @@ const STATUS_COLOR: Record<Account['status'], string> = {
   frozen:      'bg-red-500',
   error:       'bg-red-400',
   challenge:   'bg-yellow-400',
+  unverified:  'bg-zinc-400',
 }
 const STATUS_LABEL: Record<Account['status'], string> = {
   active:      'ログイン中',
@@ -60,6 +61,7 @@ const STATUS_LABEL: Record<Account['status'], string> = {
   frozen:      '凍結',
   error:       'エラー',
   challenge:   '要確認',
+  unverified:  '未検証',
 }
 
 // ── Stocks tab ────────────────────────────────────────────────────────────────

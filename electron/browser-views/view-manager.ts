@@ -5,7 +5,9 @@ import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { getContextCookiesIfOpen, closeContext } from '../playwright/browser-manager'
 import fs from 'fs'
 import { getSetting, setSetting } from '../db/repositories/settings'
-import { getAccountById, updateAccountStatus } from '../db/repositories/accounts'
+import { getAccountById, updateAccountStatus, updateProbeStatus } from '../db/repositories/accounts'
+import { probeAccountHealth } from '../ig/health-probe'
+import { selectUA } from '../ig/ua-selector'
 import { sendDiscordNotification } from '../discord'
 
 /** チャレンジ（人間確認）ページのURLパターン */
@@ -227,7 +229,7 @@ export async function fetchProfileFromInstagram(
 
 // ── StatusCheckResult ─────────────────────────────────────────────────────────
 
-export type AccountStatus = 'active' | 'needs_login' | 'frozen' | 'error' | 'challenge'
+export type AccountStatus = 'active' | 'needs_login' | 'frozen' | 'error' | 'challenge' | 'unverified'
 
 export interface StatusCheckResult {
   status: AccountStatus
@@ -1836,6 +1838,53 @@ export class ViewManager {
       .catch(() => {})
   }
 
+  /**
+   * unverified 垢を初回表示時に即座に検証する。
+   * alive → active, login_required → needs_login に更新。
+   */
+  private async _verifyIfUnverified(accountId: number, sess: Electron.Session): Promise<void> {
+    const acct = getAccountById(accountId)
+    if (!acct || acct.status !== 'unverified') return
+
+    console.log(`[_verifyIfUnverified] account=${accountId} @${acct.username} — on-demand verification`)
+    const allCookies = await sess.cookies.get({})
+    const igCookies = allCookies.filter(c =>
+      c.domain?.includes('instagram.com') || c.domain?.includes('threads.com')
+    )
+    if (igCookies.length === 0) {
+      updateAccountStatus(accountId, 'needs_login')
+      return
+    }
+
+    const cookiesForProbe = igCookies.map(c => ({ name: c.name, value: c.value }))
+    const { type: uaType } = selectUA(cookiesForProbe)
+
+    try {
+      const probe = await probeAccountHealth({
+        cookies: cookiesForProbe,
+        proxyUrl: acct.proxy_url ?? undefined,
+        proxyUsername: acct.proxy_url ? (acct.proxy_username ?? undefined) : undefined,
+        proxyPassword: acct.proxy_url ? (acct.proxy_password ?? undefined) : undefined,
+      })
+      updateProbeStatus(accountId, probe.status, uaType)
+
+      if (probe.status === 'alive') {
+        updateAccountStatus(accountId, 'active')
+        console.log(`[_verifyIfUnverified] @${acct.username}: active`)
+      } else if (probe.status === 'login_required') {
+        updateAccountStatus(accountId, 'needs_login')
+        console.log(`[_verifyIfUnverified] @${acct.username}: needs_login`)
+      } else if (probe.status === 'challenge') {
+        updateAccountStatus(accountId, 'challenge')
+        console.log(`[_verifyIfUnverified] @${acct.username}: challenge`)
+      } else {
+        console.log(`[_verifyIfUnverified] @${acct.username}: ${probe.status} — keeping unverified`)
+      }
+    } catch (err) {
+      console.error(`[_verifyIfUnverified] @${acct.username} error:`, err)
+    }
+  }
+
   private async _bgInitView(accountId: number): Promise<void> {
     const entry = this.views.get(accountId)
     // loaded フラグで二重実行を防ぐ
@@ -1844,6 +1893,9 @@ export class ViewManager {
     console.log(`[_bgInitView] START account=${accountId} bounds=`, entry.view.getBounds())
     const sess = session.fromPartition(`persist:account-${accountId}`)
     await this.ensureSessionCookies(accountId, sess).catch(() => {})
+
+    // ── unverified 垢の手動検証（初回表示時） ──
+    await this._verifyIfUnverified(accountId, sess).catch(() => {})
 
     // プロキシを loadURL より前に await で設定する。
     // fire-and-forget にすると loadURL 後に proxy が設定され Chromium が接続を再確立するため

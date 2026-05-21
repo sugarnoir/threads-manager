@@ -14,6 +14,7 @@ const STATUS_REASONS: Record<string, string> = {
   needs_login: 'ログインが必要です',
   error:       'エラー状態です',
   inactive:    'アカウントが無効です',
+  unverified:  '未検証です（アカウントを選択すると自動検証されます）',
 }
 
 export interface GuardResult {
