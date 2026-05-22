@@ -50,6 +50,7 @@ export interface Account {
   threads_setup_at: string | null
   threads_setup_error: string | null
   threads_setup_attempts: number
+  stealth_override: 'on' | 'off' | null
   created_at: string
   updated_at: string
 }
@@ -58,6 +59,7 @@ export interface Group {
   id: number
   name: string
   sort_order: number
+  stealth_enabled: number
 }
 
 export interface Post {
@@ -497,6 +499,7 @@ declare global {
           success: boolean
           error?:  string
         }>
+        updateStealth: (data: { ids: number[]; override: 'on' | 'off' | null }) => Promise<{ success: boolean }>
         importCookieLogin: (rows: Array<{
           username:    string
           password:    string
@@ -603,6 +606,7 @@ declare global {
         rename: (data: { oldName: string; newName: string }) => Promise<{ success: boolean }>
         delete: (name: string) => Promise<{ success: boolean }>
         reorder: (updates: { id: number; sort_order: number }[]) => Promise<{ success: boolean }>
+        updateStealth: (data: { name: string; enabled: boolean }) => Promise<{ success: boolean }>
       }
       stocks: {
         list:   (accountId: number) => Promise<{ success: boolean; data: PostStock[]; error?: string }>

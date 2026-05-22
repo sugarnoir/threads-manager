@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { getAllGroups, createGroup, renameGroup, deleteGroup, reorderGroups } from '../db/repositories/groups'
+import { getAllGroups, createGroup, renameGroup, deleteGroup, reorderGroups, updateGroupStealth } from '../db/repositories/groups'
 
 export function registerGroupHandlers(): void {
   ipcMain.handle('groups:list', () => getAllGroups())
@@ -21,6 +21,11 @@ export function registerGroupHandlers(): void {
 
   ipcMain.handle('groups:reorder', (_e, updates: { id: number; sort_order: number }[]) => {
     reorderGroups(updates)
+    return { success: true }
+  })
+
+  ipcMain.handle('groups:update-stealth', (_e, data: { name: string; enabled: boolean }) => {
+    updateGroupStealth(data.name, data.enabled)
     return { success: true }
   })
 }

@@ -383,6 +383,19 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN threads_setup_attempts INTEGER DEFAULT 0")
   }
 
+  // Stealth 個別オーバーライド: NULL=設定に従う, 'on'=強制ON, 'off'=強制OFF
+  if (!colNames.includes('stealth_override')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN stealth_override TEXT")
+  }
+
+  // groups テーブルに stealth_enabled カラム追加
+  {
+    const groupCols = db.prepare("PRAGMA table_info(groups)").all() as { name: string }[]
+    if (!groupCols.some(c => c.name === 'stealth_enabled')) {
+      db.exec("ALTER TABLE groups ADD COLUMN stealth_enabled INTEGER DEFAULT 0")
+    }
+  }
+
   // pin_check_history テーブル
   db.exec(`
     CREATE TABLE IF NOT EXISTS pin_check_history (

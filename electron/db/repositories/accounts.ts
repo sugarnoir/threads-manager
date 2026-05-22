@@ -52,6 +52,7 @@ export interface Account {
   threads_setup_at: string | null
   threads_setup_error: string | null
   threads_setup_attempts: number
+  stealth_override: 'on' | 'off' | null
   created_at: string
   updated_at: string
 }
@@ -284,6 +285,20 @@ export function updatePinnedPostStatus(
   getDb()
     .prepare("UPDATE accounts SET pinned_post_url = ?, pinned_post_status = ?, pinned_checked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
     .run(url, status, id)
+}
+
+export function updateStealthOverride(id: number, override: 'on' | 'off' | null): void {
+  getDb()
+    .prepare("UPDATE accounts SET stealth_override = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(override, id)
+}
+
+export function bulkUpdateStealthOverride(ids: number[], override: 'on' | 'off' | null): void {
+  const db = getDb()
+  const stmt = db.prepare("UPDATE accounts SET stealth_override = ?, updated_at = datetime('now') WHERE id = ?")
+  db.transaction(() => {
+    for (const id of ids) stmt.run(override, id)
+  })()
 }
 
 export function updateAccountTotpSecret(id: number, totp_secret: string | null): void {

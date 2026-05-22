@@ -830,6 +830,14 @@ export function Sidebar({
     return unsub
   }, [accounts, onOpenAccount, onCheckStatus, onEditAccount, onDeleteAccount])
 
+  // Stealth 変更時にアカウント一覧を更新
+  useEffect(() => {
+    const unsub = api.on('accounts:stealth-changed', () => {
+      window.dispatchEvent(new CustomEvent('accounts-changed'))
+    })
+    return unsub
+  }, [])
+
   const handleContextMenu = (e: React.MouseEvent, accountId: number) => {
     e.preventDefault()
     api.accounts.contextMenu(accountId)
@@ -1320,6 +1328,9 @@ export function Sidebar({
                           )}
                           {account.status === 'unverified' && (
                             <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-400 text-[8px] font-bold leading-tight" title="未検証 - 初回使用時に自動検証">未検証</span>
+                          )}
+                          {account.stealth_override === 'on' && (
+                            <span className="shrink-0 px-1 py-0 rounded bg-blue-500/15 text-blue-400 text-[8px] font-bold leading-tight" title="Stealth 強制ON">🛡</span>
                           )}
                           {account.threads_setup_status === 'pending' && (
                             <span className="shrink-0 px-1 py-0 rounded bg-zinc-700/60 text-zinc-400 text-[8px] font-bold leading-tight">T待</span>

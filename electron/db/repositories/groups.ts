@@ -4,6 +4,7 @@ export interface Group {
   id: number
   name: string
   sort_order: number
+  stealth_enabled: number
 }
 
 export function getAllGroups(): Group[] {
@@ -39,4 +40,12 @@ export function reorderGroups(updates: { id: number; sort_order: number }[]): vo
   db.transaction(() => {
     for (const u of updates) stmt.run(u.sort_order, u.id)
   })()
+}
+
+export function getGroupByName(name: string): Group | undefined {
+  return getDb().prepare('SELECT * FROM groups WHERE name = ?').get(name) as Group | undefined
+}
+
+export function updateGroupStealth(name: string, enabled: boolean): void {
+  getDb().prepare('UPDATE groups SET stealth_enabled = ? WHERE name = ?').run(enabled ? 1 : 0, name)
 }

@@ -22,6 +22,8 @@ import {
   updateAccountUA,
   updateAccountDeviceIds,
   updateAccountUnifiedHeaders,
+  updateStealthOverride,
+  bulkUpdateStealthOverride,
 } from '../db/repositories/accounts'
 import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { generateAccountUA, getInstagramAppVersion } from '../lib/ua-generator'
@@ -1523,6 +1525,23 @@ export function registerAccountHandlers(): void {
         label: '🔒  プロキシ設定',
         click: () => win.webContents.send('accounts:action', { type: 'edit-proxy', accountId }),
       },
+      {
+        label: '🛡  Stealth',
+        submenu: [
+          {
+            label: '設定に従う（デフォルト）',
+            click: () => { updateStealthOverride(accountId, null); win.webContents.send('accounts:stealth-changed') },
+          },
+          {
+            label: '強制 ON',
+            click: () => { updateStealthOverride(accountId, 'on'); win.webContents.send('accounts:stealth-changed') },
+          },
+          {
+            label: '強制 OFF',
+            click: () => { updateStealthOverride(accountId, 'off'); win.webContents.send('accounts:stealth-changed') },
+          },
+        ],
+      },
       { type: 'separator' },
       {
         label: '🗑  削除',
@@ -1531,6 +1550,11 @@ export function registerAccountHandlers(): void {
     ])
 
     menu.popup({ window: win })
+  })
+
+  ipcMain.handle('accounts:update-stealth', (_event, data: { ids: number[]; override: 'on' | 'off' | null }) => {
+    bulkUpdateStealthOverride(data.ids, data.override)
+    return { success: true }
   })
 
   ipcMain.handle('accounts:login-instagram', async (_event, accountId: number) => {

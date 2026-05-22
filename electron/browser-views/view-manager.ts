@@ -6,7 +6,8 @@ import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { getContextCookiesIfOpen, closeContext } from '../playwright/browser-manager'
 import fs from 'fs'
 import { getSetting, setSetting } from '../db/repositories/settings'
-import { getAccountById, updateAccountStatus, updateProbeStatus } from '../db/repositories/accounts'
+import { getAccountById, updateAccountStatus, updateProbeStatus, type Account } from '../db/repositories/accounts'
+import { getGroupByName } from '../db/repositories/groups'
 import { probeAccountHealth } from '../ig/health-probe'
 import { selectUA } from '../ig/ua-selector'
 import { sendDiscordNotification } from '../discord'
@@ -483,6 +484,34 @@ export class ViewManager {
 
   // ── View creation ─────────────────────────────────────────────────────────
 
+  /**
+   * Stealth 適用判定。優先順位: 個別override → グループ → status ベース。
+   * 個別 'on' はマスタースイッチに関係なく有効。
+   */
+  private _shouldApplyStealth(account: Account | undefined): boolean {
+    if (!account) return false
+
+    // 1. 個別オーバーライド最優先
+    if (account.stealth_override === 'on') return true
+    if (account.stealth_override === 'off') return false
+
+    // 2. マスタースイッチ
+    const masterEnabled = getSetting('stealth_enabled') === 'true'
+    if (!masterEnabled) return false
+
+    // 3. グループ設定
+    if (account.group_name) {
+      const group = getGroupByName(account.group_name)
+      if (group?.stealth_enabled === 1) return true
+    }
+
+    // 4. status ベース（後方互換）
+    const applyToNew = getSetting('stealth_apply_to_new') !== 'false'
+    const applyToExisting = getSetting('stealth_apply_to_existing') === 'true'
+    const isNew = account.status === 'unverified' || account.status === 'inactive'
+    return (isNew && applyToNew) || (!isNew && applyToExisting)
+  }
+
   private makeView(accountId: number): WebContentsView {
     const partition = `persist:account-${accountId}`
     const sess = session.fromPartition(partition)
@@ -500,14 +529,8 @@ export class ViewManager {
     const fp = loadOrCreateFingerprint(accountId)
     const overrideScript = buildOverrideScript(fp)
 
-    // Stealth evasion (デフォルトOFF)
-    const stealthEnabled = getSetting('stealth_enabled') === 'true'
-    const stealthApplyNew = getSetting('stealth_apply_to_new') !== 'false'
-    const stealthApplyExisting = getSetting('stealth_apply_to_existing') === 'true'
-    const isNewAccount = acctForEmu?.status === 'unverified' || acctForEmu?.status === 'inactive'
-    const applyStealth = stealthEnabled && (
-      (isNewAccount && stealthApplyNew) || (!isNewAccount && stealthApplyExisting)
-    )
+    // Stealth evasion (デフォルトOFF、個別→グループ→status の優先順)
+    const applyStealth = this._shouldApplyStealth(acctForEmu)
     const stealthScript = applyStealth ? buildStealthScript() : null
     if (applyStealth) console.log(`[makeView] stealth ENABLED for account=${accountId}`)
 

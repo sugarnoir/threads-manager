@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     autoRename: (id: number, customNames?: string[]) => ipcRenderer.invoke('accounts:auto-rename', id, customNames),
     regenerateUA: (id: number) => ipcRenderer.invoke('accounts:regenerate-ua', id),
     updateUnifiedHeaders: (id: number, enabled: boolean) => ipcRenderer.invoke('accounts:update-unified-headers', id, enabled),
+    updateStealth: (data: { ids: number[]; override: 'on' | 'off' | null }) => ipcRenderer.invoke('accounts:update-stealth', data),
     importCookieLogin: (rows: Array<{
       username:    string
       password:    string
@@ -215,6 +216,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     rename: (data: { oldName: string; newName: string }) => ipcRenderer.invoke('groups:rename', data),
     delete: (name: string) => ipcRenderer.invoke('groups:delete', name),
     reorder: (updates: { id: number; sort_order: number }[]) => ipcRenderer.invoke('groups:reorder', updates),
+    updateStealth: (data: { name: string; enabled: boolean }) => ipcRenderer.invoke('groups:update-stealth', data),
   },
 
   // Research
