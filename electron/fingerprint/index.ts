@@ -64,12 +64,11 @@ interface UaProfile {
   isFirefox: boolean
 }
 
+// Firefox UA は Chromium ベースの Electron で sec-ch-ua ヘッダと矛盾するため Chrome のみ使用
 const UA_POOL: UaProfile[] = [
   ...UA_CHROME_MAC.map(ua   => ({ userAgent: ua, platform: 'MacIntel',   vendor: 'Google Inc.', isFirefox: false })),
   ...UA_CHROME_WIN.map(ua   => ({ userAgent: ua, platform: 'Win32',      vendor: 'Google Inc.', isFirefox: false })),
   ...UA_CHROME_LINUX.map(ua => ({ userAgent: ua, platform: 'Linux x86_64', vendor: 'Google Inc.', isFirefox: false })),
-  ...UA_FIREFOX_WIN.map(ua  => ({ userAgent: ua, platform: 'Win32',      vendor: '',             isFirefox: true  })),
-  ...UA_FIREFOX_MAC.map(ua  => ({ userAgent: ua, platform: 'MacIntel',   vendor: '',             isFirefox: true  })),
 ]
 
 const SCREEN_SIZES: [number, number][] = [
@@ -207,7 +206,16 @@ export function loadOrCreateFingerprint(accountId: number): Fingerprint {
   const stored = getAccountFingerprint(accountId)
   if (stored) {
     try {
-      return JSON.parse(stored) as Fingerprint
+      const fp = JSON.parse(stored) as Fingerprint
+      // Firefox UA が残っている場合は Chrome UA に差し替えて保存し直す
+      if (fp.userAgent && /Firefox\/\d/.test(fp.userAgent)) {
+        const chromeUa = pick(UA_POOL)
+        fp.userAgent = chromeUa.userAgent
+        fp.platform  = chromeUa.platform
+        fp.vendor    = chromeUa.vendor
+        setAccountFingerprint(accountId, JSON.stringify(fp))
+      }
+      return fp
     } catch { /* JSON 破損時は再生成 */ }
   }
   // 未保存のアカウント（既存アカウントの後方互換）は初回起動時に生成して固定
@@ -344,7 +352,9 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
     let _lcg = ${fp.canvasSeed} | 1
     const _lcgNext = () => { _lcg = (_lcg * 1664525 + 1013904223) >>> 0; return _lcg }
     // Keep ~70-85% of extensions for realistic variation
-    const _GL_EXTS = _GL_EXTS_ALL.filter(() => (_lcgNext() % 100) < 80)
+    // WEBGL_debug_renderer_info は必ず含める（bot.sannysoft.com 等が ext 経由で vendor/renderer を取得する）
+    const _GL_MUST_HAVE = ['WEBGL_debug_renderer_info']
+    const _GL_EXTS = _GL_EXTS_ALL.filter((name) => _GL_MUST_HAVE.includes(name) || (_lcgNext() % 100) < 80)
     const _patchGL = (Ctx) => {
       if (!Ctx) return
       const orig = Ctx.prototype.getParameter

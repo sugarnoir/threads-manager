@@ -11,23 +11,11 @@ export function buildStealthScript(): string {
   return `(function() {
   try {
 
-    // ── 1. navigator.webdriver を完全に undefined にする ──
-    // Chromium は webdriver=false でも検知される。
-    // delete ではなく defineProperty で get: undefined にする。
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-      configurable: true,
-    })
-    // prototype にも設定（一部検知手法は prototype chain を辿る）
-    try {
-      const proto = Object.getPrototypeOf(navigator)
-      if (proto && Object.getOwnPropertyDescriptor(proto, 'webdriver')) {
-        Object.defineProperty(proto, 'webdriver', {
-          get: () => undefined,
-          configurable: true,
-        })
-      }
-    } catch(e) {}
+    // ── 1. navigator.webdriver を完全に削除 ──
+    // 'webdriver' in navigator が false になるよう delete でプロパティ自体を消す
+    // defineProperty で再定義すると in 演算子で検知されるため使わない
+    try { delete Navigator.prototype.webdriver } catch(e) {}
+    try { delete navigator.webdriver } catch(e) {}
 
     // ── 2. window.chrome オブジェクト偽装 ──
     // Electron は chrome オブジェクトを持たない or 不完全。

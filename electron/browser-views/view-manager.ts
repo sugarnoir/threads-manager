@@ -526,11 +526,11 @@ export class ViewManager {
     const acctForEmu = getAccountById(accountId)
     const isMobileEmu = acctForEmu?.username === MOBILE_EMU_ACCOUNT
 
-    const fp = loadOrCreateFingerprint(accountId)
-    const overrideScript = buildOverrideScript(fp)
-
     // Stealth evasion (デフォルトOFF、個別→グループ→status の優先順)
     const applyStealth = this._shouldApplyStealth(acctForEmu)
+
+    const fp = loadOrCreateFingerprint(accountId)
+    const overrideScript = buildOverrideScript(fp, applyStealth)
     const stealthScript = applyStealth ? buildStealthScript() : null
     if (applyStealth) console.log(`[makeView] stealth ENABLED for account=${accountId}`)
 
@@ -765,6 +765,15 @@ export class ViewManager {
     dbgAuto.sendCommand('Network.enable').catch((e: unknown) => {
       console.error(`[CDP] Network.enable failed (auto) account=${accountId}:`, e)
     })
+
+    // navigator.webdriver を main world で確実に隠蔽（document_start 相当）
+    // 'webdriver' in navigator が false になるよう delete でプロパティ自体を消す
+    dbgAuto.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        try { delete Navigator.prototype.webdriver } catch(e) {}
+        try { delete navigator.webdriver } catch(e) {}
+      `,
+    }).catch(() => {})
 
     // ── yuki_chukimaru のみ: DevTools キーバインド ─────────────────────────
     if (isMobileEmu) {
