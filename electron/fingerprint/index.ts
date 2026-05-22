@@ -225,7 +225,7 @@ export function createAndSaveFingerprint(accountId: number): Fingerprint {
 
 // ── JS override code (injected into main world) ───────────────────────────────
 
-export function buildOverrideScript(fp: Fingerprint): string {
+export function buildOverrideScript(fp: Fingerprint, stealthMode = false): string {
   const tzOffset = TZ_OFFSET[fp.timezone] ?? 0
 
   // Battery chargingTime / dischargingTime を事前計算
@@ -252,9 +252,9 @@ export function buildOverrideScript(fp: Fingerprint): string {
     _def(navigator, 'languages',           Object.freeze(${JSON.stringify(fp.languages)}))
     _def(navigator, 'hardwareConcurrency', ${fp.hardwareConcurrency})
     _def(navigator, 'deviceMemory',        ${fp.deviceMemory})
-    _def(navigator, 'plugins',             Object.freeze([]))
+${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `    _def(navigator, 'plugins',             Object.freeze([]))
     _def(navigator, 'mimeTypes',           Object.freeze([]))
-    _def(navigator, 'webdriver',           false)
+    _def(navigator, 'webdriver',           false)`}
     _def(navigator, 'appCodeName',         'Mozilla')
     _def(navigator, 'appName',             'Netscape')
     _def(navigator, 'product',             'Gecko')
@@ -471,7 +471,7 @@ export function buildOverrideScript(fp: Fingerprint): string {
 // ── Preload script file (written per account, loaded by Electron session) ─────
 
 export function writeAccountPreload(accountId: number, fp: Fingerprint, stealthCode?: string): string {
-  const overrideCode = buildOverrideScript(fp)
+  const overrideCode = buildOverrideScript(fp, !!stealthCode)
 
   // Preload runs in the isolated world.
   // webFrame.executeJavaScript injects overrides into the main world.
