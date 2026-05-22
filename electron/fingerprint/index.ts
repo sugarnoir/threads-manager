@@ -470,15 +470,22 @@ export function buildOverrideScript(fp: Fingerprint): string {
 
 // ── Preload script file (written per account, loaded by Electron session) ─────
 
-export function writeAccountPreload(accountId: number, fp: Fingerprint): string {
+export function writeAccountPreload(accountId: number, fp: Fingerprint, stealthCode?: string): string {
   const overrideCode = buildOverrideScript(fp)
 
   // Preload runs in the isolated world.
   // webFrame.executeJavaScript injects overrides into the main world.
+  const scripts = [
+    `webFrame.executeJavaScript(${JSON.stringify(overrideCode)})`,
+  ]
+  if (stealthCode) {
+    scripts.push(`webFrame.executeJavaScript(${JSON.stringify(stealthCode)})`)
+  }
+
   const preloadContent = `
 ;(function() {
   const { webFrame } = require('electron')
-  webFrame.executeJavaScript(${JSON.stringify(overrideCode)})
+  ${scripts.join('\n  ')}
 })()
 `
   const dir = path.join(app.getPath('userData'), 'fingerprints')

@@ -744,6 +744,11 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
         <StockBulkDeleteSection />
       </div>
 
+      {/* Stealth section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <StealthSection />
+      </div>
+
       {/* Discord Bot section */}
       <div className="pt-2 border-t border-zinc-800">
         <BotSection />
@@ -764,6 +769,79 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
         <LicenseAdminSection />
       </div>
 
+    </div>
+  )
+}
+
+// ── Stealth section ──────────────────────────────────────────────────────────
+
+function StealthSection() {
+  const [enabled, setEnabled] = useState(false)
+  const [applyNew, setApplyNew] = useState(true)
+  const [applyExisting, setApplyExisting] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    api.settings.getAll().then((s) => {
+      setEnabled(s.stealth_enabled === 'true')
+      setApplyNew(s.stealth_apply_to_new !== 'false')
+      setApplyExisting(s.stealth_apply_to_existing === 'true')
+      setLoaded(true)
+    })
+  }, [])
+
+  const toggle = async (key: string, val: boolean, setter: (v: boolean) => void) => {
+    setter(val)
+    await api.settings.set(key, String(val))
+  }
+
+  if (!loaded) return null
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-zinc-700 flex items-center justify-center shrink-0 text-base">
+          🛡
+        </div>
+        <div>
+          <p className="text-white font-semibold text-sm">Stealth モード</p>
+          <p className="text-zinc-500 text-xs">WebContentsView のフィンガープリント偽装を強化</p>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl">
+          <div>
+            <p className="text-white text-sm font-medium">Stealth 機能を有効化</p>
+            <p className="text-zinc-500 text-xs mt-0.5">chrome オブジェクト偽装、Plugins 偽装、iframe パッチ等</p>
+          </div>
+          <Toggle checked={enabled} onChange={() => toggle('stealth_enabled', !enabled, setEnabled)} />
+        </div>
+
+        {enabled && (
+          <>
+            <div className="flex items-center justify-between p-4 bg-zinc-800/60 rounded-xl ml-4">
+              <div>
+                <p className="text-white text-sm font-medium">新規垢に適用</p>
+                <p className="text-zinc-500 text-xs mt-0.5">unverified / inactive ステータスの垢（推奨）</p>
+              </div>
+              <Toggle checked={applyNew} onChange={() => toggle('stealth_apply_to_new', !applyNew, setApplyNew)} size="sm" />
+            </div>
+            <div className="flex items-center justify-between p-4 bg-zinc-800/60 rounded-xl ml-4">
+              <div>
+                <p className="text-white text-sm font-medium">既存垢にも適用</p>
+                <p className="text-zinc-500 text-xs mt-0.5">active 垢に適用（動作変化の可能性あり）</p>
+              </div>
+              <Toggle checked={applyExisting} onChange={() => toggle('stealth_apply_to_existing', !applyExisting, setApplyExisting)} size="sm" />
+            </div>
+          </>
+        )}
+      </div>
+
+      <p className="text-zinc-600 text-[10px] mt-2 leading-tight">
+        手動 Threads 作成時の凍結回避を狙う実験的機能。ビューの再作成時に反映されます。
+        まずは新規垢のみで試すことを推奨。
+      </p>
     </div>
   )
 }
@@ -1512,7 +1590,7 @@ export function ProxyPresetsSection() {
             type="number"
             value={portRangeEnd}
             onChange={e => setPortRangeEnd(e.target.value)}
-            placeholder="終了 (例: 10050)"
+            placeholder="終了 (例: 10500)"
             className="flex-1 bg-zinc-700 border border-zinc-600 rounded-lg px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono"
           />
           <button

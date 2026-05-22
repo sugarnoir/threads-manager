@@ -1,6 +1,7 @@
 import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage, powerMonitor } from 'electron'
 import { toRomaji } from 'wanakana'
 import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
+import { buildStealthScript } from './stealth-evasions'
 import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { getContextCookiesIfOpen, closeContext } from '../playwright/browser-manager'
 import fs from 'fs'
@@ -499,6 +500,17 @@ export class ViewManager {
     const fp = loadOrCreateFingerprint(accountId)
     const overrideScript = buildOverrideScript(fp)
 
+    // Stealth evasion (デフォルトOFF)
+    const stealthEnabled = getSetting('stealth_enabled') === 'true'
+    const stealthApplyNew = getSetting('stealth_apply_to_new') !== 'false'
+    const stealthApplyExisting = getSetting('stealth_apply_to_existing') === 'true'
+    const isNewAccount = acctForEmu?.status === 'unverified' || acctForEmu?.status === 'inactive'
+    const applyStealth = stealthEnabled && (
+      (isNewAccount && stealthApplyNew) || (!isNewAccount && stealthApplyExisting)
+    )
+    const stealthScript = applyStealth ? buildStealthScript() : null
+    if (applyStealth) console.log(`[makeView] stealth ENABLED for account=${accountId}`)
+
     if (isMobileEmu) {
       sess.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
     } else {
@@ -515,7 +527,7 @@ export class ViewManager {
     )
 
     try {
-      const preloadPath = writeAccountPreload(accountId, fp)
+      const preloadPath = writeAccountPreload(accountId, fp, stealthScript ?? undefined)
       sess.setPreloads([preloadPath])
     } catch { /* skip if file write fails */ }
 
@@ -545,6 +557,9 @@ export class ViewManager {
     view.webContents.on('dom-ready', () => {
       if (!view.webContents.isDestroyed()) {
         view.webContents.executeJavaScript(overrideScript).catch(() => {})
+        if (stealthScript) {
+          view.webContents.executeJavaScript(stealthScript).catch(() => {})
+        }
       }
     })
 
