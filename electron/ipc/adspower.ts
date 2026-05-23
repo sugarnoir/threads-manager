@@ -96,7 +96,7 @@ function buildFingerprintConfig(browserCore: 'sun' | 'flower'): Record<string, u
   if (browserCore === 'sun') {
     return { browser_kernel_config: { version: '146', type: 'chrome' } }
   } else {
-    return { browser_kernel_config: { version: 'ua_auto', type: 'flower' } }
+    return { browser_kernel_config: { version: 'ua_auto', type: 'firefox' } }
   }
 }
 
