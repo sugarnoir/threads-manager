@@ -101,7 +101,6 @@ function buildFingerprintConfig(browserCore: 'sun' | 'flower'): Record<string, u
     audio: '1',            // noise
     hardware_concurrency: '8',
     device_memory: '8',
-    mac_address_config: { model: 'random' },
   }
 
   if (browserCore === 'sun') {
