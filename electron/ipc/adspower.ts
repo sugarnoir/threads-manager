@@ -92,25 +92,12 @@ async function getAccountCookieJson(accountId: number): Promise<string> {
 // ── fingerprint 設定ビルダー ────────────────────────────────────────────────
 
 function buildFingerprintConfig(browserCore: 'sun' | 'flower'): Record<string, unknown> {
-  const config: Record<string, unknown> = {
-    automatic_timezone: '1',
-    language: ['en-US', 'en'],
-    webrtc: 'proxy',
-    canvas: '1',           // noise
-    webgl_image: '1',      // noise
-    audio: '1',            // noise
-    hardware_concurrency: '8',
-    device_memory: '8',
-  }
-
+  // 最小構成: AdsPower のデフォルトに任せ、ブラウザコアだけ指定
   if (browserCore === 'sun') {
-    config.browser_kernel_config = { version: '146', type: 'chrome' }
-    config.random_ua = { ua_browser: ['chrome'], ua_system_version: ['Mac OS X 10.15'] }
+    return { browser_kernel_config: { version: '146', type: 'chrome' } }
   } else {
-    config.browser_kernel_config = { version: 'ua_auto', type: 'flower' }
+    return { browser_kernel_config: { version: 'ua_auto', type: 'flower' } }
   }
-
-  return config
 }
 
 // ── IPC ハンドラー ──────────────────────────────────────────────────────────
