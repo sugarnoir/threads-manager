@@ -94,6 +94,7 @@ export interface CookieImportOptions {
   proxyMode?:      'auto' | 'manual' | 'none'
   proxyStartPort?: number
   lightweight?:    boolean
+  stealth?:        boolean
 }
 
 export interface CookieImportResult {
@@ -222,6 +223,9 @@ export async function importCookieLoginBatch(
         proxy_password: assignedProxyUrl ? (proxyPassword ?? undefined) : undefined,
       })
       console.log(`[import-cookie-login] row[${i}] account created id=${account.id}`)
+      if (options?.stealth) {
+        updateStealthOverride(account.id, 'on')
+      }
       // 一時停止: Threads 自動セットアップ無効化中
       // try {
       //   const { getDb: getDatabase } = require('../db')
@@ -1504,9 +1508,12 @@ export function registerAccountHandlers(): void {
     }
   })
 
-  ipcMain.handle('accounts:context-menu', (event, accountId: number) => {
+  ipcMain.handle('accounts:context-menu', (event, accountId: number, selectedIds?: number[]) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return
+
+    const ids = (selectedIds && selectedIds.length > 1) ? selectedIds : [accountId]
+    const isMulti = ids.length > 1
 
     const menu = Menu.buildFromTemplate([
       {
@@ -1525,20 +1532,33 @@ export function registerAccountHandlers(): void {
         label: '🔒  プロキシ設定',
         click: () => win.webContents.send('accounts:action', { type: 'edit-proxy', accountId }),
       },
+      ...(getSetting('adspower_enabled') === 'true' ? [{
+        label: 'AdsPower で開く',
+        submenu: [
+          {
+            label: 'Sun (Chrome)',
+            click: () => win.webContents.send('accounts:action', { type: 'adspower-open', accountId, browserCore: 'sun' }),
+          },
+          {
+            label: 'Flower',
+            click: () => win.webContents.send('accounts:action', { type: 'adspower-open', accountId, browserCore: 'flower' }),
+          },
+        ],
+      }] : []),
       {
-        label: '🛡  Stealth',
+        label: isMulti ? `🛡  Stealth (${ids.length}垢)` : '🛡  Stealth',
         submenu: [
           {
             label: '設定に従う（デフォルト）',
-            click: () => { updateStealthOverride(accountId, null); win.webContents.send('accounts:stealth-changed') },
+            click: () => { bulkUpdateStealthOverride(ids, null); win.webContents.send('accounts:stealth-changed') },
           },
           {
             label: '強制 ON',
-            click: () => { updateStealthOverride(accountId, 'on'); win.webContents.send('accounts:stealth-changed') },
+            click: () => { bulkUpdateStealthOverride(ids, 'on'); win.webContents.send('accounts:stealth-changed') },
           },
           {
             label: '強制 OFF',
-            click: () => { updateStealthOverride(accountId, 'off'); win.webContents.send('accounts:stealth-changed') },
+            click: () => { bulkUpdateStealthOverride(ids, 'off'); win.webContents.send('accounts:stealth-changed') },
           },
         ],
       },

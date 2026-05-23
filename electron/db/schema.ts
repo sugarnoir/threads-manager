@@ -388,6 +388,17 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN stealth_override TEXT")
   }
 
+  // AdsPower 統合カラム
+  if (!colNames.includes('adspower_user_id')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN adspower_user_id TEXT")
+  }
+  if (!colNames.includes('adspower_status')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN adspower_status TEXT DEFAULT 'not_created'")
+  }
+  if (!colNames.includes('adspower_browser_core')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN adspower_browser_core TEXT")
+  }
+
   // groups テーブルに stealth_enabled カラム追加
   {
     const groupCols = db.prepare("PRAGMA table_info(groups)").all() as { name: string }[]

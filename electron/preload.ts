@@ -47,8 +47,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:reset-session', id),
     reorder: (updates: { id: number; sort_order: number; group_name: string | null }[]) =>
       ipcRenderer.invoke('accounts:reorder', updates),
-    contextMenu: (accountId: number) =>
-      ipcRenderer.invoke('accounts:context-menu', accountId),
+    contextMenu: (accountId: number, selectedIds?: number[]) =>
+      ipcRenderer.invoke('accounts:context-menu', accountId, selectedIds),
     check: (id: number) => ipcRenderer.invoke('accounts:check', id),
     checkAll: () => ipcRenderer.invoke('accounts:check-all'),
     delete: (id: number) => ipcRenderer.invoke('accounts:delete', id),
@@ -86,6 +86,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       proxyMode?:      'auto' | 'manual' | 'none'
       proxyStartPort?: number
       lightweight?:    boolean
+      stealth?:        boolean
     }) => ipcRenderer.invoke('accounts:import-cookie-login', rows, options),
     checkReplyBan: (id: number) =>
       ipcRenderer.invoke('accounts:check-reply-ban', id) as Promise<{ success: boolean; status?: string; tweetCount?: number; error?: string }>,
@@ -430,6 +431,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
     list:      (limit?: number, offset?: number) => ipcRenderer.invoke('alerts:list', limit, offset),
     byAccount: (accountId: number, limit?: number) => ipcRenderer.invoke('alerts:byAccount', accountId, limit),
     summary:   () => ipcRenderer.invoke('alerts:summary'),
+  },
+
+  // AdsPower
+  adspower: {
+    checkStatus:    ()                   => ipcRenderer.invoke('adspower:check-status'),
+    getSettings:    ()                   => ipcRenderer.invoke('adspower:get-settings'),
+    saveSettings:   (data: { api_url: string; enabled: boolean; default_browser_core: string; default_group_id: string }) =>
+                      ipcRenderer.invoke('adspower:save-settings', data),
+    createProfile:  (data: { accountId: number; name: string; browserCore: 'sun' | 'flower'; groupId?: string; cookie?: string; proxyConfig?: unknown }) =>
+                      ipcRenderer.invoke('adspower:create-profile', data),
+    updateProfile:  (data: { userId: string; cookie?: string; proxyConfig?: unknown }) =>
+                      ipcRenderer.invoke('adspower:update-profile', data),
+    deleteProfile:  (data: { accountId: number; userId: string }) =>
+                      ipcRenderer.invoke('adspower:delete-profile', data),
+    startBrowser:   (data: { accountId: number; userId: string }) =>
+                      ipcRenderer.invoke('adspower:start-browser', data),
+    stopBrowser:    (data: { accountId: number; userId: string }) =>
+                      ipcRenderer.invoke('adspower:stop-browser', data),
+    activeBrowsers: ()                   => ipcRenderer.invoke('adspower:active-browsers'),
+    listProfiles:   (groupId?: string)   => ipcRenderer.invoke('adspower:list-profiles', groupId),
+    listGroups:     ()                   => ipcRenderer.invoke('adspower:list-groups'),
+    createGroup:    (name: string)       => ipcRenderer.invoke('adspower:create-group', name),
   },
 
   scheduledImport: {

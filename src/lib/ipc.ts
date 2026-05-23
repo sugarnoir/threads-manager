@@ -51,6 +51,9 @@ export interface Account {
   threads_setup_error: string | null
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
+  adspower_user_id: string | null
+  adspower_status: 'not_created' | 'created' | 'running' | 'error' | 'syncing' | null
+  adspower_browser_core: 'sun' | 'flower' | null
   created_at: string
   updated_at: string
 }
@@ -452,7 +455,7 @@ declare global {
         clearCookies: (id: number) => Promise<{ success: boolean }>
         resetSession: (id: number) => Promise<{ success: boolean }>
         reorder: (updates: { id: number; sort_order: number; group_name: string | null }[]) => Promise<{ success: boolean }>
-        contextMenu: (accountId: number) => Promise<void>
+        contextMenu: (accountId: number, selectedIds?: number[]) => Promise<void>
         check: (id: number) => Promise<{ status: string; message?: string }>
         checkAll: () => Promise<{ success: boolean }>
         delete: (id: number) => Promise<{ success: boolean }>
@@ -511,6 +514,7 @@ declare global {
           proxyMode?:      'auto' | 'manual' | 'none'
           proxyStartPort?: number
           lightweight?:    boolean
+          stealth?:        boolean
         }) => Promise<{
           imported: number
           skipped:  number
@@ -755,6 +759,25 @@ declare global {
         list:      (limit?: number, offset?: number) => Promise<ResponseAlertRow[]>
         byAccount: (accountId: number, limit?: number) => Promise<ResponseAlertRow[]>
         summary:   () => Promise<AlertSummary[]>
+      }
+      adspower: {
+        checkStatus:    () => Promise<{ success: boolean; status?: string; version?: string; error?: string }>
+        getSettings:    () => Promise<{ api_url: string; enabled: boolean; default_browser_core: string; default_group_id: string }>
+        saveSettings:   (data: { api_url: string; enabled: boolean; default_browser_core: string; default_group_id: string }) => Promise<{ success: boolean }>
+        createProfile:  (data: { accountId: number; name: string; browserCore: 'sun' | 'flower'; groupId?: string; cookie?: string; proxyConfig?: unknown }) =>
+                          Promise<{ success: boolean; userId?: string; error?: string }>
+        updateProfile:  (data: { userId: string; cookie?: string; proxyConfig?: unknown }) =>
+                          Promise<{ success: boolean; error?: string }>
+        deleteProfile:  (data: { accountId: number; userId: string }) =>
+                          Promise<{ success: boolean; error?: string }>
+        startBrowser:   (data: { accountId: number; userId: string }) =>
+                          Promise<{ success: boolean; session?: unknown; error?: string }>
+        stopBrowser:    (data: { accountId: number; userId: string }) =>
+                          Promise<{ success: boolean; error?: string }>
+        activeBrowsers: () => Promise<{ success: boolean; list: Array<{ user_id: string }> }>
+        listProfiles:   (groupId?: string) => Promise<{ success: boolean; list: Array<{ user_id: string; name: string; group_id: string; group_name: string }> }>
+        listGroups:     () => Promise<{ success: boolean; list: Array<{ group_id: string; group_name: string }> }>
+        createGroup:    (name: string) => Promise<{ success: boolean; groupId?: string; error?: string }>
       }
       scheduledImport: {
         start:  (args: { rows: unknown[]; intervalMs: number; importOptions: { proxyMode?: string; proxyStartPort?: number } }) =>

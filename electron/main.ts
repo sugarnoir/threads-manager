@@ -36,6 +36,7 @@ import { registerScheduledImportHandlers } from './ipc/scheduled-import'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 import { registerAppConfigHandlers } from './ipc/app-config'
+import { registerAdsPowerHandlers } from './ipc/adspower'
 import { initAppConfig } from './lib/app-config'
 
 const isDev = process.env.NODE_ENV === 'development'
@@ -102,6 +103,7 @@ app.whenReady().then(() => {
   registerProxyPresetHandlers()
   registerMasterKeyHandlers()
   registerAppConfigHandlers()
+  registerAdsPowerHandlers()
   registerStoryScheduleHandlers()
   registerReelScheduleHandlers()
   registerPinnedCheckHandlers()

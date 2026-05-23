@@ -744,6 +744,11 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
         <StockBulkDeleteSection />
       </div>
 
+      {/* AdsPower section */}
+      <div className="pt-2 border-t border-zinc-800">
+        <AdsPowerSection />
+      </div>
+
       {/* Stealth section */}
       <div className="pt-2 border-t border-zinc-800">
         <StealthSection />
@@ -3231,6 +3236,182 @@ function MasterKeyAdmin() {
             )
           })}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── AdsPower section ─────────────────────────────────────────────────────────
+
+function AdsPowerSection() {
+  const [apiUrl, setApiUrl]               = useState('http://localhost:50325')
+  const [adspowerEnabled, setAdspowerEnabled] = useState(false)
+  const [defaultCore, setDefaultCore]     = useState<'sun' | 'flower'>('sun')
+  const [defaultGroupId, setDefaultGroupId] = useState('')
+  const [groups, setGroups]               = useState<Array<{ group_id: string; group_name: string }>>([])
+  const [loaded, setLoaded]               = useState(false)
+  const [saving, setSaving]               = useState(false)
+  const [savedMsg, setSavedMsg]           = useState(false)
+  const [testing, setTesting]             = useState(false)
+  const [testResult, setTestResult]       = useState<{ ok: boolean; msg: string } | null>(null)
+
+  useEffect(() => {
+    api.adspower.getSettings().then((s) => {
+      setApiUrl(s.api_url)
+      setAdspowerEnabled(s.enabled)
+      setDefaultCore(s.default_browser_core as 'sun' | 'flower')
+      setDefaultGroupId(s.default_group_id)
+      setLoaded(true)
+    })
+  }, [])
+
+  const handleTest = async () => {
+    setTesting(true)
+    setTestResult(null)
+    // まず URL を保存してからテスト
+    await api.adspower.saveSettings({ api_url: apiUrl, enabled: adspowerEnabled, default_browser_core: defaultCore, default_group_id: defaultGroupId })
+    const res = await api.adspower.checkStatus()
+    if (res.success) {
+      setTestResult({ ok: true, msg: `接続成功 (v${res.version ?? '?'})` })
+      // グループ一覧を取得
+      const gr = await api.adspower.listGroups()
+      if (gr.success) setGroups(gr.list)
+    } else {
+      setTestResult({ ok: false, msg: res.error ?? '接続失敗' })
+    }
+    setTesting(false)
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    await api.adspower.saveSettings({
+      api_url: apiUrl,
+      enabled: adspowerEnabled,
+      default_browser_core: defaultCore,
+      default_group_id: defaultGroupId,
+    })
+    setSaving(false)
+    setSavedMsg(true)
+    setTimeout(() => setSavedMsg(false), 2000)
+  }
+
+  if (!loaded) return null
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center shrink-0 text-base">
+          AP
+        </div>
+        <div>
+          <p className="text-white font-semibold text-sm">AdsPower 統合</p>
+          <p className="text-zinc-500 text-xs">AdsPower Local API でブラウザ指紋を管理</p>
+        </div>
+      </div>
+
+      {/* マスタースイッチ */}
+      <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl mb-3">
+        <div>
+          <p className="text-white text-sm font-medium">AdsPower 機能を有効化</p>
+          <p className="text-zinc-500 text-xs mt-0.5">コンテキストメニューに「AdsPower で開く」を追加</p>
+        </div>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <span className={`text-xs font-semibold w-6 text-right transition-colors ${adspowerEnabled ? 'text-purple-400' : 'text-zinc-500'}`}>
+            {adspowerEnabled ? 'ON' : 'OFF'}
+          </span>
+          <Toggle checked={adspowerEnabled} onChange={() => setAdspowerEnabled(!adspowerEnabled)} size="md" />
+        </div>
+      </div>
+
+      {/* API URL */}
+      <div className="space-y-2 mb-4">
+        <label className="text-zinc-400 text-xs font-medium block">API URL</label>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={apiUrl}
+            onChange={(e) => setApiUrl(e.target.value)}
+            placeholder="http://localhost:50325"
+            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500 font-mono"
+          />
+          <button
+            onClick={handleTest}
+            disabled={testing || !apiUrl.trim()}
+            className="px-3 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+          >
+            {testing ? '接続中...' : '接続テスト'}
+          </button>
+        </div>
+        {testResult && (
+          <p className={`text-xs px-3 py-2 rounded-lg ${
+            testResult.ok
+              ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/20'
+              : 'text-red-400 bg-red-500/10 border border-red-500/20'
+          }`}>
+            {testResult.ok ? '✓' : '✕'} {testResult.msg}
+          </p>
+        )}
+      </div>
+
+      {/* デフォルトブラウザコア */}
+      <div className="space-y-2 mb-4">
+        <label className="text-zinc-400 text-xs font-medium block">デフォルトブラウザコア</label>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setDefaultCore('sun')}
+            className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              defaultCore === 'sun'
+                ? 'bg-purple-600 text-white'
+                : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+            }`}
+          >
+            Sun (Chrome)
+          </button>
+          <button
+            onClick={() => setDefaultCore('flower')}
+            className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              defaultCore === 'flower'
+                ? 'bg-purple-600 text-white'
+                : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+            }`}
+          >
+            Flower
+          </button>
+        </div>
+        <p className="text-zinc-600 text-xs">新規プロファイル作成時のデフォルト。TLS Fingerprint 分散には両方使用</p>
+      </div>
+
+      {/* デフォルトグループ */}
+      {groups.length > 0 && (
+        <div className="space-y-2 mb-4">
+          <label className="text-zinc-400 text-xs font-medium block">デフォルトグループ</label>
+          <select
+            value={defaultGroupId}
+            onChange={(e) => setDefaultGroupId(e.target.value)}
+            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+          >
+            <option value="">指定なし</option>
+            {groups.map((g) => (
+              <option key={g.group_id} value={g.group_id}>
+                {g.group_name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* 保存ボタン */}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-5 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-lg transition-colors"
+        >
+          {saving ? '保存中...' : '設定を保存'}
+        </button>
+        {savedMsg && (
+          <span className="text-emerald-400 text-xs font-medium">✓ 保存しました</span>
+        )}
       </div>
     </div>
   )
