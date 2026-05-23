@@ -98,7 +98,8 @@ async function request<T>(
 // ── Status ───────────────────────────────────────────────────────────────────
 
 export async function checkStatus(): Promise<{ status: string; version?: string }> {
-  const res = await request<{ status: string; version: string }>('/api/v1/status')
+  // ステータス確認だけ /status（/api/v1 プレフィックスなし）
+  const res = await request<{ status: string; version: string }>('/status')
   if (res.code !== 0) throw new Error(res.msg)
   return { status: res.data?.status ?? 'unknown', version: res.data?.version }
 }
