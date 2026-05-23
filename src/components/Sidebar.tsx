@@ -248,6 +248,7 @@ export function Sidebar({
   const [cookieProxyMode,    setCookieProxyMode]    = useState<'auto' | 'manual' | 'none'>('auto')
   const [cookieProxyStart,   setCookieProxyStart]   = useState('')
   const [cookieLightweight,  setCookieLightweight]  = useState(false)
+  const [cookieStealth,      setCookieStealth]      = useState(true)
   const [comboFormat,        setComboFormat]        = useState<ComboFormat>('auto')
   // 予約インポート用
   const [cookieImportMode,       setCookieImportMode]       = useState<'immediate' | 'scheduled'>('immediate')
@@ -514,6 +515,7 @@ export function Sidebar({
         proxyMode:      cookieProxyMode,
         proxyStartPort: cookieProxyMode === 'manual' ? parseInt(cookieProxyStart, 10) : undefined,
         lightweight:    cookieLightweight,
+        stealth:        cookieStealth,
       })
       const parts = [`${res.imported}件追加`]
       if (res.skipped > 0) parts.push(`スキップ(重複): ${res.skipped}件`)
@@ -810,8 +812,8 @@ export function Sidebar({
 
 
   useEffect(() => {
-    const unsub = api.on('accounts:action', (data) => {
-      const { type, accountId } = data as { type: string; accountId: number }
+    const unsub = api.on('accounts:action', async (data) => {
+      const { type, accountId } = data as { type: string; accountId: number; browserCore?: 'sun' | 'flower' }
       if (type === 'open')       onOpenAccount(accountId)
       if (type === 'check')      onCheckStatus(accountId)
       if (type === 'edit-proxy') {
@@ -826,6 +828,24 @@ export function Sidebar({
         const acc = accounts.find(a => a.id === accountId)
         if (acc && confirm(`@${acc.username} を削除しますか？`)) onDeleteAccount(accountId)
       }
+      if (type === 'adspower-open') {
+        const { browserCore } = data as { type: string; accountId: number; browserCore: 'sun' | 'flower' }
+        const acc = accounts.find(a => a.id === accountId)
+        if (!acc) return
+        try {
+          const result = await api.adspower.startBrowser({
+            accountId,
+            userId: acc.adspower_user_id ?? undefined,
+            browserCore,
+          })
+          if (!result.success) {
+            alert('AdsPower ブラウザ起動失敗: ' + result.error)
+          }
+          window.dispatchEvent(new CustomEvent('accounts-changed'))
+        } catch (err) {
+          alert('AdsPower エラー: ' + (err instanceof Error ? err.message : String(err)))
+        }
+      }
     })
     return unsub
   }, [accounts, onOpenAccount, onCheckStatus, onEditAccount, onDeleteAccount])
@@ -838,9 +858,21 @@ export function Sidebar({
     return unsub
   }, [])
 
+  // AdsPower ステータス変更時にアカウント一覧を更新
+  useEffect(() => {
+    const unsub = api.on('adspower:status-changed', () => {
+      window.dispatchEvent(new CustomEvent('accounts-changed'))
+    })
+    return unsub
+  }, [])
+
   const handleContextMenu = (e: React.MouseEvent, accountId: number) => {
     e.preventDefault()
-    api.accounts.contextMenu(accountId)
+    // 右クリックした垢が選択中なら選択中の全垢を対象、そうでなければ単一
+    const targetIds = selectedIds.has(accountId) && selectedIds.size > 1
+      ? [...selectedIds]
+      : [accountId]
+    api.accounts.contextMenu(accountId, targetIds)
   }
 
   const handleDragStart = (e: React.DragEvent, accountId: number) => {
@@ -1341,6 +1373,19 @@ export function Sidebar({
                           {account.threads_setup_status === 'failed' && (
                             <span className="shrink-0 px-1 py-0 rounded bg-red-500/20 text-red-400 text-[8px] font-bold leading-tight" title={account.threads_setup_error ?? ''}>T✗</span>
                           )}
+                          {account.adspower_user_id && (
+                            <span
+                              className={`shrink-0 px-1 py-0 rounded text-[8px] font-bold leading-tight ${
+                                account.adspower_status === 'running'
+                                  ? 'bg-emerald-500/15 text-emerald-400'
+                                  : 'bg-purple-500/15 text-purple-400'
+                              }`}
+                              title={`AdsPower ${account.adspower_browser_core === 'flower' ? 'Flower' : 'Sun'} (${account.adspower_status})`}
+                            >
+                              {account.adspower_browser_core === 'flower' ? 'FL' : 'SN'}
+                              {account.adspower_status === 'running' && '●'}
+                            </span>
+                          )}
                         </p>
                         <p className="text-[10px] text-zinc-500 truncate leading-tight">
                           @{account.username}
@@ -1673,6 +1718,18 @@ export function Sidebar({
                 />
                 <span className="text-zinc-300 text-[10px]">軽量モード</span>
                 <span className="text-zinc-600 text-[9px]">（IG接続スキップ・瞬間完了）</span>
+              </label>
+
+              {/* Stealth */}
+              <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={cookieStealth}
+                  onChange={e => setCookieStealth(e.target.checked)}
+                  className="w-3 h-3 accent-emerald-500"
+                />
+                <span className="text-zinc-300 text-[10px]">Stealth ON</span>
+                <span className="text-zinc-600 text-[9px]">（フィンガープリント偽装・凍結回避）</span>
               </label>
 
               {/* インポートモード切替 */}

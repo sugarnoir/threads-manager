@@ -764,13 +764,15 @@ declare global {
         checkStatus:    () => Promise<{ success: boolean; status?: string; version?: string; error?: string }>
         getSettings:    () => Promise<{ api_url: string; enabled: boolean; default_browser_core: string; default_group_id: string }>
         saveSettings:   (data: { api_url: string; enabled: boolean; default_browser_core: string; default_group_id: string }) => Promise<{ success: boolean }>
-        createProfile:  (data: { accountId: number; name: string; browserCore: 'sun' | 'flower'; groupId?: string; cookie?: string; proxyConfig?: unknown }) =>
+        createProfile:  (data: { accountId: number; name: string; browserCore: 'sun' | 'flower'; groupId?: string }) =>
                           Promise<{ success: boolean; userId?: string; error?: string }>
+        syncProfile:    (data: { accountId: number }) =>
+                          Promise<{ success: boolean; error?: string }>
         updateProfile:  (data: { userId: string; cookie?: string; proxyConfig?: unknown }) =>
                           Promise<{ success: boolean; error?: string }>
         deleteProfile:  (data: { accountId: number; userId: string }) =>
                           Promise<{ success: boolean; error?: string }>
-        startBrowser:   (data: { accountId: number; userId: string }) =>
+        startBrowser:   (data: { accountId: number; userId?: string; browserCore?: 'sun' | 'flower' }) =>
                           Promise<{ success: boolean; session?: unknown; error?: string }>
         stopBrowser:    (data: { accountId: number; userId: string }) =>
                           Promise<{ success: boolean; error?: string }>

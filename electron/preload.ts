@@ -439,13 +439,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSettings:    ()                   => ipcRenderer.invoke('adspower:get-settings'),
     saveSettings:   (data: { api_url: string; enabled: boolean; default_browser_core: string; default_group_id: string }) =>
                       ipcRenderer.invoke('adspower:save-settings', data),
-    createProfile:  (data: { accountId: number; name: string; browserCore: 'sun' | 'flower'; groupId?: string; cookie?: string; proxyConfig?: unknown }) =>
+    createProfile:  (data: { accountId: number; name: string; browserCore: 'sun' | 'flower'; groupId?: string }) =>
                       ipcRenderer.invoke('adspower:create-profile', data),
+    syncProfile:    (data: { accountId: number }) =>
+                      ipcRenderer.invoke('adspower:sync-profile', data),
     updateProfile:  (data: { userId: string; cookie?: string; proxyConfig?: unknown }) =>
                       ipcRenderer.invoke('adspower:update-profile', data),
     deleteProfile:  (data: { accountId: number; userId: string }) =>
                       ipcRenderer.invoke('adspower:delete-profile', data),
-    startBrowser:   (data: { accountId: number; userId: string }) =>
+    startBrowser:   (data: { accountId: number; userId?: string; browserCore?: 'sun' | 'flower' }) =>
                       ipcRenderer.invoke('adspower:start-browser', data),
     stopBrowser:    (data: { accountId: number; userId: string }) =>
                       ipcRenderer.invoke('adspower:stop-browser', data),

@@ -36,7 +36,7 @@ import { registerScheduledImportHandlers } from './ipc/scheduled-import'
 import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 import { registerAppConfigHandlers } from './ipc/app-config'
-import { registerAdsPowerHandlers } from './ipc/adspower'
+import { registerAdsPowerHandlers, startAdsPowerStatusMonitor, stopAdsPowerStatusMonitor } from './ipc/adspower'
 import { initAppConfig } from './lib/app-config'
 
 const isDev = process.env.NODE_ENV === 'development'
@@ -134,7 +134,7 @@ app.whenReady().then(() => {
     registerBrowserViewHandlers(mainWindow, viewManager)
     registerFollowQueueHandlers(viewManager, mainWindow)
     initAutoUpdater(mainWindow)
-
+    startAdsPowerStatusMonitor(mainWindow)
 
     // Auto-start Discord Bot if enabled
     if (getSetting('discord_bot_enabled') === 'true') {
@@ -158,6 +158,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', async () => {
   stopScheduler()
   stopBot()
+  stopAdsPowerStatusMonitor()
 
   // アプリ終了前にメモリ上のセッションCookieをDBにバックアップする。
   // セッションCookie（有効期限なし）は再起動で消えるため、終了時に保存しておく。

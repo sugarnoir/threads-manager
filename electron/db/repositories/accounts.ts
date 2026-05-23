@@ -53,6 +53,9 @@ export interface Account {
   threads_setup_error: string | null
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
+  adspower_user_id: string | null
+  adspower_status: string | null
+  adspower_browser_core: string | null
   created_at: string
   updated_at: string
 }
