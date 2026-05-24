@@ -5,10 +5,11 @@
  * - cookie-pipe: username|password|token|[cookies JSON]|email
  * - simple-colon: username:password:totp_secret
  * - mobile-session: [user:pass:2fa]|[UA]|[DeviceIDs]|[Headers]|[ID]
+ * - base64-cookie-colon: username:password:email:token:totp:base64_cookies
  * - auto: 自動検出
  */
 
-export type ComboFormat = 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' | 'auto'
+export type ComboFormat = 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' | 'base64-cookie-colon' | 'auto'
 
 export interface AccountInput {
   username: string
@@ -38,6 +39,7 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
       const fmt = format === 'auto' ? detectFormat(line) : format
       if (fmt === 'mobile-session') return parseMobileSession(line)
       if (fmt === 'cookie-string-pipe') return parseCookieStringPipe(line)
+      if (fmt === 'base64-cookie-colon') return parseBase64CookieColon(line)
       if (fmt === 'npprteam') return parseCookiePipe(line)
       return parseSimpleColon(line)
     })
@@ -51,7 +53,20 @@ export function parseCombo(text: string, format: ComboFormat): AccountInput[] {
  * - | が2つ以上 → mobile-session or cookie-pipe を列2で判定
  * - : が2つ以上 → simple-colon
  */
-export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' {
+export function detectFormat(line: string): 'npprteam' | 'accsmarket' | 'mobile-session' | 'cookie-string-pipe' | 'base64-cookie-colon' {
+  // base64-cookie-colon: username:password:email:token:totp:base64_cookies
+  // 検出条件: パイプなし、コロン5個以上、3番目のフィールドに@含む（email）、最後のフィールドが長いBase64
+  if (!line.includes('|')) {
+    const colonParts = line.split(':')
+    if (colonParts.length >= 6) {
+      const emailField = (colonParts[2] ?? '').trim()
+      const lastField = (colonParts[colonParts.length - 1] ?? '').trim()
+      if (emailField.includes('@') && lastField.length > 50 && /^[A-Za-z0-9+/=\s]+$/.test(lastField.slice(0, 20))) {
+        return 'base64-cookie-colon'
+      }
+    }
+  }
+
   // 末尾の空パイプを除去してから判定
   const rawParts = line.split('|')
   const pipeParts = rawParts.slice()
@@ -259,6 +274,43 @@ function parseCookieStringPipe(line: string): AccountInput | null {
     email: '',
     totpSecret,
   }
+}
+
+/**
+ * Base64 Cookie colon フォーマット:
+ * username:password:email:token:totp_secret:base64_cookies
+ *
+ * Cookie は Base64 エンコードされた JSON 配列。
+ * TOTP にはスペースが含まれる場合がある（スペース除去して保存）。
+ */
+function parseBase64CookieColon(line: string): AccountInput | null {
+  const parts = line.split(':')
+  if (parts.length < 6) return null
+
+  const username = (parts[0] ?? '').trim()
+  const password = (parts[1] ?? '').trim()
+  const email = (parts[2] ?? '').trim()
+  const token = (parts[3] ?? '').trim()
+  // TOTP: 5番目のフィールド（スペース含む可能性あり）
+  // 最後のフィールドが base64 cookie なので、それ以外の中間フィールドを TOTP として結合
+  // parts[4] ~ parts[parts.length-2] が TOTP（通常は parts[4] のみ）
+  const totpRaw = parts.slice(4, parts.length - 1).join(':').trim()
+  const totpSecret = totpRaw.replace(/\s+/g, '')
+
+  // 最後のフィールドが Base64 エンコードされた Cookie JSON
+  const base64Cookie = (parts[parts.length - 1] ?? '').trim()
+
+  let cookies: unknown[] = []
+  if (base64Cookie) {
+    try {
+      const decoded = atob(base64Cookie)
+      const parsed = JSON.parse(decoded)
+      if (Array.isArray(parsed)) cookies = parsed
+    } catch { /* invalid base64 or JSON */ }
+  }
+
+  if (!username) return null
+  return { username, password, token, cookies, email, totpSecret }
 }
 
 /** Cookie 文字列をセミコロンで分割（引用符内は無視） */
