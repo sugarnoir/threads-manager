@@ -227,9 +227,6 @@ export function Sidebar({
     await api.accounts.updateMark({ id: account.id, mark: next }).catch(() => {})
   }
 
-  const [bulkLoginRunning, setBulkLoginRunning] = useState(false)
-  const [probingAccountIds, setProbingAccountIds] = useState<Set<number>>(new Set())
-
   const [csvImporting,   setCsvImporting]   = useState(false)
   const [csvToast,       setCsvToast]       = useState<{ msg: string; ok: boolean } | null>(null)
   const [csvPanelOpen,   setCsvPanelOpen]   = useState(false)
@@ -240,7 +237,9 @@ export function Sidebar({
   const csvGroupRef = useRef<string>('__all__')
 
   // CSVインポートのモード（ストック or アカウント）
-  const [csvMode, setCsvMode] = useState<'stock' | 'account' | 'cookie' | 'topic'>('stock')
+  const [csvMode, setCsvMode] = useState<'stock' | 'account' | 'cookie' | 'idpass' | 'topic'>('stock')
+  const [idpassText, setIdpassText] = useState('')
+  const [idpassImporting, setIdpassImporting] = useState(false)
   // アカウント一括インポート用
   const [acctText,              setAcctText]              = useState('')
   const [acctGroupSel,          setAcctGroupSel]          = useState<string>('__none__')
@@ -1474,51 +1473,6 @@ export function Sidebar({
                       >
                         ⚙
                       </button>
-
-                      {/* Login Probe button (bulk実行中は非表示) */}
-                      {account.ig_password && !bulkLoginRunning && (() => {
-                        const isProbing = probingAccountIds.has(account.id)
-                        const isLoggedIn = account.status === 'active' && account.last_login_phase === 'logged_in'
-                        if (isLoggedIn && !isProbing) return null
-                        return (
-                          <button
-                            onClick={async (e) => {
-                              e.stopPropagation()
-                              if (isProbing) {
-                                // キャンセル
-                                await api.loginProbe.cancel(account.id)
-                                setProbingAccountIds(prev => { const s = new Set(prev); s.delete(account.id); return s })
-                                window.dispatchEvent(new CustomEvent('accounts-changed'))
-                                return
-                              }
-                              // ログイン開始
-                              setProbingAccountIds(prev => new Set(prev).add(account.id))
-                              const { registerLoginProbeToast } = await import('./LoginProbeToast')
-                              registerLoginProbeToast(account.id, account.username)
-                              try {
-                                await api.loginProbe.single({
-                                  accountId: account.id,
-                                  username: account.username,
-                                  password: account.ig_password!,
-                                  totpSecret: account.totp_secret ?? undefined,
-                                  skipIfSessionAlive: true,
-                                })
-                              } finally {
-                                setProbingAccountIds(prev => { const s = new Set(prev); s.delete(account.id); return s })
-                                window.dispatchEvent(new CustomEvent('accounts-changed'))
-                              }
-                            }}
-                            title={isProbing ? 'キャンセル' : 'ログイン'}
-                            className={`shrink-0 rounded flex items-center justify-center transition-all text-[9px] leading-none px-1.5 py-0.5 ${
-                              isProbing
-                                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30 opacity-100'
-                                : 'bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 opacity-0 group-hover:opacity-100'
-                            }`}
-                          >
-                            {isProbing ? '中止' : 'Login'}
-                          </button>
-                        )
-                      })()}
                     </div>
 
                     {isDropAfter(account.id) && (
@@ -1587,6 +1541,14 @@ export function Sidebar({
               }`}
             >
               Cookie
+            </button>
+            <button
+              onClick={() => setCsvMode('idpass')}
+              className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                csvMode === 'idpass' ? 'bg-orange-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              ID:Pass
             </button>
             <button
               onClick={() => setCsvMode('topic')}
@@ -1964,6 +1926,134 @@ export function Sidebar({
             </>
           )}
 
+          {csvMode === 'idpass' && (
+            <>
+              <div className="mb-2 p-2 rounded-lg bg-zinc-950/70 border border-zinc-800">
+                <p className="text-zinc-300 text-[10px] font-semibold mb-1">フォーマット（1行1垢）</p>
+                <code className="block text-[9px] leading-relaxed text-orange-300 font-mono">
+                  username:password<br />
+                  username:password:totp_secret<br />
+                  email:username:password:totp_secret
+                </code>
+              </div>
+
+              {/* グループ選択 */}
+              <label className="block text-zinc-500 text-[10px] mb-1">グループ</label>
+              <select
+                value={csvGroupSel}
+                onChange={e => setCsvGroupSel(e.target.value)}
+                className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+              >
+                <option value="__all__">指定なし</option>
+                {groups.map(g => (
+                  <option key={g.name} value={g.name}>{g.name}</option>
+                ))}
+              </select>
+
+              {/* 自動ログイン */}
+              <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={csvAutoLogin}
+                  onChange={e => setCsvAutoLogin(e.target.checked)}
+                  className="w-3 h-3 accent-blue-500"
+                />
+                <span className="text-zinc-300 text-[10px]">インポート後自動ログイン</span>
+              </label>
+
+              <textarea
+                value={idpassText}
+                onChange={e => setIdpassText(e.target.value)}
+                placeholder={'username:password:totp_secret\nuser2:pass2\n...'}
+                rows={6}
+                className="w-full bg-zinc-800 text-white text-[11px] font-mono rounded-lg p-2 border border-zinc-700 focus:outline-none focus:border-orange-500 resize-none mb-2 placeholder-zinc-600"
+              />
+
+              <button
+                onClick={async () => {
+                  if (!idpassText.trim()) return
+                  setIdpassImporting(true)
+                  try {
+                    const { parseCombo } = await import('../lib/parse-combo')
+                    const parsed = parseCombo(idpassText, 'accsmarket')
+                    if (parsed.length === 0) {
+                      showCsvToast('パースできる行がありません', false)
+                      return
+                    }
+
+                    const targetGroup = csvGroupSel === '__all__' ? null : csvGroupSel
+                    const rows = parsed.map(r => ({
+                      username:     r.username,
+                      password:     r.password || null,
+                      proxy_host:   null as string | null,
+                      proxy_port:   null as number | null,
+                      proxy_user:   null as string | null,
+                      proxy_pass:   null as string | null,
+                      totp_secret:  r.totpSecret || undefined,
+                      group_name:   targetGroup,
+                    }))
+
+                    const res = await api.accounts.bulkImport(rows, { proxyMode: 'auto' })
+                    const parts = [`${res.imported}件追加`]
+                    if (res.skipped > 0) parts.push(`スキップ: ${res.skipped}件`)
+                    const errCount = res.errors.length - res.skipped
+                    if (errCount > 0) parts.push(`エラー: ${errCount}件`)
+                    showCsvToast(parts.join(' / '), res.imported > 0)
+
+                    if (res.imported > 0) {
+                      setIdpassText('')
+                      window.dispatchEvent(new CustomEvent('accounts-changed'))
+
+                      // 自動ログイン
+                      if (csvAutoLogin && res.accounts.length > 0) {
+                        const { registerLoginProbeToast } = await import('./LoginProbeToast')
+                        const optionsList = res.accounts
+                          .filter((a: { id: number; ig_password?: string | null; username: string; totp_secret?: string | null }) => a.ig_password)
+                          .map((a: { id: number; ig_password?: string | null; username: string; totp_secret?: string | null }) => {
+                            registerLoginProbeToast(a.id, a.username)
+                            return {
+                              accountId: a.id,
+                              username:  a.username,
+                              password:  a.ig_password!,
+                              totpSecret: (a as { totp_secret?: string | null }).totp_secret ?? undefined,
+                            }
+                          })
+                        if (optionsList.length > 0) {
+                          api.loginProbe.bulk(optionsList, { concurrency: 3, jitterMs: 30000 })
+                            .finally(() => window.dispatchEvent(new CustomEvent('accounts-changed')))
+                        }
+                      }
+                    }
+                  } catch (err) {
+                    showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+                  } finally {
+                    setIdpassImporting(false)
+                  }
+                }}
+                disabled={idpassImporting || !idpassText.trim()}
+                className="w-full py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {idpassImporting ? 'インポート中...' : `インポート${csvAutoLogin ? ' + ログイン' : ''}`}
+              </button>
+
+              {/* プレビュー */}
+              {idpassText.trim() && (() => {
+                try {
+                  const { parseCombo } = require('../lib/parse-combo')
+                  const parsed = parseCombo(idpassText, 'accsmarket')
+                  const lines = idpassText.split('\n').filter((l: string) => l.trim())
+                  const errorCount = lines.length - parsed.length
+                  return (
+                    <p className="text-zinc-500 text-[9px] mt-1">
+                      {parsed.length}件パース成功
+                      {errorCount > 0 && <span className="text-red-400"> / {errorCount}件エラー</span>}
+                    </p>
+                  )
+                } catch { return null }
+              })()}
+            </>
+          )}
+
           {csvMode === 'topic' && (
             <>
               <p className="text-zinc-500 text-[10px] mb-2 leading-tight">
@@ -2119,49 +2209,6 @@ export function Sidebar({
           </svg>
         </button>
       </div>
-
-      {/* ── 一括ログイン ── */}
-      {(() => {
-        const newAccounts = accounts.filter(a => !a.login_probe_at && a.ig_password)
-        if (newAccounts.length === 0) return null
-        return (
-          <div className="px-3 pb-1 shrink-0">
-            <button
-              onClick={async () => {
-                if (!confirm(`未ログインの${newAccounts.length}件に対して一括ログインを実行しますか？\n\n同時最大3件、各30秒ジッターで実行します。`)) return
-                setBulkLoginRunning(true)
-                const { registerLoginProbeToast } = await import('./LoginProbeToast')
-                const optionsList = newAccounts.map(a => {
-                  registerLoginProbeToast(a.id, a.username)
-                  return {
-                    accountId: a.id,
-                    username: a.username,
-                    password: a.ig_password!,
-                    totpSecret: a.totp_secret ?? undefined,
-                  }
-                })
-                try {
-                  await api.loginProbe.bulk(optionsList, { concurrency: 3, jitterMs: 30000 })
-                } finally {
-                  setBulkLoginRunning(false)
-                  window.dispatchEvent(new CustomEvent('accounts-changed'))
-                }
-              }}
-              disabled={bulkLoginRunning}
-              className="w-full px-3 py-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              {bulkLoginRunning ? (
-                <>
-                  <span className="w-3 h-3 border-2 border-indigo-400/30 border-t-indigo-400 rounded-full animate-spin" />
-                  一括ログイン中...
-                </>
-              ) : (
-                <>一括ログイン（新規{newAccounts.length}件）</>
-              )}
-            </button>
-          </div>
-        )
-      })()}
 
       {/* ── Status bar ── */}
       <div className="px-3 pb-3 shrink-0 flex items-center justify-between">
