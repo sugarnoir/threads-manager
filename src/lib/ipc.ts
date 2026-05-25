@@ -51,6 +51,9 @@ export interface Account {
   threads_setup_error: string | null
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
+  login_probe_error: string | null
+  login_probe_at: string | null
+  last_login_phase: string | null
   fingerprint_seed: string | null
   behavior_seed: string | null
   behavior_profile: string | null
@@ -790,6 +793,18 @@ declare global {
         listProfiles:   (groupId?: string) => Promise<{ success: boolean; list: Array<{ user_id: string; name: string; group_id: string; group_name: string }> }>
         listGroups:     () => Promise<{ success: boolean; list: Array<{ group_id: string; group_name: string }> }>
         createGroup:    (name: string) => Promise<{ success: boolean; groupId?: string; error?: string }>
+      }
+      loginProbe: {
+        single:           (options: { accountId: number; username: string; password: string; totpSecret?: string; skipIfSessionAlive?: boolean }) =>
+                            Promise<{ ok: boolean; accountId: number; sessionAlreadyAlive?: boolean; phase?: string; signal?: unknown; error?: string }>
+        bulk:             (optionsList: Array<{ accountId: number; username: string; password: string; totpSecret?: string }>, config?: { concurrency?: number; jitterMs?: number }) =>
+                            Promise<Array<{ ok: boolean; accountId: number; phase?: string; error?: string }>>
+        resolveChallenge: (accountId: number) => Promise<{ ok: boolean }>
+        checkSession:     (accountId: number) => Promise<{ ok: boolean; alive: boolean }>
+        releaseAll:       () => Promise<{ ok: boolean }>
+        onPhase:          (cb: (payload: { accountId: number; phase: string }) => void) => () => void
+        onChallenge:      (cb: (payload: { accountId: number; username?: string; phase: string; signal: { layer: string; value: string; matchedAt: string } }) => void) => () => void
+        onDone:           (cb: (payload: { accountId: number; ok: boolean; phase: string }) => void) => () => void
       }
       scheduledImport: {
         start:  (args: { rows: unknown[]; intervalMs: number; importOptions: { proxyMode?: string; proxyStartPort?: number } }) =>

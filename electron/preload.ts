@@ -459,6 +459,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createGroup:    (name: string)       => ipcRenderer.invoke('adspower:create-group', name),
   },
 
+  // Login Probe (半自動ログイン)
+  loginProbe: {
+    single:           (options: { accountId: number; username: string; password: string; totpSecret?: string; skipIfSessionAlive?: boolean }) =>
+                        ipcRenderer.invoke('login-probe:single', options),
+    bulk:             (optionsList: Array<{ accountId: number; username: string; password: string; totpSecret?: string }>, config?: { concurrency?: number; jitterMs?: number }) =>
+                        ipcRenderer.invoke('login-probe:bulk', { optionsList, config }),
+    resolveChallenge: (accountId: number) =>
+                        ipcRenderer.invoke('login-probe:resolve-challenge', accountId),
+    checkSession:     (accountId: number) =>
+                        ipcRenderer.invoke('login-probe:check-session', accountId),
+    releaseAll:       () =>
+                        ipcRenderer.invoke('login-probe:release-all'),
+    onPhase:          (cb: (payload: unknown) => void) => {
+      const listener = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('login-probe:phase', listener as (...args: unknown[]) => void)
+      return () => { ipcRenderer.removeListener('login-probe:phase', listener as (...args: unknown[]) => void) }
+    },
+    onChallenge:      (cb: (payload: unknown) => void) => {
+      const listener = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('login-probe:challenge', listener as (...args: unknown[]) => void)
+      return () => { ipcRenderer.removeListener('login-probe:challenge', listener as (...args: unknown[]) => void) }
+    },
+    onDone:           (cb: (payload: unknown) => void) => {
+      const listener = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('login-probe:done', listener as (...args: unknown[]) => void)
+      return () => { ipcRenderer.removeListener('login-probe:done', listener as (...args: unknown[]) => void) }
+    },
+  },
+
   scheduledImport: {
     start: (args: { rows: unknown[]; intervalMs: number; importOptions: { proxyMode?: string; proxyStartPort?: number } }) =>
       ipcRenderer.invoke('scheduled-import:start', args) as Promise<{ started: boolean; total: number }>,

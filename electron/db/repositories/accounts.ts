@@ -53,6 +53,9 @@ export interface Account {
   threads_setup_error: string | null
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
+  login_probe_error: string | null
+  login_probe_at: string | null
+  last_login_phase: string | null
   fingerprint_seed: string | null
   behavior_seed: string | null
   behavior_profile: string | null

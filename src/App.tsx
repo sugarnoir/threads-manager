@@ -5,6 +5,7 @@ import { BrowserPage } from './pages/BrowserPage'
 import { AddAccountModal } from './components/AddAccountModal'
 import { AccountEditModal } from './components/AccountEditModal'
 import { SetupWizardOverlay } from './components/SetupWizardOverlay'
+import { ChallengeModal, type ChallengeNotification } from './components/ChallengeModal'
 import { useAccounts } from './hooks/useAccounts'
 import { Account, api } from './lib/ipc'
 
@@ -97,6 +98,9 @@ export default function App() {
     { proxy: { proxy_url: string; proxy_username: string; proxy_password: string } | null } | null
   >(null)
 
+  // Login Probe: challenge 検知モーダル
+  const [challengeNotif, setChallengeNotif] = useState<ChallengeNotification | null>(null)
+
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [licenseMaxAccounts, setLicenseMaxAccounts] = useState<number | null>(null)
 
@@ -117,6 +121,14 @@ export default function App() {
       } else {
         setUpdateStatus(d as typeof updateStatus)
       }
+    })
+    return unsub
+  }, [])
+
+  // Login Probe: challenge 検知イベント購読
+  useEffect(() => {
+    const unsub = api.loginProbe.onChallenge((payload) => {
+      setChallengeNotif(payload as ChallengeNotification)
     })
     return unsub
   }, [])
@@ -328,6 +340,19 @@ export default function App() {
               .then((res) => { if (!res.success) alert(`投稿画面を開けませんでした: ${res.error}`) })
               .catch((err) => alert(`エラー: ${err}`))
           }}
+        />
+      )}
+
+      {/* Login Probe: challenge 検知モーダル */}
+      {challengeNotif && (
+        <ChallengeModal
+          notification={challengeNotif}
+          onResolved={async () => {
+            await api.loginProbe.resolveChallenge(challengeNotif.accountId)
+            setChallengeNotif(null)
+            await refresh()
+          }}
+          onDismiss={() => setChallengeNotif(null)}
         />
       )}
 

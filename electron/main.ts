@@ -37,6 +37,7 @@ import { initAutoUpdater } from './updater'
 import { initViewManager } from './browser-views/view-manager'
 import { registerAppConfigHandlers } from './ipc/app-config'
 import { registerAdsPowerHandlers, startAdsPowerStatusMonitor, stopAdsPowerStatusMonitor } from './ipc/adspower'
+import { registerLoginProbeHandlers } from './services/login-probe/ipc-handlers'
 import { initAppConfig } from './lib/app-config'
 
 const isDev = process.env.NODE_ENV === 'development'
@@ -133,6 +134,7 @@ app.whenReady().then(() => {
     registerFollowQueueHandlers(viewManager, mainWindow)
     initAutoUpdater(mainWindow)
     startAdsPowerStatusMonitor(mainWindow)
+    registerLoginProbeHandlers(mainWindow)
 
     // Auto-start Discord Bot if enabled
     if (getSetting('discord_bot_enabled') === 'true') {

@@ -388,6 +388,20 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN stealth_override TEXT")
   }
 
+  // Login Probe: 半自動ログインフロー用カラム
+  if (!colNames.includes('login_probe_error')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN login_probe_error TEXT")
+  }
+  if (!colNames.includes('login_probe_at')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN login_probe_at TEXT")
+  }
+  if (!colNames.includes('last_login_phase')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN last_login_phase TEXT")
+  }
+
+  // Login Probe 検索用インデックス
+  db.exec("CREATE INDEX IF NOT EXISTS idx_accounts_status_login_probe_at ON accounts (status, login_probe_at)")
+
   // Fingerprint seed: 新規垢のみ自動生成、既存垢は null のまま（従来互換）
   if (!colNames.includes('fingerprint_seed')) {
     db.exec("ALTER TABLE accounts ADD COLUMN fingerprint_seed TEXT")
