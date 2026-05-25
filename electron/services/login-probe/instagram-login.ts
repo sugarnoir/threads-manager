@@ -12,11 +12,14 @@
  */
 
 import {
+  app,
   session,
   WebContentsView,
   type BrowserWindow,
   type Session,
 } from 'electron';
+import path from 'path';
+import fs from 'fs';
 import {
   ChallengeDetector,
   isChallengeUrl,
@@ -68,6 +71,31 @@ function generateTOTP(secret: string): string {
   const { TOTP } = require('otpauth')
   const totp = new TOTP({ secret, digits: 6, period: 30, algorithm: 'SHA1' })
   return totp.generate()
+}
+
+// ============================================================
+// デバッグスクリーンショット（失敗時のみ）
+// ============================================================
+
+async function captureDebugScreenshot(
+  view: WebContentsView,
+  accountId: number,
+  reason: string,
+): Promise<string | null> {
+  try {
+    const dir = path.join(app.getPath('userData'), 'login-probe-debug')
+    fs.mkdirSync(dir, { recursive: true })
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const filename = `${accountId}-${timestamp}-${reason}.png`
+    const filePath = path.join(dir, filename)
+    const image = await view.webContents.capturePage()
+    fs.writeFileSync(filePath, image.toPNG())
+    console.log(`[login-probe] screenshot saved: ${filePath}`)
+    return filename
+  } catch (err) {
+    console.warn(`[login-probe] screenshot failed:`, err)
+    return null
+  }
 }
 
 // ============================================================
@@ -277,9 +305,10 @@ export async function probeLogin(
 
     const clicked = await humanClick(view.webContents, SEL_LOGIN_SUBMIT);
     if (!clicked) {
+      const screenshot = await captureDebugScreenshot(view, accountId, 'submit_not_found');
       updateAccount(accountId, {
         last_login_phase: 'failed',
-        login_probe_error: 'login_submit_button_not_found',
+        login_probe_error: `login_submit_button_not_found${screenshot ? ` [${screenshot}]` : ''}`,
         alertErrorType: 'login_failed',
         alertRawBody: 'submit button not found',
       });
@@ -371,9 +400,10 @@ export async function probeLogin(
     }
 
     // unexpected
+    const screenshot2 = await captureDebugScreenshot(view, accountId, 'unexpected_url');
     updateAccount(accountId, {
       last_login_phase: 'failed',
-      login_probe_error: `unexpected_url:${finalUrl}`,
+      login_probe_error: `unexpected_url:${finalUrl}${screenshot2 ? ` [${screenshot2}]` : ''}`,
       alertErrorType: 'unexpected_url',
       alertRawBody: finalUrl,
     });
@@ -383,9 +413,11 @@ export async function probeLogin(
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // exception catch 内でもスクショ試行（view が破壊されてなければ）
+    const screenshot3 = await captureDebugScreenshot(view, accountId, 'exception').catch(() => null);
     updateAccount(accountId, {
       last_login_phase: 'failed',
-      login_probe_error: `exception:${message}`,
+      login_probe_error: `exception:${message}${screenshot3 ? ` [${screenshot3}]` : ''}`,
       alertErrorType: 'login_failed',
       alertRawBody: message,
     });
