@@ -1508,6 +1508,41 @@ export function registerAccountHandlers(): void {
     }
   })
 
+  // ── クイック追加（username/password/totp で最小限のアカウント作成） ──
+  ipcMain.handle('accounts:quick-add', async (_event, data: {
+    username: string
+    password: string
+    totp_secret?: string
+    group_name?: string
+    proxy_url?: string
+    proxy_username?: string
+    proxy_password?: string
+  }) => {
+    try {
+      if (!data.username?.trim()) return { success: false, error: 'username が空です' }
+      const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
+      const account = createAccount({
+        username: data.username.trim(),
+        session_dir: sessionDir,
+        ig_password: data.password || undefined,
+        proxy_url: data.proxy_url || undefined,
+        proxy_username: data.proxy_username || undefined,
+        proxy_password: data.proxy_password || undefined,
+      })
+      // totp_secret を保存
+      if (data.totp_secret?.trim()) {
+        updateAccountTotpSecret(account.id, data.totp_secret.trim().replace(/\s+/g, ''))
+      }
+      // group_name を保存
+      if (data.group_name?.trim()) {
+        updateAccountGroup(account.id, data.group_name.trim())
+      }
+      return { success: true, account: getAccountById(account.id) }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   ipcMain.handle('accounts:regenerate-fingerprint', async (_event, accountId: number) => {
     try {
       const { regenerateFingerprint } = await import('../fingerprint')

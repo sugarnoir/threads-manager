@@ -71,17 +71,52 @@ function generateTOTP(secret: string): string {
 }
 
 // ============================================================
-// View管理: challenge検知時はviewを保持してUIに引き継ぐ
+// View管理
+// _retainedViews: challenge検知後に保持（UIに引き継ぐ）
+// _activeProbeViews: probeLogin 実行中の view（キャンセル用）
 // ============================================================
 
 const _retainedViews = new Map<number, WebContentsView>();
+const _activeProbeViews = new Map<number, WebContentsView>();
+
+function registerActiveView(accountId: number, view: WebContentsView): void {
+  _activeProbeViews.set(accountId, view);
+}
+
+function unregisterActiveView(accountId: number): void {
+  _activeProbeViews.delete(accountId);
+}
 
 function retainView(accountId: number, view: WebContentsView): void {
+  unregisterActiveView(accountId);
   const existing = _retainedViews.get(accountId);
   if (existing && existing !== view) {
     try { existing.webContents.close(); } catch { /* noop */ }
   }
   _retainedViews.set(accountId, view);
+}
+
+/**
+ * challenge 後の retained view、または実行中の active view を破棄する。
+ * どちらにも該当しなければ何もしない。
+ */
+export function cancelProbe(
+  accountId: number,
+  parentWindow: BrowserWindow,
+): void {
+  // retained (challenge後)
+  const retained = _retainedViews.get(accountId);
+  if (retained) {
+    try { parentWindow.contentView.removeChildView(retained); } catch { /* noop */ }
+    _retainedViews.delete(accountId);
+    return;
+  }
+  // active (実行中)
+  const active = _activeProbeViews.get(accountId);
+  if (active) {
+    try { parentWindow.contentView.removeChildView(active); } catch { /* noop */ }
+    _activeProbeViews.delete(accountId);
+  }
 }
 
 export function releaseRetainedView(
@@ -182,6 +217,7 @@ export async function probeLogin(
 
   // Step 2: ログイン用 view 起動
   const { view, session: accountSession } = createAccountView(accountId, parentWindow);
+  registerActiveView(accountId, view);
 
   let currentPhase: LoginPhase = 'idle';
   const detector = new ChallengeDetector((signal) => { detectedSignal = signal; });
@@ -220,6 +256,7 @@ export async function probeLogin(
 
   const cleanupView = () => {
     detector.stop();
+    unregisterActiveView(accountId);
     try { parentWindow.contentView.removeChildView(view); } catch { /* noop */ }
   };
 

@@ -505,6 +505,10 @@ declare global {
           userAgent?: string
           error?: string
         }>
+        quickAdd: (data: {
+          username: string; password: string; totp_secret?: string; group_name?: string
+          proxy_url?: string; proxy_username?: string; proxy_password?: string
+        }) => Promise<{ success: boolean; account?: Account; error?: string }>
         regenerateUA: (id: number) => Promise<{
           success: boolean
           newUA?:  string
@@ -801,6 +805,7 @@ declare global {
                             Promise<Array<{ ok: boolean; accountId: number; phase?: string; error?: string }>>
         resolveChallenge: (accountId: number) => Promise<{ ok: boolean }>
         checkSession:     (accountId: number) => Promise<{ ok: boolean; alive: boolean }>
+        cancel:           (accountId: number) => Promise<{ ok: boolean }>
         releaseAll:       () => Promise<{ ok: boolean }>
         onPhase:          (cb: (payload: { accountId: number; phase: string }) => void) => () => void
         onChallenge:      (cb: (payload: { accountId: number; username?: string; phase: string; signal: { layer: string; value: string; matchedAt: string } }) => void) => () => void

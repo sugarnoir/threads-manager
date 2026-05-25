@@ -18,6 +18,7 @@ import { ipcMain, type BrowserWindow } from 'electron';
 import {
   probeLogin,
   bulkProbeLogin,
+  cancelProbe,
   releaseRetainedView,
   releaseAllRetainedViews,
 } from './instagram-login';
@@ -57,6 +58,16 @@ export function registerLoginProbeHandlers(mainWindow: BrowserWindow): void {
       ok: result.ok,
       alive: result.ok && result.sessionAlreadyAlive,
     };
+  });
+
+  ipcMain.handle('login-probe:cancel', async (_event, accountId: number) => {
+    cancelProbe(accountId, mainWindow);
+    updateAccount(accountId, {
+      status: 'inactive',
+      last_login_phase: 'failed',
+      login_probe_error: 'cancelled_by_user',
+    });
+    return { ok: true };
   });
 
   ipcMain.handle('login-probe:release-all', async () => {

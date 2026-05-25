@@ -6,6 +6,8 @@ import { AddAccountModal } from './components/AddAccountModal'
 import { AccountEditModal } from './components/AccountEditModal'
 import { SetupWizardOverlay } from './components/SetupWizardOverlay'
 import { ChallengeModal, type ChallengeNotification } from './components/ChallengeModal'
+import { QuickAddAccountModal } from './components/QuickAddAccountModal'
+import { LoginProbeToast } from './components/LoginProbeToast'
 import { useAccounts } from './hooks/useAccounts'
 import { Account, api } from './lib/ipc'
 
@@ -91,6 +93,7 @@ export default function App() {
   const [activeAccountId, setActiveAccountId] = useState<number | null>(null)
   const [activeTool, setActiveTool]           = useState<ToolType | null>(null)
   const [showAddModal, setShowAddModal]       = useState(false)
+  const [showQuickAddModal, setShowQuickAddModal] = useState(false)
   const [adding, setAdding]                   = useState(false)
   const [editTarget, setEditTarget]           = useState<Account | null>(null)
   // 「既存IGから作成」ウィザード: アクティブ時にプロキシを保持。null は「ウィザード非表示」
@@ -212,7 +215,7 @@ export default function App() {
 
   // モーダルが開いている間は WebContentsView を非表示
   // ※ setup ウィザードは Step 2/3 でブラウザ操作が必要なのでブラウザビューは表示する
-  const browserVisible = activeTool === null && editTarget === null && !showAddModal
+  const browserVisible = activeTool === null && editTarget === null && !showAddModal && !showQuickAddModal
 
   // 強制アップデート画面（ダウンロード中 or インストール中）
   if (updateStatus) {
@@ -268,6 +271,7 @@ export default function App() {
         onOpenAccount={(id) => { setActiveAccountId(id); setActiveTool(null) }}
         onEditAccount={setEditTarget}
         onAddAccount={() => setShowAddModal(true)}
+        onQuickAdd={() => setShowQuickAddModal(true)}
         onDeleteAccount={handleDeleteAccount}
         onCheckStatus={checkStatus}
         onUpdateGroup={updateGroup}
@@ -342,6 +346,20 @@ export default function App() {
           }}
         />
       )}
+
+      {/* クイック追加モーダル */}
+      {showQuickAddModal && (
+        <QuickAddAccountModal
+          onClose={() => setShowQuickAddModal(false)}
+          onAccountAdded={() => {
+            refresh()
+            window.dispatchEvent(new CustomEvent('accounts-changed'))
+          }}
+        />
+      )}
+
+      {/* Login Probe: トースト進捗 */}
+      <LoginProbeToast />
 
       {/* Login Probe: challenge 検知モーダル */}
       {challengeNotif && (

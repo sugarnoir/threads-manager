@@ -12,6 +12,7 @@ interface Props {
   onOpenAccount: (id: number) => void
   onEditAccount: (account: Account) => void
   onAddAccount: () => void
+  onQuickAdd: () => void
   onDeleteAccount: (id: number) => void
   onCheckStatus: (id: number) => void
   onUpdateGroup: (id: number, group: string | null) => void
@@ -152,6 +153,7 @@ export function Sidebar({
   onOpenAccount,
   onEditAccount,
   onAddAccount,
+  onQuickAdd,
   onDeleteAccount,
   onCheckStatus,
   onUpdateGroup,
@@ -225,9 +227,13 @@ export function Sidebar({
     await api.accounts.updateMark({ id: account.id, mark: next }).catch(() => {})
   }
 
+  const [bulkLoginRunning, setBulkLoginRunning] = useState(false)
+  const [probingAccountIds, setProbingAccountIds] = useState<Set<number>>(new Set())
+
   const [csvImporting,   setCsvImporting]   = useState(false)
   const [csvToast,       setCsvToast]       = useState<{ msg: string; ok: boolean } | null>(null)
   const [csvPanelOpen,   setCsvPanelOpen]   = useState(false)
+  const [csvAutoLogin,   setCsvAutoLogin]   = useState(true)
   const [csvGroupSel,    setCsvGroupSel]    = useState<string>('__all__')
   const [csvNewGrpName,  setCsvNewGrpName]  = useState('')
   // handleSidebarCsvFile は onChange コールバックのため ref 経由でグループ選択を受け渡す
@@ -524,8 +530,31 @@ export function Sidebar({
       if (res.imported > 0) {
         setCookieText('')
         setCsvPanelOpen(false)
-        // サイドバーのアカウント一覧を更新するためカスタムイベントを発火
         window.dispatchEvent(new CustomEvent('accounts-changed'))
+
+        // 自動ログイン: インポートした垢のみ対象
+        if (csvAutoLogin) {
+          // accounts-changed 反映を待ってから最新の accounts を取得
+          const freshAccounts = await api.accounts.list()
+          const importedAccounts = freshAccounts.filter(a =>
+            payload.some(p => p.username === a.username) && a.ig_password
+          )
+          if (importedAccounts.length > 0) {
+            const { registerLoginProbeToast } = await import('./LoginProbeToast')
+            const optionsList = importedAccounts.map(a => {
+              registerLoginProbeToast(a.id, a.username)
+              return {
+                accountId: a.id,
+                username: a.username,
+                password: a.ig_password!,
+                totpSecret: a.totp_secret ?? undefined,
+              }
+            })
+            // 非同期で実行（UIブロックしない）
+            api.loginProbe.bulk(optionsList, { concurrency: 3, jitterMs: 30000 })
+              .finally(() => window.dispatchEvent(new CustomEvent('accounts-changed')))
+          }
+        }
       }
     } catch (err) {
       showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
@@ -1445,6 +1474,51 @@ export function Sidebar({
                       >
                         ⚙
                       </button>
+
+                      {/* Login Probe button (bulk実行中は非表示) */}
+                      {account.ig_password && !bulkLoginRunning && (() => {
+                        const isProbing = probingAccountIds.has(account.id)
+                        const isLoggedIn = account.status === 'active' && account.last_login_phase === 'logged_in'
+                        if (isLoggedIn && !isProbing) return null
+                        return (
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation()
+                              if (isProbing) {
+                                // キャンセル
+                                await api.loginProbe.cancel(account.id)
+                                setProbingAccountIds(prev => { const s = new Set(prev); s.delete(account.id); return s })
+                                window.dispatchEvent(new CustomEvent('accounts-changed'))
+                                return
+                              }
+                              // ログイン開始
+                              setProbingAccountIds(prev => new Set(prev).add(account.id))
+                              const { registerLoginProbeToast } = await import('./LoginProbeToast')
+                              registerLoginProbeToast(account.id, account.username)
+                              try {
+                                await api.loginProbe.single({
+                                  accountId: account.id,
+                                  username: account.username,
+                                  password: account.ig_password!,
+                                  totpSecret: account.totp_secret ?? undefined,
+                                  skipIfSessionAlive: true,
+                                })
+                              } finally {
+                                setProbingAccountIds(prev => { const s = new Set(prev); s.delete(account.id); return s })
+                                window.dispatchEvent(new CustomEvent('accounts-changed'))
+                              }
+                            }}
+                            title={isProbing ? 'キャンセル' : 'ログイン'}
+                            className={`shrink-0 rounded flex items-center justify-center transition-all text-[9px] leading-none px-1.5 py-0.5 ${
+                              isProbing
+                                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30 opacity-100'
+                                : 'bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 opacity-0 group-hover:opacity-100'
+                            }`}
+                          >
+                            {isProbing ? '中止' : 'Login'}
+                          </button>
+                        )
+                      })()}
                     </div>
 
                     {isDropAfter(account.id) && (
@@ -1732,6 +1806,18 @@ export function Sidebar({
                 <span className="text-zinc-600 text-[9px]">（フィンガープリント偽装・凍結回避）</span>
               </label>
 
+              {/* 自動ログイン */}
+              <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={csvAutoLogin}
+                  onChange={e => setCsvAutoLogin(e.target.checked)}
+                  className="w-3 h-3 accent-blue-500"
+                />
+                <span className="text-zinc-300 text-[10px]">インポート後自動ログイン</span>
+                <span className="text-zinc-600 text-[9px]">（Login Probe）</span>
+              </label>
+
               {/* インポートモード切替 */}
               <label className="block text-zinc-500 text-[10px] mb-1">インポートモード</label>
               <div className="flex gap-1 mb-2 bg-zinc-800/60 p-0.5 rounded-lg">
@@ -2009,6 +2095,18 @@ export function Sidebar({
           )}
         </button>
 
+        {/* クイック追加ボタン */}
+        <button
+          onClick={onQuickAdd}
+          disabled={adding || accountLimitReached}
+          title="ID/PWでクイック追加"
+          className="w-10 shrink-0 flex items-center justify-center rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+          </svg>
+        </button>
+
         {/* 設定ボタン */}
         <button
           onClick={() => onOpenTool('proxy')}
@@ -2021,6 +2119,49 @@ export function Sidebar({
           </svg>
         </button>
       </div>
+
+      {/* ── 一括ログイン ── */}
+      {(() => {
+        const newAccounts = accounts.filter(a => !a.login_probe_at && a.ig_password)
+        if (newAccounts.length === 0) return null
+        return (
+          <div className="px-3 pb-1 shrink-0">
+            <button
+              onClick={async () => {
+                if (!confirm(`未ログインの${newAccounts.length}件に対して一括ログインを実行しますか？\n\n同時最大3件、各30秒ジッターで実行します。`)) return
+                setBulkLoginRunning(true)
+                const { registerLoginProbeToast } = await import('./LoginProbeToast')
+                const optionsList = newAccounts.map(a => {
+                  registerLoginProbeToast(a.id, a.username)
+                  return {
+                    accountId: a.id,
+                    username: a.username,
+                    password: a.ig_password!,
+                    totpSecret: a.totp_secret ?? undefined,
+                  }
+                })
+                try {
+                  await api.loginProbe.bulk(optionsList, { concurrency: 3, jitterMs: 30000 })
+                } finally {
+                  setBulkLoginRunning(false)
+                  window.dispatchEvent(new CustomEvent('accounts-changed'))
+                }
+              }}
+              disabled={bulkLoginRunning}
+              className="w-full px-3 py-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {bulkLoginRunning ? (
+                <>
+                  <span className="w-3 h-3 border-2 border-indigo-400/30 border-t-indigo-400 rounded-full animate-spin" />
+                  一括ログイン中...
+                </>
+              ) : (
+                <>一括ログイン（新規{newAccounts.length}件）</>
+              )}
+            </button>
+          </div>
+        )
+      })()}
 
       {/* ── Status bar ── */}
       <div className="px-3 pb-3 shrink-0 flex items-center justify-between">

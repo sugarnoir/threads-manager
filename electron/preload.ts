@@ -72,6 +72,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }>, options?: { proxyMode?: 'auto' | 'manual' | 'none' }) =>
       ipcRenderer.invoke('accounts:bulk-import', rows, options),
     autoRename: (id: number, customNames?: string[]) => ipcRenderer.invoke('accounts:auto-rename', id, customNames),
+    quickAdd: (data: {
+      username: string; password: string; totp_secret?: string; group_name?: string
+      proxy_url?: string; proxy_username?: string; proxy_password?: string
+    }) => ipcRenderer.invoke('accounts:quick-add', data),
     regenerateUA: (id: number) => ipcRenderer.invoke('accounts:regenerate-ua', id),
     regenerateFingerprint: (id: number) => ipcRenderer.invoke('accounts:regenerate-fingerprint', id),
     updateUnifiedHeaders: (id: number, enabled: boolean) => ipcRenderer.invoke('accounts:update-unified-headers', id, enabled),
@@ -469,6 +473,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
                         ipcRenderer.invoke('login-probe:resolve-challenge', accountId),
     checkSession:     (accountId: number) =>
                         ipcRenderer.invoke('login-probe:check-session', accountId),
+    cancel:           (accountId: number) =>
+                        ipcRenderer.invoke('login-probe:cancel', accountId),
     releaseAll:       () =>
                         ipcRenderer.invoke('login-probe:release-all'),
     onPhase:          (cb: (payload: unknown) => void) => {
