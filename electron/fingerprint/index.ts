@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import path from 'path'
 import fs from 'fs'
-import { getAccountFingerprint, setAccountFingerprint } from '../db/repositories/accounts'
+import { getAccountFingerprint, setAccountFingerprint, getAccountById } from '../db/repositories/accounts'
+import crypto from 'crypto'
 
 export interface Fingerprint {
   userAgent: string
@@ -158,22 +159,47 @@ function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]
 }
 
-// ── Generator (true random, not seeded) ──────────────────────────────────────
+/**
+ * fingerprint_seed ベースの seeded random 生成器。
+ * seed 文字列から HMAC-SHA256 で十分なエントロピーを得て、
+ * accountId 由来の規則的パターンを排除する。
+ */
+function createSeededRng(seed: string): () => number {
+  const hash = crypto.createHmac('sha256', seed).update('fingerprint').digest()
+  let idx = 0
+  return () => {
+    // hash の 4 バイトずつを消費して 0–1 の float を返す
+    if (idx + 4 > hash.length) idx = 0
+    const val = hash.readUInt32BE(idx % (hash.length - 3))
+    idx += 4
+    return (val >>> 0) / 0x100000000
+  }
+}
 
-function generateFingerprint(): Fingerprint {
-  const ua      = pick(UA_POOL)
-  const size    = pick(SCREEN_SIZES)
-  const lang    = pick(LANG_CONFIGS)
-  const webgl   = pick(WEBGL_CONFIGS)
-  const hw      = pick(HW_CONFIGS)
-  const tz      = pick(TIMEZONES)
-  const battery = pick(BATTERY_CONFIGS)
-  const canvasSeed = Math.floor(Math.random() * 65536)
-  const audioSeed  = Math.floor(Math.random() * 65536)
+function seededPick<T>(arr: T[], rng: () => number): T {
+  return arr[Math.floor(rng() * arr.length)]
+}
+
+// ── Generator ────────────────────────────────────────────────────────────────
+
+function generateFingerprint(seed?: string): Fingerprint {
+  // seed がある場合は seeded random で決定論的に生成
+  // seed がない場合は Math.random() で生成（既存垢の後方互換）
+  const rng = seed ? createSeededRng(seed) : Math.random
+  const p = <T>(arr: T[]) => seed ? seededPick(arr, rng) : pick(arr)
+  const ua      = p(UA_POOL)
+  const size    = p(SCREEN_SIZES)
+  const lang    = p(LANG_CONFIGS)
+  const webgl   = p(WEBGL_CONFIGS)
+  const hw      = p(HW_CONFIGS)
+  const tz      = p(TIMEZONES)
+  const battery = p(BATTERY_CONFIGS)
+  const canvasSeed = Math.floor(rng() * 65536)
+  const audioSeed  = Math.floor(rng() * 65536)
 
   // Pick a random subset of extra fonts (5–10 fonts) to add to base fonts
-  const shuffledExtras = [...FONT_EXTRAS].sort(() => Math.random() - 0.5)
-  const extraCount = 5 + Math.floor(Math.random() * 6) // 5–10
+  const shuffledExtras = [...FONT_EXTRAS].sort(() => rng() - 0.5)
+  const extraCount = 5 + Math.floor(rng() * 6) // 5–10
   const fontList = [...FONT_BASE, ...shuffledExtras.slice(0, extraCount)]
 
   return {
@@ -218,15 +244,29 @@ export function loadOrCreateFingerprint(accountId: number): Fingerprint {
       return fp
     } catch { /* JSON 破損時は再生成 */ }
   }
-  // 未保存のアカウント（既存アカウントの後方互換）は初回起動時に生成して固定
-  const fp = generateFingerprint()
+  // 未保存のアカウント: fingerprint_seed があればそれで生成、なければ true random
+  const account = getAccountById(accountId)
+  const seed = account?.fingerprint_seed ?? undefined
+  const fp = generateFingerprint(seed)
   setAccountFingerprint(accountId, JSON.stringify(fp))
   return fp
 }
 
 /** アカウント作成直後に呼んでフィンガープリントを固定する */
 export function createAndSaveFingerprint(accountId: number): Fingerprint {
-  const fp = generateFingerprint()
+  const account = getAccountById(accountId)
+  const seed = account?.fingerprint_seed ?? undefined
+  const fp = generateFingerprint(seed)
+  setAccountFingerprint(accountId, JSON.stringify(fp))
+  return fp
+}
+
+/** fingerprint_seed を再生成してフィンガープリントを再固定する */
+export function regenerateFingerprint(accountId: number): Fingerprint {
+  const newSeed = crypto.randomUUID()
+  const db = require('../db').getDb()
+  db.prepare('UPDATE accounts SET fingerprint_seed = ? WHERE id = ?').run(newSeed, accountId)
+  const fp = generateFingerprint(newSeed)
   setAccountFingerprint(accountId, JSON.stringify(fp))
   return fp
 }

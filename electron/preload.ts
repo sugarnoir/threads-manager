@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:bulk-import', rows, options),
     autoRename: (id: number, customNames?: string[]) => ipcRenderer.invoke('accounts:auto-rename', id, customNames),
     regenerateUA: (id: number) => ipcRenderer.invoke('accounts:regenerate-ua', id),
+    regenerateFingerprint: (id: number) => ipcRenderer.invoke('accounts:regenerate-fingerprint', id),
     updateUnifiedHeaders: (id: number, enabled: boolean) => ipcRenderer.invoke('accounts:update-unified-headers', id, enabled),
     updateStealth: (data: { ids: number[]; override: 'on' | 'off' | null }) => ipcRenderer.invoke('accounts:update-stealth', data),
     importCookieLogin: (rows: Array<{
@@ -218,6 +219,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (name: string) => ipcRenderer.invoke('groups:delete', name),
     reorder: (updates: { id: number; sort_order: number }[]) => ipcRenderer.invoke('groups:reorder', updates),
     updateStealth: (data: { name: string; enabled: boolean }) => ipcRenderer.invoke('groups:update-stealth', data),
+    updateStealthMode: (data: { name: string; mode: string | null }) => ipcRenderer.invoke('groups:update-stealth-mode', data),
   },
 
   // Research

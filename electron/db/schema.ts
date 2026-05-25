@@ -388,6 +388,11 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN stealth_override TEXT")
   }
 
+  // Fingerprint seed: 新規垢のみ自動生成、既存垢は null のまま（従来互換）
+  if (!colNames.includes('fingerprint_seed')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN fingerprint_seed TEXT")
+  }
+
   // AdsPower 統合カラム
   if (!colNames.includes('adspower_user_id')) {
     db.exec("ALTER TABLE accounts ADD COLUMN adspower_user_id TEXT")
@@ -404,6 +409,11 @@ export function initializeSchema(db: Database.Database): void {
     const groupCols = db.prepare("PRAGMA table_info(groups)").all() as { name: string }[]
     if (!groupCols.some(c => c.name === 'stealth_enabled')) {
       db.exec("ALTER TABLE groups ADD COLUMN stealth_enabled INTEGER DEFAULT 0")
+    }
+    // groups テーブルに stealth_mode カラム追加（A/Bテスト用）
+    // null = グローバル設定に従う, 'minimal' | 'legacy' | 'off' = 上書き
+    if (!groupCols.some(c => c.name === 'stealth_mode')) {
+      db.exec("ALTER TABLE groups ADD COLUMN stealth_mode TEXT")
     }
   }
 

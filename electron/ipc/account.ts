@@ -1508,6 +1508,16 @@ export function registerAccountHandlers(): void {
     }
   })
 
+  ipcMain.handle('accounts:regenerate-fingerprint', async (_event, accountId: number) => {
+    try {
+      const { regenerateFingerprint } = await import('../fingerprint')
+      const fp = regenerateFingerprint(accountId)
+      return { success: true, userAgent: fp.userAgent }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   ipcMain.handle('accounts:context-menu', (event, accountId: number, selectedIds?: number[]) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return

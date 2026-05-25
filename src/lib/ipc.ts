@@ -51,6 +51,7 @@ export interface Account {
   threads_setup_error: string | null
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
+  fingerprint_seed: string | null
   adspower_user_id: string | null
   adspower_status: 'not_created' | 'created' | 'running' | 'error' | 'syncing' | null
   adspower_browser_core: 'sun' | 'flower' | null
@@ -63,6 +64,7 @@ export interface Group {
   name: string
   sort_order: number
   stealth_enabled: number
+  stealth_mode: string | null
 }
 
 export interface Post {
@@ -493,6 +495,11 @@ declare global {
           newName?: string
           error?:   string
         }>
+        regenerateFingerprint: (id: number) => Promise<{
+          success: boolean
+          userAgent?: string
+          error?: string
+        }>
         regenerateUA: (id: number) => Promise<{
           success: boolean
           newUA?:  string
@@ -611,6 +618,7 @@ declare global {
         delete: (name: string) => Promise<{ success: boolean }>
         reorder: (updates: { id: number; sort_order: number }[]) => Promise<{ success: boolean }>
         updateStealth: (data: { name: string; enabled: boolean }) => Promise<{ success: boolean }>
+        updateStealthMode: (data: { name: string; mode: string | null }) => Promise<{ success: boolean }>
       }
       stocks: {
         list:   (accountId: number) => Promise<{ success: boolean; data: PostStock[]; error?: string }>

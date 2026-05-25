@@ -526,14 +526,21 @@ export class ViewManager {
     const acctForEmu = getAccountById(accountId)
     const isMobileEmu = acctForEmu?.username === MOBILE_EMU_ACCOUNT
 
-    // Stealth レベル判定: stealth_mode 設定 (minimal/legacy/off)、デフォルト minimal
+    // Stealth レベル判定: account override → group stealth_mode → global stealth_mode
     const applyStealth = this._shouldApplyStealth(acctForEmu)
     const globalLevel = (getSetting('stealth_mode') || 'minimal') as StealthLevel
-    // legacy stealth が有効な場合は legacy、そうでなければグローバル設定に従う
-    const stealthLevel: StealthLevel = applyStealth ? 'legacy' : globalLevel
+
+    // グループ stealth_mode を取得
+    let groupLevel: StealthLevel | null = null
+    if (acctForEmu?.group_name) {
+      const group = getGroupByName(acctForEmu.group_name)
+      if (group?.stealth_mode) groupLevel = group.stealth_mode as StealthLevel
+    }
+
+    // 優先順位: account.stealth_override → group stealth_mode → global stealth_mode
+    const stealthLevel: StealthLevel = applyStealth ? 'legacy' : (groupLevel ?? globalLevel)
     const stealthScript = applyStealth ? buildStealthScript() : null
-    if (applyStealth) console.log(`[makeView] stealth LEGACY for account=${accountId}`)
-    else console.log(`[makeView] stealth level=${stealthLevel} for account=${accountId}`)
+    console.log(`[makeView] account=${accountId} stealth=${stealthLevel}${applyStealth ? ' (legacy override)' : ''}${groupLevel ? ` (group: ${groupLevel})` : ''}`)
 
     const fp = loadOrCreateFingerprint(accountId)
 

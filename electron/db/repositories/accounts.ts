@@ -53,6 +53,7 @@ export interface Account {
   threads_setup_error: string | null
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
+  fingerprint_seed: string | null
   adspower_user_id: string | null
   adspower_status: string | null
   adspower_browser_core: string | null
@@ -111,10 +112,13 @@ export function createAccount(data: {
 
   const maxRow = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM accounts').get() as { m: number }
   const nextOrder = maxRow.m + 1000
+  // 新規垢は fingerprint_seed を自動生成（既存垢は null のまま従来互換）
+  const fpSeed = require('crypto').randomUUID() as string
+
   const result = db
     .prepare(
-      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order, user_agent, ig_password, platform)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO accounts (username, display_name, session_dir, proxy_url, proxy_username, proxy_password, sort_order, user_agent, ig_password, platform, fingerprint_seed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       data.username,
@@ -127,6 +131,7 @@ export function createAccount(data: {
       data.user_agent ?? null,
       data.ig_password ?? null,
       data.platform ?? 'threads',
+      fpSeed,
     )
   return getAccountById(result.lastInsertRowid as number)!
 }

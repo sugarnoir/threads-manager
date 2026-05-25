@@ -5,6 +5,7 @@ export interface Group {
   name: string
   sort_order: number
   stealth_enabled: number
+  stealth_mode: string | null
 }
 
 export function getAllGroups(): Group[] {
@@ -48,4 +49,8 @@ export function getGroupByName(name: string): Group | undefined {
 
 export function updateGroupStealth(name: string, enabled: boolean): void {
   getDb().prepare('UPDATE groups SET stealth_enabled = ? WHERE name = ?').run(enabled ? 1 : 0, name)
+}
+
+export function updateGroupStealthMode(name: string, mode: string | null): void {
+  getDb().prepare('UPDATE groups SET stealth_mode = ? WHERE name = ?').run(mode, name)
 }
