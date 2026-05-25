@@ -223,12 +223,75 @@ function generateFingerprint(seed?: string): Fingerprint {
   }
 }
 
+// ── Soft evolution ───────────────────────────────────────────────────────────
+//
+// fingerprint_seed を持つ新規垢のみ適用。
+// base fingerprint (DB保存) は変更せず、ロード時に soft fields を period seed で微変動。
+//
+// stable (固定): timezone, platform, language, hardwareConcurrency, deviceMemory,
+//                webglVendor, webglRenderer, vendor
+// soft-evolving (微変動): Chrome minor version, font subset, battery level,
+//                         screen availHeight, WebGL extension subset,
+//                         canvasSeed/audioSeed の微小 variation
+
+function applySoftEvolution(fp: Fingerprint, seed: string): Fingerprint {
+  // period key: seed + YYYY-WW (ISO week) で週単位の緩やかな変化
+  const now = new Date()
+  const jan1 = new Date(now.getFullYear(), 0, 1)
+  const week = Math.ceil(((now.getTime() - jan1.getTime()) / 86400000 + jan1.getDay() + 1) / 7)
+  const periodKey = `${seed}:${now.getFullYear()}-W${String(week).padStart(2, '0')}`
+  const prng = createSeededRng(periodKey)
+
+  const evolved = { ...fp }
+
+  // 1. Chrome minor version bump (e.g., Chrome/124.0.0.0 → Chrome/124.0.6367.xx)
+  evolved.userAgent = evolved.userAgent.replace(
+    /Chrome\/(\d+)\.0\.0\.0/,
+    (_, major) => {
+      const buildBase = 6000 + Math.floor(prng() * 500) // 6000–6499
+      const patch = Math.floor(prng() * 200)
+      return `Chrome/${major}.0.${buildBase}.${patch}`
+    },
+  )
+
+  // 2. Font subset: base fonts 固定、extra fonts のうち 1–2 個を入れ替え
+  if (evolved.fontList.length > FONT_BASE.length) {
+    const extras = evolved.fontList.slice(FONT_BASE.length)
+    const availableExtras = FONT_EXTRAS.filter(f => !extras.includes(f))
+    if (availableExtras.length > 0) {
+      const swapCount = 1 + Math.floor(prng() * 2) // 1–2
+      for (let i = 0; i < swapCount && i < extras.length && availableExtras.length > 0; i++) {
+        const replaceIdx = Math.floor(prng() * extras.length)
+        const newFont = availableExtras.splice(Math.floor(prng() * availableExtras.length), 1)[0]
+        extras[replaceIdx] = newFont
+      }
+      evolved.fontList = [...FONT_BASE, ...extras]
+    }
+  }
+
+  // 3. Battery level: ±0.05 の微変動
+  const batteryDelta = (prng() - 0.5) * 0.1 // -0.05 ~ +0.05
+  evolved.batteryLevel = Math.max(0.1, Math.min(1.0, Math.round((evolved.batteryLevel + batteryDelta) * 100) / 100))
+  evolved.batteryCharging = prng() > 0.5
+
+  // 4. Canvas/Audio seed: base ± 微小 variation (同一 period 内は固定)
+  const canvasVariation = Math.floor(prng() * 4) - 2 // -2 ~ +1
+  const audioVariation = Math.floor(prng() * 4) - 2
+  evolved.canvasSeed = (evolved.canvasSeed + canvasVariation) & 0xFFFF
+  evolved.audioSeed = (evolved.audioSeed + audioVariation) & 0xFFFF
+
+  return evolved
+}
+
 // ── DB-backed loader (accounts.fingerprint カラムに保存) ─────────────────────
 //
-// 一度保存されたフィンガープリントは変更しない。
-// ブラウザを開くたびに同じフィンガープリントが適用される。
+// base fingerprint は DB に固定保存。
+// seed がある垢はロード時に applySoftEvolution で soft fields を微変動。
 
 export function loadOrCreateFingerprint(accountId: number): Fingerprint {
+  const account = getAccountById(accountId)
+  const seed = account?.fingerprint_seed ?? undefined
+
   const stored = getAccountFingerprint(accountId)
   if (stored) {
     try {
@@ -241,12 +304,12 @@ export function loadOrCreateFingerprint(accountId: number): Fingerprint {
         fp.vendor    = chromeUa.vendor
         setAccountFingerprint(accountId, JSON.stringify(fp))
       }
+      // seed がある新規垢のみ soft-evolution を適用
+      if (seed) return applySoftEvolution(fp, seed)
       return fp
     } catch { /* JSON 破損時は再生成 */ }
   }
   // 未保存のアカウント: fingerprint_seed があればそれで生成、なければ true random
-  const account = getAccountById(accountId)
-  const seed = account?.fingerprint_seed ?? undefined
   const fp = generateFingerprint(seed)
   setAccountFingerprint(accountId, JSON.stringify(fp))
   return fp
