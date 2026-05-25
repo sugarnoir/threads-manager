@@ -692,6 +692,16 @@ export function startScheduler(win: BrowserWindow): void {
           }
         }
 
+        // Behavior profile: inactive hours スキップ（behavior_seed がある垢のみ）
+        try {
+          const { shouldSkipForInactiveHours, getActivityMultiplier } = require('../services/behavior-profile')
+          if (shouldSkipForInactiveHours(config.account_id)) {
+            const mult = getActivityMultiplier(config.account_id)
+            logAutopost(`[Autopost] account=${config.account_id} SKIP — inactive hours (multiplier=${mult.toFixed(2)})`)
+            continue
+          }
+        } catch { /* behavior-profile not available */ }
+
         // 再起動時の重複投稿防止: 直近の投稿時刻が最小間隔未満ならスキップ
         if (config.use_api) {
           const lastPostedAt = getLastPostedAt(config.account_id)
@@ -753,6 +763,11 @@ export function startScheduler(win: BrowserWindow): void {
       const engConfigs = getEnabledAutoEngagementConfigs()
       for (const cfg of engConfigs) {
         if (cfg.next_at && new Date(cfg.next_at) > new Date()) continue
+        // Behavior profile: inactive hours スキップ
+        try {
+          const { shouldSkipForInactiveHours } = require('../services/behavior-profile')
+          if (shouldSkipForInactiveHours(cfg.account_id)) continue
+        } catch { /* */ }
         try {
           await executeAutoEngagement(cfg)
           const delayMs =

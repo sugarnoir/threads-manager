@@ -52,6 +52,8 @@ export interface Account {
   threads_setup_attempts: number
   stealth_override: 'on' | 'off' | null
   fingerprint_seed: string | null
+  behavior_seed: string | null
+  behavior_profile: string | null
   adspower_user_id: string | null
   adspower_status: 'not_created' | 'created' | 'running' | 'error' | 'syncing' | null
   adspower_browser_core: 'sun' | 'flower' | null

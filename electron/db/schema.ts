@@ -393,6 +393,15 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN fingerprint_seed TEXT")
   }
 
+  // Behavior profile: activity rhythm + browsing personality
+  // 新規垢のみ生成、既存垢は null（従来のランダム動作）
+  if (!colNames.includes('behavior_seed')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN behavior_seed TEXT")
+  }
+  if (!colNames.includes('behavior_profile')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN behavior_profile TEXT")  // JSON
+  }
+
   // AdsPower 統合カラム
   if (!colNames.includes('adspower_user_id')) {
     db.exec("ALTER TABLE accounts ADD COLUMN adspower_user_id TEXT")
