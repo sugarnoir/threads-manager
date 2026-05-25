@@ -781,19 +781,26 @@ export function Settings({ onAccountAdded }: { onAccountAdded?: () => void } = {
 // ── Stealth section ──────────────────────────────────────────────────────────
 
 function StealthSection() {
-  const [enabled, setEnabled] = useState(false)
-  const [applyNew, setApplyNew] = useState(true)
+  const [mode, setMode] = useState<'minimal' | 'legacy' | 'off'>('minimal')
+  const [legacyEnabled, setLegacyEnabled] = useState(false)
+  const [applyNew, setApplyNew] = useState(false)
   const [applyExisting, setApplyExisting] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
     api.settings.getAll().then((s) => {
-      setEnabled(s.stealth_enabled === 'true')
-      setApplyNew(s.stealth_apply_to_new !== 'false')
+      setMode((s.stealth_mode as 'minimal' | 'legacy' | 'off') || 'minimal')
+      setLegacyEnabled(s.stealth_enabled === 'true')
+      setApplyNew(s.stealth_apply_to_new === 'true')
       setApplyExisting(s.stealth_apply_to_existing === 'true')
       setLoaded(true)
     })
   }, [])
+
+  const handleModeChange = async (newMode: 'minimal' | 'legacy' | 'off') => {
+    setMode(newMode)
+    await api.settings.set('stealth_mode', newMode)
+  }
 
   const toggle = async (key: string, val: boolean, setter: (v: boolean) => void) => {
     setter(val)
@@ -802,6 +809,12 @@ function StealthSection() {
 
   if (!loaded) return null
 
+  const MODE_INFO = {
+    minimal: { label: 'Minimal', desc: 'UA + WebRTC IP保護のみ。通常 Chrome に近い自然な挙動', color: 'bg-emerald-600' },
+    legacy:  { label: 'Legacy',  desc: 'Canvas/WebGL/Audio noise、Plugins/Permissions 偽装、全パッチ適用', color: 'bg-amber-600' },
+    off:     { label: 'OFF',     desc: '一切のパッチなし。素の Electron Chromium', color: 'bg-zinc-600' },
+  } as const
+
   return (
     <div>
       <div className="flex items-center gap-2 mb-4">
@@ -809,26 +822,48 @@ function StealthSection() {
           🛡
         </div>
         <div>
-          <p className="text-white font-semibold text-sm">Stealth モード</p>
-          <p className="text-zinc-500 text-xs">WebContentsView のフィンガープリント偽装を強化</p>
+          <p className="text-white font-semibold text-sm">Fingerprint / Stealth</p>
+          <p className="text-zinc-500 text-xs">WebContentsView のフィンガープリントパッチレベル</p>
         </div>
       </div>
 
+      {/* モード選択 */}
+      <div className="space-y-2 mb-4">
+        <label className="text-zinc-400 text-xs font-medium block">パッチレベル</label>
+        <div className="flex gap-2">
+          {(['minimal', 'legacy', 'off'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => handleModeChange(m)}
+              className={`flex-1 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                mode === m
+                  ? `${MODE_INFO[m].color} text-white`
+                  : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+              }`}
+            >
+              {MODE_INFO[m].label}
+            </button>
+          ))}
+        </div>
+        <p className="text-zinc-500 text-xs">{MODE_INFO[mode].desc}</p>
+      </div>
+
+      {/* Legacy 追加設定（個別垢に強い偽装を適用する設定） */}
       <div className="space-y-2">
         <div className="flex items-center justify-between p-4 bg-zinc-800 rounded-xl">
           <div>
-            <p className="text-white text-sm font-medium">Stealth 機能を有効化</p>
-            <p className="text-zinc-500 text-xs mt-0.5">chrome オブジェクト偽装、Plugins 偽装、iframe パッチ等</p>
+            <p className="text-white text-sm font-medium">Legacy Stealth（個別垢）</p>
+            <p className="text-zinc-500 text-xs mt-0.5">chrome 偽装、Plugins 偽装、iframe パッチを特定垢に適用</p>
           </div>
-          <Toggle checked={enabled} onChange={() => toggle('stealth_enabled', !enabled, setEnabled)} />
+          <Toggle checked={legacyEnabled} onChange={() => toggle('stealth_enabled', !legacyEnabled, setLegacyEnabled)} />
         </div>
 
-        {enabled && (
+        {legacyEnabled && (
           <>
             <div className="flex items-center justify-between p-4 bg-zinc-800/60 rounded-xl ml-4">
               <div>
                 <p className="text-white text-sm font-medium">新規垢に適用</p>
-                <p className="text-zinc-500 text-xs mt-0.5">unverified / inactive ステータスの垢（推奨）</p>
+                <p className="text-zinc-500 text-xs mt-0.5">unverified / inactive ステータスの垢</p>
               </div>
               <Toggle checked={applyNew} onChange={() => toggle('stealth_apply_to_new', !applyNew, setApplyNew)} size="sm" />
             </div>
@@ -844,8 +879,7 @@ function StealthSection() {
       </div>
 
       <p className="text-zinc-600 text-[10px] mt-2 leading-tight">
-        手動 Threads 作成時の凍結回避を狙う実験的機能。ビューの再作成時に反映されます。
-        まずは新規垢のみで試すことを推奨。
+        ビューの再作成時に反映。Minimal 推奨（通常 Chrome に最も近い挙動）。
       </p>
     </div>
   )

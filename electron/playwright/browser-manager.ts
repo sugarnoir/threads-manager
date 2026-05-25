@@ -1,7 +1,8 @@
 import { chromium, BrowserContext, Cookie } from 'playwright'
 import fs from 'fs'
 import { getAccountById } from '../db/repositories/accounts'
-import { loadOrCreateFingerprint, buildOverrideScript } from '../fingerprint'
+import { loadOrCreateFingerprint, buildOverrideScript, type StealthLevel } from '../fingerprint'
+import { getSetting } from '../db/repositories/settings'
 
 export interface ProxyConfig {
   server: string
@@ -153,7 +154,8 @@ export async function getContext(accountId: number, headless = false): Promise<B
   })
 
   // Inject JS overrides (runs before every page's scripts)
-  await ctx.addInitScript(buildOverrideScript(fp))
+  const playwrightLevel = (getSetting('stealth_mode') || 'minimal') as StealthLevel
+  await ctx.addInitScript(buildOverrideScript(fp, playwrightLevel === 'off' ? 'minimal' : playwrightLevel))
 
   // ユーザーがブラウザウィンドウを閉じたとき自動でプールから削除
   ctx.on('close', () => {
@@ -290,7 +292,8 @@ export async function withContextDirect<T>(
     // proxy なし
   })
 
-  await ctx.addInitScript(buildOverrideScript(fp))
+  const playwrightLevel = (getSetting('stealth_mode') || 'minimal') as StealthLevel
+  await ctx.addInitScript(buildOverrideScript(fp, playwrightLevel === 'off' ? 'minimal' : playwrightLevel))
   await syncElectronCookiesToContext(ctx, accountId)
 
   try {

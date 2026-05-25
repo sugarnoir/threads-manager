@@ -233,7 +233,17 @@ export function createAndSaveFingerprint(accountId: number): Fingerprint {
 
 // ── JS override code (injected into main world) ───────────────────────────────
 
-export function buildOverrideScript(fp: Fingerprint, stealthMode = false): string {
+/**
+ * Stealth モード:
+ * - 'off'     = パッチなし（素の Electron/Chromium）
+ * - 'minimal' = UA + WebRTC IP保護のみ（通常 Chrome 寄せ、デフォルト）
+ * - 'legacy'  = 従来の全パッチ（Canvas/WebGL/Audio noise, Permissions偽装等）
+ */
+export type StealthLevel = 'off' | 'minimal' | 'legacy'
+
+export function buildOverrideScript(fp: Fingerprint, level: StealthLevel = 'minimal'): string {
+  if (level === 'off') return '/* stealth off */'
+
   const tzOffset = TZ_OFFSET[fp.timezone] ?? 0
 
   // Battery chargingTime / dischargingTime を事前計算
@@ -246,23 +256,25 @@ export function buildOverrideScript(fp: Fingerprint, stealthMode = false): strin
   const chargingTimeStr    = chargingTime    === Infinity ? 'Infinity' : String(chargingTime)
   const dischargingTimeStr = dischargingTime === Infinity ? 'Infinity' : String(dischargingTime)
 
+  const isLegacy = level === 'legacy'
+
   return `(function() {
   try {
     const _def = (obj, prop, val) => {
       try { Object.defineProperty(obj, prop, { get: () => val, configurable: true }) } catch(e) {}
     }
 
-    // ── navigator ──
+    // ── navigator (minimal: UA のみ、legacy: 全偽装) ──
     _def(navigator, 'userAgent',           ${JSON.stringify(fp.userAgent)})
-    _def(navigator, 'platform',            ${JSON.stringify(fp.platform)})
+${isLegacy ? `    _def(navigator, 'platform',            ${JSON.stringify(fp.platform)})
     _def(navigator, 'vendor',              ${JSON.stringify(fp.vendor)})
     _def(navigator, 'language',            ${JSON.stringify(fp.language)})
     _def(navigator, 'languages',           Object.freeze(${JSON.stringify(fp.languages)}))
     _def(navigator, 'hardwareConcurrency', ${fp.hardwareConcurrency})
     _def(navigator, 'deviceMemory',        ${fp.deviceMemory})
-${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `    _def(navigator, 'plugins',             Object.freeze([]))
+    _def(navigator, 'plugins',             Object.freeze([]))
     _def(navigator, 'mimeTypes',           Object.freeze([]))
-    _def(navigator, 'webdriver',           false)`}
+    _def(navigator, 'webdriver',           false)
     _def(navigator, 'appCodeName',         'Mozilla')
     _def(navigator, 'appName',             'Netscape')
     _def(navigator, 'product',             'Gecko')
@@ -276,7 +288,7 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
     _def(screen, 'colorDepth',  24)
     _def(screen, 'pixelDepth',  24)
 
-    // ── timezone: Intl.DateTimeFormat を差し替えてタイムゾーンを固定 ──
+    // ── timezone ──
     const _OrigDTF = Intl.DateTimeFormat
     function _FakeDTF(locale, opts) {
       opts = Object.assign({}, opts || {})
@@ -286,13 +298,11 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
     _FakeDTF.prototype             = _OrigDTF.prototype
     _FakeDTF.supportedLocalesOf    = _OrigDTF.supportedLocalesOf.bind(_OrigDTF)
     Object.defineProperty(Intl, 'DateTimeFormat', { value: _FakeDTF, configurable: true, writable: true })
-
-    // ── Date.prototype.getTimezoneOffset (標準時オフセット固定) ──
     const _OrigGetTZO = Date.prototype.getTimezoneOffset
     Date.prototype.getTimezoneOffset = function() { return ${tzOffset} }
-    void _OrigGetTZO // keep reference to avoid lint warning
+    void _OrigGetTZO
 
-    // ── Canvas noise (via getImageData, toDataURL, toBlob) ──
+    // ── Canvas noise ──
     const _SEED = ${fp.canvasSeed}
     const _origGet = CanvasRenderingContext2D.prototype.getImageData
     CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
@@ -329,7 +339,7 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
       }, ...args)
     }
 
-    // ── WebGL vendor / renderer / extensions ──
+    // ── WebGL vendor / renderer ──
     const _GL_EXTS_ALL = [
       'ANGLE_instanced_arrays','EXT_blend_minmax','EXT_clip_control','EXT_color_buffer_float',
       'EXT_color_buffer_half_float','EXT_disjoint_timer_query','EXT_float_blend',
@@ -348,11 +358,8 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
       'WEBGL_multi_draw','WEBGL_multi_draw_instanced_base_vertex_base_instance',
       'WEBGL_polygon_mode','WEBGL_provoking_vertex','WEBGL_stencil_texturing',
     ]
-    // Seeded LCG to pick a deterministic subset of extensions
     let _lcg = ${fp.canvasSeed} | 1
     const _lcgNext = () => { _lcg = (_lcg * 1664525 + 1013904223) >>> 0; return _lcg }
-    // Keep ~70-85% of extensions for realistic variation
-    // WEBGL_debug_renderer_info は必ず含める（bot.sannysoft.com 等が ext 経由で vendor/renderer を取得する）
     const _GL_MUST_HAVE = ['WEBGL_debug_renderer_info']
     const _GL_EXTS = _GL_EXTS_ALL.filter((name) => _GL_MUST_HAVE.includes(name) || (_lcgNext() % 100) < 80)
     const _patchGL = (Ctx) => {
@@ -392,37 +399,6 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
       }
     } catch(e) {}
 
-    // ── WebRTC IP leak prevention (JS レベル) ──
-    // ICE サーバーを空にし、iceTransportPolicy を relay 限定にすることで
-    // STUN による IP 探索と host candidate (LAN IP) 漏洩を防ぐ
-    try {
-      if (typeof RTCPeerConnection !== 'undefined') {
-        const _OrigRTC = RTCPeerConnection
-        function _SafeRTC(config, constraints) {
-          const cfg = config ? Object.assign({}, config) : {}
-          cfg.iceServers = []
-          cfg.iceTransportPolicy = 'relay'
-          const pc = new _OrigRTC(cfg, constraints)
-          // onicecandidate を監視して host/srflx candidate をドロップ
-          const _origAddEventListener = pc.addEventListener.bind(pc)
-          pc.addEventListener = function(type, listener, options) {
-            if (type === 'icecandidate') {
-              const wrapped = function(e) {
-                if (e.candidate && e.candidate.candidate &&
-                    /typ (host|srflx)/.test(e.candidate.candidate)) return
-                listener.call(this, e)
-              }
-              return _origAddEventListener(type, wrapped, options)
-            }
-            return _origAddEventListener(type, listener, options)
-          }
-          return pc
-        }
-        _SafeRTC.prototype = _OrigRTC.prototype
-        Object.defineProperty(window, 'RTCPeerConnection', { value: _SafeRTC, configurable: true, writable: true })
-      }
-    } catch(e) {}
-
     // ── AudioContext noise ──
     try {
       const _AUDIO_SEED = ${fp.audioSeed}
@@ -446,7 +422,7 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
       }
     } catch(e) {}
 
-    // ── Font list spoofing (document.fonts.check) ──
+    // ── Font list spoofing ──
     try {
       const _ALLOWED_FONTS = new Set(${JSON.stringify(fp.fontList)})
       if (typeof FontFaceSet !== 'undefined' && document.fonts) {
@@ -472,6 +448,34 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
           return _origQuery(desc)
         }
       }
+    } catch(e) {}` : '    // minimal: navigator は UA のみ、plugins/languages/permissions は Chromium デフォルトのまま'}
+
+    // ── WebRTC IP leak prevention (minimal + legacy 共通) ──
+    try {
+      if (typeof RTCPeerConnection !== 'undefined') {
+        const _OrigRTC = RTCPeerConnection
+        function _SafeRTC(config, constraints) {
+          const cfg = config ? Object.assign({}, config) : {}
+          cfg.iceServers = []
+          cfg.iceTransportPolicy = 'relay'
+          const pc = new _OrigRTC(cfg, constraints)
+          const _origAddEventListener = pc.addEventListener.bind(pc)
+          pc.addEventListener = function(type, listener, options) {
+            if (type === 'icecandidate') {
+              const wrapped = function(e) {
+                if (e.candidate && e.candidate.candidate &&
+                    /typ (host|srflx)/.test(e.candidate.candidate)) return
+                listener.call(this, e)
+              }
+              return _origAddEventListener(type, wrapped, options)
+            }
+            return _origAddEventListener(type, listener, options)
+          }
+          return pc
+        }
+        _SafeRTC.prototype = _OrigRTC.prototype
+        Object.defineProperty(window, 'RTCPeerConnection', { value: _SafeRTC, configurable: true, writable: true })
+      }
     } catch(e) {}
 
   } catch(e) {}
@@ -480,8 +484,8 @@ ${stealthMode ? '    // webdriver/plugins/mimeTypes は Stealth に委譲' : `  
 
 // ── Preload script file (written per account, loaded by Electron session) ─────
 
-export function writeAccountPreload(accountId: number, fp: Fingerprint, stealthCode?: string): string {
-  const overrideCode = buildOverrideScript(fp, !!stealthCode)
+export function writeAccountPreload(accountId: number, fp: Fingerprint, level: StealthLevel = 'minimal', stealthCode?: string): string {
+  const overrideCode = buildOverrideScript(fp, level)
 
   // Preload runs in the isolated world.
   // webFrame.executeJavaScript injects overrides into the main world.

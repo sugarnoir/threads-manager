@@ -44,10 +44,8 @@ const isDev = process.env.NODE_ENV === 'development'
 // 配布ビルドで WebContentsView が黒くなる GPU 合成バグを防ぐ
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
-// navigator.webdriver を Chromium レベルで無効化（Stealth 偽装の決定打）
-app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled')
-app.commandLine.appendSwitch('disable-infobars')
-app.commandLine.appendSwitch('exclude-switches', 'enable-automation')
+// Stealth フラグは削除: 通常 Chrome 挙動に寄せるため
+// AutomationControlled 無効化、infobars 非表示、automation 除外は行わない
 
 let mainWindow: BrowserWindow | null = null
 

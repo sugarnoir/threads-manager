@@ -1,6 +1,6 @@
 import { WebContentsView, session, BrowserWindow, net, clipboard, nativeImage, powerMonitor } from 'electron'
 import { toRomaji } from 'wanakana'
-import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload } from '../fingerprint'
+import { loadOrCreateFingerprint, buildOverrideScript, writeAccountPreload, type StealthLevel } from '../fingerprint'
 import { buildStealthScript } from './stealth-evasions'
 import { pickRandomIphoneUA } from '../utils/iphone-ua'
 import { getContextCookiesIfOpen, closeContext } from '../playwright/browser-manager'
@@ -526,31 +526,36 @@ export class ViewManager {
     const acctForEmu = getAccountById(accountId)
     const isMobileEmu = acctForEmu?.username === MOBILE_EMU_ACCOUNT
 
-    // Stealth evasion (デフォルトOFF、個別→グループ→status の優先順)
+    // Stealth レベル判定: stealth_mode 設定 (minimal/legacy/off)、デフォルト minimal
     const applyStealth = this._shouldApplyStealth(acctForEmu)
+    const globalLevel = (getSetting('stealth_mode') || 'minimal') as StealthLevel
+    // legacy stealth が有効な場合は legacy、そうでなければグローバル設定に従う
+    const stealthLevel: StealthLevel = applyStealth ? 'legacy' : globalLevel
+    const stealthScript = applyStealth ? buildStealthScript() : null
+    if (applyStealth) console.log(`[makeView] stealth LEGACY for account=${accountId}`)
+    else console.log(`[makeView] stealth level=${stealthLevel} for account=${accountId}`)
 
     const fp = loadOrCreateFingerprint(accountId)
-    const overrideScript = buildOverrideScript(fp, applyStealth)
-    const stealthScript = applyStealth ? buildStealthScript() : null
-    if (applyStealth) console.log(`[makeView] stealth ENABLED for account=${accountId}`)
 
     if (isMobileEmu) {
       sess.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
-    } else {
+    } else if (stealthLevel !== 'off') {
       sess.setUserAgent(fp.userAgent)
     }
 
-    // Accept-Language ヘッダーをフィンガープリントに合わせて設定
-    sess.webRequest.onBeforeSendHeaders(
-      { urls: ['*://*.threads.com/*', '*://*.threads.net/*', '*://*.instagram.com/*'] },
-      (details, cb) => {
-        details.requestHeaders['Accept-Language'] = fp.languages.join(',')
-        cb({ requestHeaders: details.requestHeaders })
-      }
-    )
+    // Accept-Language ヘッダー: legacy のみ偽装、minimal/off は Chromium デフォルト
+    if (stealthLevel === 'legacy') {
+      sess.webRequest.onBeforeSendHeaders(
+        { urls: ['*://*.threads.com/*', '*://*.threads.net/*', '*://*.instagram.com/*'] },
+        (details, cb) => {
+          details.requestHeaders['Accept-Language'] = fp.languages.join(',')
+          cb({ requestHeaders: details.requestHeaders })
+        }
+      )
+    }
 
     try {
-      const preloadPath = writeAccountPreload(accountId, fp, stealthScript ?? undefined)
+      const preloadPath = writeAccountPreload(accountId, fp, stealthLevel, stealthScript ?? undefined)
       sess.setPreloads([preloadPath])
     } catch { /* skip if file write fails */ }
 
@@ -577,9 +582,10 @@ export class ViewManager {
     } catch { /* Electron バージョン差異に備えて無視 */ }
 
     // dom-ready 時にも再注入（preload の async 注入を補完）
+    const overrideCode = buildOverrideScript(fp, stealthLevel)
     view.webContents.on('dom-ready', () => {
       if (!view.webContents.isDestroyed()) {
-        view.webContents.executeJavaScript(overrideScript).catch(() => {})
+        view.webContents.executeJavaScript(overrideCode).catch(() => {})
         if (stealthScript) {
           view.webContents.executeJavaScript(stealthScript).catch(() => {})
         }
