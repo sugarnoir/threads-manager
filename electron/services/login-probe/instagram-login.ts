@@ -424,6 +424,29 @@ export async function probeLogin(
 
     if (isLoggedInUrl(finalUrl)) {
       setPhase('logged_in');
+
+      // セッション Cookie を DB にバックアップ（view-manager の復元用）
+      try {
+        const cookies = await accountSession.cookies.get({});
+        const rawCookies = cookies
+          .filter(c => c.value && c.domain)
+          .map(c => ({
+            name:           c.name,
+            value:          c.value,
+            domain:         c.domain,
+            path:           c.path,
+            secure:         c.secure,
+            httpOnly:       c.httpOnly,
+            expirationDate: c.expirationDate,
+            sameSite:       c.sameSite,
+          }));
+        const { setSetting } = require('../../db/repositories/settings');
+        setSetting(`session_cookies_${accountId}`, JSON.stringify(rawCookies));
+        console.log(`[login-probe] backed up ${rawCookies.length} cookies for account ${accountId}`);
+      } catch (e) {
+        console.warn(`[login-probe] cookie backup failed:`, e);
+      }
+
       updateAccount(accountId, {
         status: 'active',
         last_login_phase: 'logged_in',
