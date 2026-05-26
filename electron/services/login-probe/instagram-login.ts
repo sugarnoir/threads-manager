@@ -21,6 +21,13 @@ import {
 import path from 'path';
 import fs from 'fs';
 import { setSetting } from '../../db/repositories/settings';
+import { getAccountById } from '../../db/repositories/accounts';
+import {
+  loadOrCreateFingerprint,
+  buildOverrideScript,
+  writeAccountPreload,
+} from '../../fingerprint';
+import { buildStealthScript } from '../../browser-views/stealth-evasions';
 import {
   ChallengeDetector,
   isChallengeUrl,
@@ -193,6 +200,23 @@ function createAccountView(
   const partition = `persist:account-${accountId}`;
   const accountSession = session.fromPartition(partition);
 
+  // ── ステルス注入 (view-manager と同等) ──────────────────────────
+  const fp = loadOrCreateFingerprint(accountId);
+  const stealthScript = buildStealthScript();
+  const stealthLevel = 'legacy' as const;
+
+  // User-Agent をフィンガープリントから設定
+  accountSession.setUserAgent(fp.userAgent);
+
+  // Preload スクリプト注入 (ページ読み込み前に実行)
+  try {
+    const preloadPath = writeAccountPreload(accountId, fp, stealthLevel, stealthScript);
+    accountSession.setPreloads([preloadPath]);
+  } catch { /* skip if file write fails */ }
+
+  // WebRTC IP リーク対策
+  const acct = getAccountById(accountId);
+
   const view = new WebContentsView({
     webPreferences: {
       session: accountSession,
@@ -200,6 +224,23 @@ function createAccountView(
       nodeIntegration: false,
     },
   });
+
+  try {
+    view.webContents.setWebRTCIPHandlingPolicy(
+      acct?.proxy_url ? 'disable_non_proxied_udp' : 'default_public_interface_only'
+    );
+  } catch { /* noop */ }
+
+  // dom-ready 時にも再注入 (preload の補完)
+  const overrideCode = buildOverrideScript(fp, stealthLevel);
+  view.webContents.on('dom-ready', () => {
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.executeJavaScript(overrideCode).catch(() => {});
+      view.webContents.executeJavaScript(stealthScript).catch(() => {});
+    }
+  });
+
+  console.log(`[login-probe] createAccountView account=${accountId} stealth=legacy ua=${fp.userAgent.slice(0, 60)}...`);
 
   parentWindow.contentView.addChildView(view);
 
