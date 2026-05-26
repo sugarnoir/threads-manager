@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { User, Shield, FileText, Bookmark, Settings, Fingerprint } from 'lucide-react'
+import { User, Shield, FileText, Bookmark, Settings, Fingerprint, Copy } from 'lucide-react'
 import { Account, PostStock, FingerprintData, api } from '../lib/ipc'
 import { MasterKeyGate } from './MasterKeyGate'
 import Papa from 'papaparse'
@@ -123,6 +123,21 @@ function StocksTab({ accountId, groupName, onUseStock }: { accountId: number; gr
   const showToast = (msg: string, ok: boolean) => {
     setToast({ msg, ok })
     setTimeout(() => setToast(null), 5000)
+  }
+
+  const handleCopy = async (text: string, message: string) => {
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    showToast(message, true)
   }
 
   const handleFile = async () => {
@@ -914,6 +929,24 @@ export function AccountEditModal({
       .catch(() => setHasAccessToken(false))
   }, [tab, account.id])
 
+  // Copy toast
+  const [copyToast, setCopyToast] = useState<string | null>(null)
+  const handleCopy = async (text: string, message: string) => {
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    setCopyToast(message)
+    setTimeout(() => setCopyToast(null), 2000)
+  }
+
   // Profile state
   const [displayName, setDisplayName] = useState(account.display_name ?? '')
   const [savingDisplayName, setSavingDisplayName] = useState(false)
@@ -1058,6 +1091,7 @@ export function AccountEditModal({
     if (res.success && res.code) {
       setTotpCode(res.code)
       setTotpRemaining(res.remaining ?? 30)
+      handleCopy(res.code, '認証コードをコピーしました')
     } else {
       setTotpError(res.error ?? 'コード生成に失敗しました')
       setTotpCode(null)
@@ -1226,7 +1260,7 @@ export function AccountEditModal({
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-[460px] overflow-hidden">
+      <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-[460px] overflow-hidden relative">
 
         {/* Header */}
         <div className="px-5 pt-5 pb-4 border-b border-zinc-800">
@@ -1288,22 +1322,55 @@ export function AccountEditModal({
           </div>
         </div>
 
+        {/* Copy toast */}
+        {copyToast && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg shadow-lg animate-pulse">
+            {copyToast}
+          </div>
+        )}
+
         {/* Body */}
         <div className="px-5 py-4 space-y-4 max-h-[60vh] overflow-y-auto">
 
           {/* ── Profile tab ── */}
           {tab === 'profile' && (
             <>
-              {/* 表示名 */}
+              {/* Instagram ID */}
               <div>
+                <label className="text-zinc-400 text-xs font-medium block mb-2">Instagram ID</label>
+                <div className="flex gap-2">
+                  <div className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm text-white font-mono select-all">
+                    {account.username}
+                  </div>
+                  <button
+                    onClick={() => handleCopy(account.username, 'ID をコピーしました')}
+                    className="p-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors shrink-0"
+                    title="コピー"
+                  >
+                    <Copy size={14} />
+                  </button>
+                </div>
+              </div>
+
+              {/* 表示名 */}
+              <div className="border-t border-zinc-800 pt-4">
                 <label className="text-zinc-400 text-xs font-medium block mb-2">表示名</label>
-                <input
-                  type="text"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder={account.username}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    placeholder={account.username}
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    onClick={() => handleCopy(displayName || account.username, '表示名をコピーしました')}
+                    className="p-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors shrink-0"
+                    title="コピー"
+                  >
+                    <Copy size={14} />
+                  </button>
+                </div>
                 <p className="text-zinc-600 text-xs mt-1">空白にするとユーザー名(@{account.username})が表示されます</p>
               </div>
               <div className="flex gap-2 pt-1">
@@ -1334,6 +1401,13 @@ export function AccountEditModal({
                     placeholder="パスワードを入力"
                     className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
                   />
+                  <button
+                    onClick={() => handleCopy(igPassword, 'パスワードをコピーしました')}
+                    className="p-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors shrink-0"
+                    title="コピー"
+                  >
+                    <Copy size={14} />
+                  </button>
                   <button
                     onClick={handleSaveIgPassword}
                     disabled={savingIgPassword}
@@ -1391,11 +1465,11 @@ export function AccountEditModal({
                           {xAuthTokenShow ? '隠す' : '表示'}
                         </button>
                         <button
-                          onClick={() => navigator.clipboard.writeText(xAuthToken)}
-                          className="px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded-lg transition-colors shrink-0"
+                          onClick={() => handleCopy(xAuthToken, 'Auth Token をコピーしました')}
+                          className="p-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors shrink-0"
                           title="コピー"
                         >
-                          📋
+                          <Copy size={14} />
                         </button>
                       </>
                     )}
@@ -1420,6 +1494,13 @@ export function AccountEditModal({
                     className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
                   />
                   <button
+                    onClick={() => handleCopy(totpSecret, '2FA シークレットをコピーしました')}
+                    className="p-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors shrink-0"
+                    title="コピー"
+                  >
+                    <Copy size={14} />
+                  </button>
+                  <button
                     onClick={handleSaveTotpSecret}
                     disabled={totpSaving}
                     className="px-2.5 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors shrink-0"
@@ -1441,11 +1522,11 @@ export function AccountEditModal({
                         {totpCode}
                       </span>
                       <button
-                        onClick={() => { navigator.clipboard.writeText(totpCode); }}
-                        className="px-2 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-[10px] rounded transition-colors"
+                        onClick={() => handleCopy(totpCode, '認証コードをコピーしました')}
+                        className="p-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded transition-colors"
                         title="コピー"
                       >
-                        📋
+                        <Copy size={12} />
                       </button>
                       <div className="flex items-center gap-1">
                         <div className="w-16 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
@@ -1539,13 +1620,22 @@ export function AccountEditModal({
                     </button>
                   ))}
                 </div>
-                <textarea
-                  value={userAgent}
-                  onChange={(e) => setUserAgent(e.target.value)}
-                  rows={2}
-                  placeholder="カスタムUAを直接入力..."
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-[10px] text-zinc-300 font-mono placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none mb-2"
-                />
+                <div className="flex gap-2 mb-2">
+                  <textarea
+                    value={userAgent}
+                    onChange={(e) => setUserAgent(e.target.value)}
+                    rows={2}
+                    placeholder="カスタムUAを直接入力..."
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-[10px] text-zinc-300 font-mono placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
+                  />
+                  <button
+                    onClick={() => handleCopy(userAgent, 'User-Agent をコピーしました')}
+                    className="p-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors shrink-0 self-start"
+                    title="コピー"
+                  >
+                    <Copy size={14} />
+                  </button>
+                </div>
                 <button
                   onClick={handleSaveUserAgent}
                   disabled={savingUA || userAgent === (account.user_agent ?? '')}
