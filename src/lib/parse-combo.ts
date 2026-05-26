@@ -144,15 +144,29 @@ function parseCookiePipe(line: string): AccountInput | null {
 
 /**
  * Simple colon フォーマット: username:password:totp_secret
+ *
+ * 対応フォーマット:
+ *   user:pass
+ *   user:pass:totp
+ *   user\tpass\ttotp          (タブ区切り)
+ *   user:\tpass:\ttotp        (コロン+タブ混在 — AccsMarket形式)
+ *   email:user:pass:totp
+ *   TOTP内空白: "53BU R72P TMHT 5OD7" → "53BUR72PTMHT5OD7"
  */
 function parseSimpleColon(line: string): AccountInput | null {
-  const parts = line.split(':').map(s => s.trim())
+  // コロン or タブ（連続OK）で split、空要素除外、trim
+  const parts = line
+    .split(/[:\t]+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
 
   if (parts.length >= 4) {
-    return { username: parts[1], password: parts[2], token: '', cookies: [], email: parts[0], totpSecret: parts[3] }
+    // TOTP 部分: 4番目以降を結合（スペース区切りTOTPキーを復元）して空白除去
+    const totpSecret = parts.slice(3).join('').replace(/\s+/g, '')
+    return { username: parts[1], password: parts[2], token: '', cookies: [], email: parts[0], totpSecret }
   }
   if (parts.length === 3) {
-    return { username: parts[0], password: parts[1], token: '', cookies: [], email: '', totpSecret: parts[2] }
+    return { username: parts[0], password: parts[1], token: '', cookies: [], email: '', totpSecret: parts[2].replace(/\s+/g, '') }
   }
   if (parts.length === 2) {
     return { username: parts[0], password: parts[1], token: '', cookies: [], email: '', totpSecret: '' }
