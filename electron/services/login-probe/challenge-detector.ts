@@ -154,6 +154,7 @@ export class ChallengeDetector {
   }
 
   private checkUrl(url: string): void {
+    if (isTwoFactorUrl(url)) return;  // 2FA は challenge ではない
     for (const pattern of CHALLENGE_URL_PATTERNS) {
       if (url.includes(pattern)) { this.emit('url', pattern); return; }
     }
@@ -200,7 +201,9 @@ export class ChallengeDetector {
 export function isTwoFactorUrl(url: string): boolean {
   return url.includes('/accounts/login/two_factor/') ||
     url.includes('/accounts/login/two-factor/') ||
-    url.includes('/two_factor/');
+    url.includes('/two_factor/') ||
+    url.includes('/two-step-verification/') ||
+    url.includes('next=%2Faccounts%2Flogin%2Ftwo_factor');
 }
 
 export function isChallengeUrl(url: string): boolean {

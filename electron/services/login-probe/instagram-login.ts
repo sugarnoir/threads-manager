@@ -57,7 +57,7 @@ const IG_HOME_URL = 'https://www.instagram.com/';
 const SEL_USERNAME = 'input[name="email"], input[name="username"], input[autocomplete="username"]';
 const SEL_PASSWORD = 'input[name="pass"], input[name="password"], input[autocomplete="current-password"]';
 const SEL_LOGIN_SUBMIT = 'button[type="submit"], input[type="submit"], [type="submit"]';
-const SEL_2FA_INPUT = 'input[name="verificationCode"], input[autocomplete="one-time-code"]';
+const SEL_2FA_INPUT = 'input[name="verificationCode"], input[name="approvals_code"], input[autocomplete="one-time-code"], input[inputmode="numeric"][maxlength="6"]';
 
 const PAGE_LOAD_SETTLE_MS = 2500;
 const POST_SUBMIT_WAIT_MS = 5000;
@@ -324,6 +324,8 @@ export async function probeLogin(
 
     // Step 5: 2FA 判定
     const urlAfterCreds = view.webContents.getURL();
+    console.log(`[login-probe] URL after credentials: ${urlAfterCreds}`);
+    console.log(`[login-probe] isTwoFactorUrl=${isTwoFactorUrl(urlAfterCreds)} isChallengeUrl=${isChallengeUrl(urlAfterCreds)}`);
     if (isTwoFactorUrl(urlAfterCreds)) {
       setPhase('awaiting_2fa');
 
