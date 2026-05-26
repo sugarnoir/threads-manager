@@ -76,7 +76,7 @@ export async function humanType(
   selector: string,
   text: string,
 ): Promise<void> {
-  // focus + click（IG のフィールドは click でアクティブ化される場合がある）
+  // Step 1: フィールドにフォーカス + click
   await webContents.executeJavaScript(
     `(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
@@ -88,45 +88,25 @@ export async function humanType(
   );
   await sleep(randInt(200, 500));
 
-  // 1文字ずつ入力: ネイティブ setter + React が認識する全イベントを発火
+  // Step 2: CDP debugger 経由で本物のキー入力（React の状態管理を完全バイパス）
+  try {
+    if (!webContents.debugger.isAttached()) {
+      webContents.debugger.attach('1.3');
+    }
+  } catch { /* already attached */ }
+
   for (const char of text) {
-    const escapedChar = JSON.stringify(char);
-    await webContents.executeJavaScript(
-      `(() => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return;
-
-        // React の内部ファイバーが参照するネイティブ setter を使う
-        const proto = el.tagName === 'TEXTAREA'
-          ? window.HTMLTextAreaElement.prototype
-          : window.HTMLInputElement.prototype;
-        const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (nativeSetter) {
-          nativeSetter.call(el, (el.value || '') + ${escapedChar});
-        } else {
-          el.value = (el.value || '') + ${escapedChar};
-        }
-
-        // React 16+/17+/18+ が認識するイベント群を発火
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-
-        // React 内部の _valueTracker をリセット（これがないと React が変更を無視する）
-        const tracker = el._valueTracker;
-        if (tracker) { tracker.setValue(''); }
-      })()`,
-    );
+    try {
+      await webContents.debugger.sendCommand('Input.insertText', { text: char });
+    } catch {
+      // CDP 失敗時は executeJavaScript フォールバック
+      await webContents.executeJavaScript(
+        `document.execCommand('insertText', false, ${JSON.stringify(char)})`,
+      );
+    }
     await sleep(randInt(60, 180));
   }
 
-  // 入力完了後に最終 change を発火
-  await webContents.executeJavaScript(
-    `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return;
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`,
-  );
   await sleep(randInt(150, 350));
 }
 
