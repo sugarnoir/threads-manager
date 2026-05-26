@@ -20,6 +20,7 @@ import {
 } from 'electron';
 import path from 'path';
 import fs from 'fs';
+import { setSetting } from '../../db/repositories/settings';
 import {
   ChallengeDetector,
   isChallengeUrl,
@@ -422,12 +423,16 @@ export async function probeLogin(
       if (r) return r;
     }
 
+    console.log(`[login-probe] account=${accountId} finalUrl=${finalUrl} isLoggedIn=${isLoggedInUrl(finalUrl)} isChallengeUrl=${isChallengeUrl(finalUrl)}`);
+
     if (isLoggedInUrl(finalUrl)) {
       setPhase('logged_in');
+      console.log(`[login-probe] account=${accountId} ENTER logged_in branch`);
 
       // セッション Cookie を DB にバックアップ（view-manager の復元用）
       try {
         const cookies = await accountSession.cookies.get({});
+        console.log(`[login-probe] account=${accountId} raw cookies count=${cookies.length}`);
         const rawCookies = cookies
           .filter(c => c.value && c.domain)
           .map(c => ({
@@ -440,11 +445,11 @@ export async function probeLogin(
             expirationDate: c.expirationDate,
             sameSite:       c.sameSite,
           }));
-        const { setSetting } = require('../../db/repositories/settings');
+        console.log(`[login-probe] account=${accountId} filtered cookies count=${rawCookies.length}, has sessionid=${rawCookies.some(c => c.name === 'sessionid')}`);
         setSetting(`session_cookies_${accountId}`, JSON.stringify(rawCookies));
-        console.log(`[login-probe] backed up ${rawCookies.length} cookies for account ${accountId}`);
+        console.log(`[login-probe] account=${accountId} setSetting DONE key=session_cookies_${accountId} size=${JSON.stringify(rawCookies).length}`);
       } catch (e) {
-        console.warn(`[login-probe] cookie backup failed:`, e);
+        console.error(`[login-probe] account=${accountId} cookie backup FAILED:`, e);
       }
 
       updateAccount(accountId, {
@@ -452,6 +457,7 @@ export async function probeLogin(
         last_login_phase: 'logged_in',
         login_probe_error: null,
       });
+      console.log(`[login-probe] account=${accountId} updateAccount status=active DONE`);
       cleanupView();
       notifyDone({ accountId, ok: true, phase: 'logged_in' });
       return { ok: true, accountId, sessionAlreadyAlive: false };
