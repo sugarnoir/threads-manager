@@ -1328,7 +1328,7 @@ export function AccountEditModal({
                 <p className="text-zinc-600 text-xs mt-0.5 mb-2">Instagram ログイン用パスワード</p>
                 <div className="flex gap-2">
                   <input
-                    type="password"
+                    type="text"
                     value={igPassword}
                     onChange={e => setIgPassword(e.target.value)}
                     placeholder="パスワードを入力"
