@@ -352,20 +352,39 @@ export async function probeLogin(
       await humanType(view.webContents, SEL_2FA_INPUT, code);
       await sleep(randInt(500, 1100));
 
-      await view.webContents.executeJavaScript(`
-        (() => {
-          const btns = Array.from(document.querySelectorAll('button'));
-          const target = btns.find(b => {
-            const t = (b.textContent || '').trim();
-            if (!t) return false;
-            return /Confirm|Verify|Submit|Continue|確認|送信/i.test(t);
-          });
-          if (target) { target.click(); return true; }
-          const submit = document.querySelector('button[type="submit"]');
-          if (submit) { submit.click(); return true; }
-          return false;
-        })()
-      `);
+      // まず Enter キーで submit を試行
+      try {
+        if (!view.webContents.debugger.isAttached()) {
+          view.webContents.debugger.attach('1.3');
+        }
+        await view.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+        });
+        await view.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+        });
+      } catch { /* fallback below */ }
+
+      await sleep(randInt(800, 1500));
+
+      // Enter で遷移しなかった場合、ボタンテキストで探索 (button + div[role="button"])
+      const urlAfter2faEnter = view.webContents.getURL();
+      if (isTwoFactorUrl(urlAfter2faEnter)) {
+        await view.webContents.executeJavaScript(`
+          (() => {
+            const btns = Array.from(document.querySelectorAll('button, div[role="button"], [role="button"]'));
+            const target = btns.find(b => {
+              const t = (b.textContent || '').trim();
+              if (!t) return false;
+              return /^(Confirm|Verify|Submit|Continue|Next|実行|確認|送信|次へ)$/i.test(t);
+            });
+            if (target) { target.click(); return true; }
+            const submit = document.querySelector('button[type="submit"], input[type="submit"], [type="submit"]');
+            if (submit) { submit.click(); return true; }
+            return false;
+          })()
+        `);
+      }
 
       await sleep(POST_SUBMIT_WAIT_MS + randInt(0, 2000));
       await sleep(CHALLENGE_DETECTION_GRACE_MS);
