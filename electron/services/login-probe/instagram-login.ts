@@ -69,6 +69,7 @@ const CHALLENGE_DETECTION_GRACE_MS = 1500;
 // ============================================================
 
 async function humanWarmup(view: WebContentsView): Promise<void> {
+  console.log(`[login-probe] humanWarmup START`);
   await view.webContents.loadURL(IG_HOME_URL);
   await sleep(randInt(2000, 4000));
 
@@ -221,12 +222,24 @@ async function checkSessionAlive(
   accountId: number,
   parentWindow: BrowserWindow,
 ): Promise<boolean> {
+  // まず partition に sessionid Cookie があるか確認（なければ view 生成を省略）
+  const partition = `persist:account-${accountId}`;
+  const accountSession = session.fromPartition(partition);
+  const igCookies = await accountSession.cookies.get({ url: 'https://www.instagram.com' }).catch(() => []);
+  const hasSessionId = igCookies.some(c => c.name === 'sessionid' && !!c.value);
+  if (!hasSessionId) {
+    console.log(`[login-probe] checkSessionAlive account=${accountId}: no sessionid cookie, skip`);
+    return false;
+  }
+
   const { view } = createAccountView(accountId, parentWindow);
   try {
     await view.webContents.loadURL(IG_HOME_URL);
     await sleep(2000);
     const url = view.webContents.getURL();
-    return !url.includes('/accounts/login');
+    const alive = isLoggedInUrl(url);
+    console.log(`[login-probe] checkSessionAlive account=${accountId}: url=${url} alive=${alive}`);
+    return alive;
   } catch {
     return false;
   } finally {
@@ -245,12 +258,16 @@ export async function probeLogin(
   const { accountId, username, password, totpSecret } = options;
   const skipIfAlive = options.skipIfSessionAlive ?? true;
 
+  console.log(`[login-probe] account=${accountId} (${username}) probeLogin START skipIfAlive=${skipIfAlive}`);
+
   // Step 1: 既存session生存チェック
   if (skipIfAlive) {
     notifyPhaseChanged({ accountId, phase: 'navigating' });
     const alive = await checkSessionAlive(accountId, parentWindow);
     if (alive) {
+      console.log(`[login-probe] account=${accountId} session already alive, skipping login`);
       updateAccount(accountId, {
+        status: 'active',
         last_login_phase: 'logged_in',
         login_probe_error: null,
       });
@@ -500,6 +517,7 @@ export async function bulkProbeLogin(
   parentWindow: BrowserWindow,
   config: BulkLoginConfig = {},
 ): Promise<LoginProbeResult[]> {
+  console.log(`[login-probe] bulkProbeLogin START count=${optionsList.length} concurrency=${config.concurrency ?? 1}`);
   const concurrency = config.concurrency ?? 1;
   const jitterCfg = config.jitterMs ?? [60000, 180000];
   const [jitterMin, jitterMax] = Array.isArray(jitterCfg)

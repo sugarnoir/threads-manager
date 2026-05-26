@@ -40,6 +40,7 @@ async function runOnce(): Promise<void> {
       AND (giveup IS NULL OR giveup = 0)
       AND (next_login_attempt_at IS NULL OR next_login_attempt_at <= datetime('now'))
       AND (login_attempt_count IS NULL OR login_attempt_count < ?)
+      AND created_at <= datetime('now', '-5 minutes')
     ORDER BY next_login_attempt_at ASC
     LIMIT 10
   `).all(MAX_ATTEMPTS) as any[]
