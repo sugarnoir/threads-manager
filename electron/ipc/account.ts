@@ -7,6 +7,7 @@ import {
   updateAccountStatus,
   updateAccountProxy,
   updateAccountDisplayName,
+  updateAccountPassword,
   updateAccountUsername,
   updateAccountGroup,
   updateAccountMemo,
@@ -936,6 +937,11 @@ export function registerAccountHandlers(): void {
 
   ipcMain.handle('accounts:update-display-name', (_event, data: { id: number; display_name: string | null }) => {
     updateAccountDisplayName(data.id, data.display_name)
+    return { success: true }
+  })
+
+  ipcMain.handle('accounts:update-password', (_event, data: { id: number; password: string | null }) => {
+    updateAccountPassword(data.id, data.password)
     return { success: true }
   })
 

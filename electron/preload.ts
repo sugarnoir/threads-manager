@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }) => ipcRenderer.invoke('accounts:update-proxy', data),
     updateDisplayName: (data: { id: number; display_name: string | null }) =>
       ipcRenderer.invoke('accounts:update-display-name', data),
+    updatePassword: (data: { id: number; password: string | null }) =>
+      ipcRenderer.invoke('accounts:update-password', data),
     updateGroup: (data: { id: number; group_name: string | null }) =>
       ipcRenderer.invoke('accounts:update-group', data),
     updateMemo: (data: { id: number; memo: string | null }) =>

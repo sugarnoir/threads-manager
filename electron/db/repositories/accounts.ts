@@ -169,6 +169,12 @@ export function updateAccountProxy(
     .run(proxy.proxy_url, proxy.proxy_username, proxy.proxy_password, id)
 }
 
+export function updateAccountPassword(id: number, password: string | null): void {
+  getDb()
+    .prepare("UPDATE accounts SET ig_password = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(password, id)
+}
+
 export function updateAccountUsername(id: number, username: string): void {
   getDb()
     .prepare("UPDATE accounts SET username = ?, updated_at = datetime('now') WHERE id = ?")

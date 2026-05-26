@@ -450,6 +450,7 @@ declare global {
           proxy_password: string | null
         }) => Promise<{ success: boolean; account?: Account }>
         updateDisplayName: (data: { id: number; display_name: string | null }) => Promise<{ success: boolean }>
+        updatePassword: (data: { id: number; password: string | null }) => Promise<{ success: boolean }>
         updateGroup: (data: { id: number; group_name: string | null }) => Promise<{ success: boolean }>
         updateMemo: (data: { id: number; memo: string | null }) => Promise<{ success: boolean }>
         updateMark: (data: { id: number; mark: string | null }) => Promise<{ success: boolean }>

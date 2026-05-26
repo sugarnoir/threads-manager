@@ -1098,53 +1098,16 @@ export function AccountEditModal({
     setTogglingUnified(false)
   }
 
-  // ── アイコン変更 ─────────────────────────────────────────────────
-  const [changingIcon,     setChangingIcon]     = useState(false)
-  const [iconResult,       setIconResult]       = useState<{ ok: boolean; msg: string } | null>(null)
+  // ── パスワード ─────────────────────────────────────────────────
+  const [igPassword,       setIgPassword]       = useState(account.ig_password ?? '')
+  const [savingIgPassword, setSavingIgPassword] = useState(false)
 
-  const handleChangeIcon = async () => {
-    setChangingIcon(true)
-    setIconResult(null)
+  const handleSaveIgPassword = async () => {
+    setSavingIgPassword(true)
     try {
-      const file = await api.dialog.openFile()
-      if (!file) {
-        setChangingIcon(false)
-        return
-      }
-      const res = await api.browserView.changeProfilePic(account.id, file.path)
-      if (res.success) {
-        setIconResult({ ok: true, msg: '✓ アイコンを変更しました' })
-      } else {
-        setIconResult({ ok: false, msg: `✗ 失敗: ${res.error ?? '不明'}` })
-      }
-    } catch (e) {
-      setIconResult({ ok: false, msg: `✗ ${e instanceof Error ? e.message : String(e)}` })
+      await api.accounts.updatePassword({ id: account.id, password: igPassword || null })
     } finally {
-      setChangingIcon(false)
-      setTimeout(() => setIconResult(null), 8000)
-    }
-  }
-
-  // ── 名前を自動変更（Playwright 経由）────────────────────────────
-  const [autoRenaming,     setAutoRenaming]     = useState(false)
-  const [autoRenameResult, setAutoRenameResult] = useState<{ ok: boolean; msg: string } | null>(null)
-
-  const handleAutoRename = async () => {
-    setAutoRenaming(true)
-    setAutoRenameResult(null)
-    try {
-      const res = await api.accounts.autoRename(account.id)
-      if (res.success && res.newName) {
-        setAutoRenameResult({ ok: true, msg: `✓ 「${res.newName}」に変更しました` })
-        setDisplayName(res.newName)
-      } else {
-        setAutoRenameResult({ ok: false, msg: `✗ 失敗: ${res.error ?? '不明'}` })
-      }
-    } catch (e) {
-      setAutoRenameResult({ ok: false, msg: `✗ ${e instanceof Error ? e.message : String(e)}` })
-    } finally {
-      setAutoRenaming(false)
-      setTimeout(() => setAutoRenameResult(null), 8000)
+      setSavingIgPassword(false)
     }
   }
 
@@ -1359,59 +1322,27 @@ export function AccountEditModal({
                 </button>
               </div>
 
-              {/* 名前を自動変更 (threads/instagram のみ) */}
-              {account.platform !== 'x' && (
-                <div className="border-t border-zinc-800 pt-4">
-                  <div className="flex items-start justify-between gap-3 mb-2">
-                    <div>
-                      <label className="text-zinc-400 text-xs font-medium block">名前を自動変更</label>
-                      <p className="text-zinc-600 text-xs mt-0.5">
-                        instagrapi でランダムな日本人女性名に変更
-                      </p>
-                    </div>
-                    <button
-                      onClick={handleAutoRename}
-                      disabled={autoRenaming}
-                      className="shrink-0 px-3 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5"
-                    >
-                      {autoRenaming && <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                      {autoRenaming ? '変更中...' : '🎲 自動変更'}
-                    </button>
-                  </div>
-                  {autoRenameResult && (
-                    <div className={`mt-2 px-3 py-2 rounded-lg text-xs font-medium ${
-                      autoRenameResult.ok ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'
-                    }`}>{autoRenameResult.msg}</div>
-                  )}
+              {/* パスワード */}
+              <div className="border-t border-zinc-800 pt-4">
+                <label className="text-zinc-400 text-xs font-medium block">パスワード</label>
+                <p className="text-zinc-600 text-xs mt-0.5 mb-2">Instagram ログイン用パスワード</p>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={igPassword}
+                    onChange={e => setIgPassword(e.target.value)}
+                    placeholder="パスワードを入力"
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
+                  />
+                  <button
+                    onClick={handleSaveIgPassword}
+                    disabled={savingIgPassword}
+                    className="px-2.5 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs rounded-lg transition-colors shrink-0"
+                  >
+                    {savingIgPassword ? '...' : '保存'}
+                  </button>
                 </div>
-              )}
-
-              {/* アイコン変更 (threads/instagram のみ) */}
-              {account.platform !== 'x' && (
-                <div className="border-t border-zinc-800 pt-4">
-                  <div className="flex items-start justify-between gap-3 mb-2">
-                    <div>
-                      <label className="text-zinc-400 text-xs font-medium block">アイコンを変更</label>
-                      <p className="text-zinc-600 text-xs mt-0.5">
-                        画像ファイルを選んでプロフィールアイコンを変更
-                      </p>
-                    </div>
-                    <button
-                      onClick={handleChangeIcon}
-                      disabled={changingIcon}
-                      className="shrink-0 px-3 py-2 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5"
-                    >
-                      {changingIcon && <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                      {changingIcon ? '変更中...' : '🖼 アイコン変更'}
-                    </button>
-                  </div>
-                  {iconResult && (
-                    <div className={`mt-2 px-3 py-2 rounded-lg text-xs font-medium ${
-                      iconResult.ok ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'
-                    }`}>{iconResult.msg}</div>
-                  )}
-                </div>
-              )}
+              </div>
 
               {/* 統一ヘッダーモード (threads/instagram のみ) */}
               {account.platform !== 'x' && (
