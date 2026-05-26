@@ -56,7 +56,7 @@ const IG_HOME_URL = 'https://www.instagram.com/';
 
 const SEL_USERNAME = 'input[name="email"], input[name="username"], input[autocomplete="username"]';
 const SEL_PASSWORD = 'input[name="pass"], input[name="password"], input[autocomplete="current-password"]';
-const SEL_LOGIN_SUBMIT = 'button[type="submit"]';
+const SEL_LOGIN_SUBMIT = 'button[type="submit"], input[type="submit"], [type="submit"]';
 const SEL_2FA_INPUT = 'input[name="verificationCode"], input[autocomplete="one-time-code"]';
 
 const PAGE_LOAD_SETTLE_MS = 2500;
