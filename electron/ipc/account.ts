@@ -1520,14 +1520,76 @@ export function registerAccountHandlers(): void {
   }) => {
     try {
       if (!data.username?.trim()) return { success: false, error: 'username が空です' }
+
+      // ── proxy_url 未指定 → ISP Dedicated プロキシ自動割り当て ──
+      let assignedProxyUrl = data.proxy_url || undefined
+      let assignedProxyUser = data.proxy_username || undefined
+      let assignedProxyPass = data.proxy_password || undefined
+
+      if (!assignedProxyUrl) {
+        const existing = getAllAccounts()
+        const decodoAccounts = existing.filter(a =>
+          a.proxy_url && a.proxy_url.includes('decodo')
+        )
+        if (decodoAccounts.length > 0) {
+          const ref = decodoAccounts[0]
+          let proxyType = 'http'
+          let proxyHost = ''
+          try {
+            const url = new URL(ref.proxy_url!)
+            proxyType = url.protocol.replace(':', '')
+            proxyHost = url.hostname
+          } catch { /* ignore */ }
+
+          const portCountMap = new Map<number, number>()
+          let minPort = Infinity, maxPort = -Infinity
+          for (const a of decodoAccounts) {
+            try {
+              const url = new URL(a.proxy_url!)
+              const p = parseInt(url.port, 10)
+              if (!isNaN(p)) {
+                portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
+                if (p < minPort) minPort = p
+                if (p > maxPort) maxPort = p
+              }
+            } catch { /* ignore */ }
+          }
+
+          // Decodo ISP Dedicated 500IPs (10001-10500) を確実にカバー
+          const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
+          const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
+          if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = Math.min(minPort, cfgStart)
+          if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = Math.max(maxPort, cfgEnd)
+
+          if (proxyHost && minPort <= maxPort) {
+            const allPorts: Array<{ port: number; count: number }> = []
+            for (let p = minPort; p <= maxPort; p++) {
+              allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
+            }
+            allPorts.sort((a, b) => {
+              if (a.count !== b.count) return a.count - b.count
+              return Math.random() - 0.5
+            })
+            const minCount = Math.min(...allPorts.map(p => p.count))
+            const candidates = allPorts.filter(p => p.count === minCount)
+            const pick = candidates[Math.floor(Math.random() * candidates.length)]
+            pick.count++
+            assignedProxyUrl  = `${proxyType}://${proxyHost}:${pick.port}`
+            assignedProxyUser = ref.proxy_username ?? undefined
+            assignedProxyPass = ref.proxy_password ?? undefined
+            console.log(`[quick-add] auto proxy=${assignedProxyUrl}`)
+          }
+        }
+      }
+
       const sessionDir = path.join(app.getPath('userData'), 'sessions', `account-${Date.now()}`)
       const account = createAccount({
         username: data.username.trim(),
         session_dir: sessionDir,
         ig_password: data.password || undefined,
-        proxy_url: data.proxy_url || undefined,
-        proxy_username: data.proxy_username || undefined,
-        proxy_password: data.proxy_password || undefined,
+        proxy_url: assignedProxyUrl,
+        proxy_username: assignedProxyUser,
+        proxy_password: assignedProxyPass,
       })
       // totp_secret を保存
       if (data.totp_secret?.trim()) {
