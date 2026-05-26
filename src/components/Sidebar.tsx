@@ -2019,7 +2019,7 @@ export function Sidebar({
                             }
                           })
                         if (optionsList.length > 0) {
-                          api.loginProbe.bulk(optionsList, { concurrency: 3, jitterMs: 30000 })
+                          api.loginProbe.bulk(optionsList, { concurrency: 1, jitterMs: [60000, 180000] })
                             .finally(() => window.dispatchEvent(new CustomEvent('accounts-changed')))
                         }
                       }

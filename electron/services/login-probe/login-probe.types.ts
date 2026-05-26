@@ -63,7 +63,8 @@ export type LoginProbeResult =
 // ============================================================
 export type BulkLoginConfig = {
   concurrency?: number;
-  jitterMs?: number;
+  /** Fixed jitter (ms) or [min, max] range */
+  jitterMs?: number | [number, number];
 };
 
 // ============================================================

@@ -487,6 +487,7 @@ declare global {
           proxy_user:  string | null
           proxy_pass:  string | null
           proxy_type?: string | null
+          totp_secret?: string
           group_name?: string | null
         }>, options?: { proxyMode?: 'auto' | 'manual' | 'none' }) => Promise<{
           imported: number
@@ -801,7 +802,7 @@ declare global {
       loginProbe: {
         single:           (options: { accountId: number; username: string; password: string; totpSecret?: string; skipIfSessionAlive?: boolean }) =>
                             Promise<{ ok: boolean; accountId: number; sessionAlreadyAlive?: boolean; phase?: string; signal?: unknown; error?: string }>
-        bulk:             (optionsList: Array<{ accountId: number; username: string; password: string; totpSecret?: string }>, config?: { concurrency?: number; jitterMs?: number }) =>
+        bulk:             (optionsList: Array<{ accountId: number; username: string; password: string; totpSecret?: string }>, config?: { concurrency?: number; jitterMs?: number | [number, number] }) =>
                             Promise<Array<{ ok: boolean; accountId: number; phase?: string; error?: string }>>
         resolveChallenge: (accountId: number) => Promise<{ ok: boolean }>
         checkSession:     (accountId: number) => Promise<{ ok: boolean; alive: boolean }>

@@ -73,6 +73,64 @@ import { probeAccountHealth } from '../ig/health-probe'
 import { updateProbeStatus, updateAccountMobileSession } from '../db/repositories/accounts'
 import { extractCookiesFromMobileAuth } from '../ig/extract-cookies-from-token'
 
+// ── Decodo ISP プロキシ自動割り当て（共通関数） ────────────────────────────
+export function pickDecodoProxy(): { proxy_url: string; proxy_username: string | undefined; proxy_password: string | undefined } | null {
+  const existing = getAllAccounts()
+  const decodoAccounts = existing.filter(a =>
+    a.proxy_url && a.proxy_url.includes('decodo')
+  )
+  if (decodoAccounts.length === 0) return null
+
+  const ref = decodoAccounts[0]
+  let proxyType = 'http'
+  let proxyHost = ''
+  try {
+    const url = new URL(ref.proxy_url!)
+    proxyType = url.protocol.replace(':', '')
+    proxyHost = url.hostname
+  } catch { /* ignore */ }
+
+  const portCountMap = new Map<number, number>()
+  let minPort = Infinity, maxPort = -Infinity
+  for (const a of decodoAccounts) {
+    try {
+      const url = new URL(a.proxy_url!)
+      const p = parseInt(url.port, 10)
+      if (!isNaN(p)) {
+        portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
+        if (p < minPort) minPort = p
+        if (p > maxPort) maxPort = p
+      }
+    } catch { /* ignore */ }
+  }
+
+  const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
+  const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
+  if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = Math.min(minPort, cfgStart)
+  if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = Math.max(maxPort, cfgEnd)
+
+  if (!proxyHost || minPort > maxPort) return null
+
+  const allPorts: Array<{ port: number; count: number }> = []
+  for (let p = minPort; p <= maxPort; p++) {
+    allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
+  }
+  allPorts.sort((a, b) => {
+    if (a.count !== b.count) return a.count - b.count
+    return Math.random() - 0.5
+  })
+  const minCount = Math.min(...allPorts.map(p => p.count))
+  const candidates = allPorts.filter(p => p.count === minCount)
+  const pick = candidates[Math.floor(Math.random() * candidates.length)]
+  pick.count++
+
+  return {
+    proxy_url:      `${proxyType}://${proxyHost}:${pick.port}`,
+    proxy_username: ref.proxy_username ?? undefined,
+    proxy_password: ref.proxy_password ?? undefined,
+  }
+}
+
 // ── Cookie インポート共通型・ロジック ────────────────────────────────────
 export interface CookieImportRow {
   username:  string
@@ -705,57 +763,6 @@ export function registerAccountHandlers(): void {
     ) => {
       const proxyMode = options?.proxyMode ?? 'auto'
 
-      // ── ISP Dedicated プロキシ自動割り当て準備（import-cookie-login と同じロジック） ──
-      const existingAccounts = getAllAccounts()
-      const decodoAccounts = existingAccounts.filter(a =>
-        a.proxy_url && a.proxy_url.includes('decodo')
-      )
-      let autoProxyType = 'http'
-      let autoProxyHost = ''
-      let autoProxyUsername: string | null = null
-      let autoProxyPassword: string | null = null
-      if (decodoAccounts.length > 0) {
-        const ref = decodoAccounts[0]
-        try {
-          const url = new URL(ref.proxy_url!)
-          autoProxyType = url.protocol.replace(':', '')
-          autoProxyHost = url.hostname
-        } catch { /* ignore */ }
-        autoProxyUsername = ref.proxy_username
-        autoProxyPassword = ref.proxy_password
-      }
-
-      const portCountMap = new Map<number, number>()
-      let minPort = Infinity, maxPort = -Infinity
-      for (const a of decodoAccounts) {
-        try {
-          const url = new URL(a.proxy_url!)
-          const p = parseInt(url.port, 10)
-          if (!isNaN(p)) {
-            portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
-            if (p < minPort) minPort = p
-            if (p > maxPort) maxPort = p
-          }
-        } catch { /* ignore */ }
-      }
-
-      const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
-      const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
-      if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = cfgStart
-      if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = cfgEnd
-
-      const allPorts: Array<{ port: number; count: number }> = []
-      if (autoProxyHost && minPort <= maxPort) {
-        for (let p = minPort; p <= maxPort; p++) {
-          allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
-        }
-        allPorts.sort((a, b) => {
-          if (a.count !== b.count) return a.count - b.count
-          return Math.random() - 0.5
-        })
-      }
-      console.log(`[bulk-import] proxyMode=${proxyMode} host=${autoProxyHost || 'NONE'} ports=${allPorts.length}`)
-
       const results = {
         imported: 0,
         skipped:  0,
@@ -777,23 +784,19 @@ export function registerAccountHandlers(): void {
         let proxyPass: string | undefined
 
         if (row.proxy_host && row.proxy_port) {
-          // CSV にプロキシ指定あり → そのまま使う
           const type = (row.proxy_type || 'http').toLowerCase()
           proxyUrl  = `${type}://${row.proxy_host}:${row.proxy_port}`
           proxyUser = row.proxy_user ?? undefined
           proxyPass = row.proxy_pass ?? undefined
-        } else if (proxyMode === 'auto' && autoProxyHost && allPorts.length > 0) {
-          // CSV にプロキシなし + auto モード → 未使用優先、少使用フォールバック
-          const minCount = Math.min(...allPorts.map(p => p.count))
-          const candidates = allPorts.filter(p => p.count === minCount)
-          const pick = candidates[Math.floor(Math.random() * candidates.length)]
-          pick.count++
-          proxyUrl  = `${autoProxyType}://${autoProxyHost}:${pick.port}`
-          proxyUser = autoProxyUsername ?? undefined
-          proxyPass = autoProxyPassword ?? undefined
-          console.log(`[bulk-import] row[${i}] auto proxy=${proxyUrl} (was ${pick.count - 1}垢→${pick.count}垢)`)
+        } else if (proxyMode === 'auto') {
+          const picked = pickDecodoProxy()
+          if (picked) {
+            proxyUrl  = picked.proxy_url
+            proxyUser = picked.proxy_username
+            proxyPass = picked.proxy_password
+            console.log(`[bulk-import] row[${i}] auto proxy=${proxyUrl}`)
+          }
         }
-        // proxyMode === 'none' or no host → proxyUrl は undefined
 
         const sessionDir = path.join(
           app.getPath('userData'),
@@ -818,7 +821,7 @@ export function registerAccountHandlers(): void {
           createAndSaveFingerprint(account.id)
           updateAccountStatus(account.id, 'needs_login')
           results.imported++
-          results.accounts.push(account)
+          results.accounts.push(getAccountById(account.id))
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('UNIQUE constraint')) {
@@ -1527,58 +1530,12 @@ export function registerAccountHandlers(): void {
       let assignedProxyPass = data.proxy_password || undefined
 
       if (!assignedProxyUrl) {
-        const existing = getAllAccounts()
-        const decodoAccounts = existing.filter(a =>
-          a.proxy_url && a.proxy_url.includes('decodo')
-        )
-        if (decodoAccounts.length > 0) {
-          const ref = decodoAccounts[0]
-          let proxyType = 'http'
-          let proxyHost = ''
-          try {
-            const url = new URL(ref.proxy_url!)
-            proxyType = url.protocol.replace(':', '')
-            proxyHost = url.hostname
-          } catch { /* ignore */ }
-
-          const portCountMap = new Map<number, number>()
-          let minPort = Infinity, maxPort = -Infinity
-          for (const a of decodoAccounts) {
-            try {
-              const url = new URL(a.proxy_url!)
-              const p = parseInt(url.port, 10)
-              if (!isNaN(p)) {
-                portCountMap.set(p, (portCountMap.get(p) ?? 0) + 1)
-                if (p < minPort) minPort = p
-                if (p > maxPort) maxPort = p
-              }
-            } catch { /* ignore */ }
-          }
-
-          // Decodo ISP Dedicated 500IPs (10001-10500) を確実にカバー
-          const cfgStart = parseInt(getSetting('proxy_port_range_start') ?? '', 10)
-          const cfgEnd   = parseInt(getSetting('proxy_port_range_end')   ?? '', 10)
-          if (Number.isFinite(cfgStart) && cfgStart > 0) minPort = Math.min(minPort, cfgStart)
-          if (Number.isFinite(cfgEnd)   && cfgEnd   > 0) maxPort = Math.max(maxPort, cfgEnd)
-
-          if (proxyHost && minPort <= maxPort) {
-            const allPorts: Array<{ port: number; count: number }> = []
-            for (let p = minPort; p <= maxPort; p++) {
-              allPorts.push({ port: p, count: portCountMap.get(p) ?? 0 })
-            }
-            allPorts.sort((a, b) => {
-              if (a.count !== b.count) return a.count - b.count
-              return Math.random() - 0.5
-            })
-            const minCount = Math.min(...allPorts.map(p => p.count))
-            const candidates = allPorts.filter(p => p.count === minCount)
-            const pick = candidates[Math.floor(Math.random() * candidates.length)]
-            pick.count++
-            assignedProxyUrl  = `${proxyType}://${proxyHost}:${pick.port}`
-            assignedProxyUser = ref.proxy_username ?? undefined
-            assignedProxyPass = ref.proxy_password ?? undefined
-            console.log(`[quick-add] auto proxy=${assignedProxyUrl}`)
-          }
+        const picked = pickDecodoProxy()
+        if (picked) {
+          assignedProxyUrl  = picked.proxy_url
+          assignedProxyUser = picked.proxy_username
+          assignedProxyPass = picked.proxy_password
+          console.log(`[quick-add] auto proxy=${assignedProxyUrl}`)
         }
       }
 

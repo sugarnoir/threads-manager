@@ -64,6 +64,21 @@ const POST_SUBMIT_WAIT_MS = 5000;
 const CHALLENGE_DETECTION_GRACE_MS = 1500;
 
 // ============================================================
+// BOT 対策: humanWarmup（トップページ閲覧 + スクロール）
+// ============================================================
+
+async function humanWarmup(view: WebContentsView): Promise<void> {
+  await view.webContents.loadURL(IG_HOME_URL);
+  await sleep(randInt(2000, 4000));
+
+  // ランダムスクロール
+  await view.webContents.executeJavaScript(`
+    window.scrollTo({ top: ${randInt(200, 600)}, behavior: 'smooth' });
+  `).catch(() => {});
+  await sleep(randInt(2000, 5000));
+}
+
+// ============================================================
 // TOTP 生成 (TM 既存の otpauth ライブラリを使用)
 // ============================================================
 
@@ -289,8 +304,9 @@ export async function probeLogin(
   };
 
   try {
-    // Step 3: ログイン画面ロード
+    // Step 3: humanWarmup → ログイン画面ロード
     setPhase('navigating');
+    await humanWarmup(view);
     await view.webContents.loadURL(IG_LOGIN_URL);
     await sleep(PAGE_LOAD_SETTLE_MS + randInt(0, 1000));
 
@@ -455,13 +471,19 @@ export async function bulkProbeLogin(
   parentWindow: BrowserWindow,
   config: BulkLoginConfig = {},
 ): Promise<LoginProbeResult[]> {
-  const concurrency = config.concurrency ?? 3;
-  const maxJitterMs = config.jitterMs ?? 30000;
+  const concurrency = config.concurrency ?? 1;
+  const jitterCfg = config.jitterMs ?? [60000, 180000];
+  const [jitterMin, jitterMax] = Array.isArray(jitterCfg)
+    ? jitterCfg
+    : [0, jitterCfg];
   const limit = createLimit(concurrency);
 
-  const tasks = optionsList.map((opts) =>
+  const tasks = optionsList.map((opts, idx) =>
     limit(async () => {
-      await jitter(maxJitterMs);
+      // 最初のアカウントはジッターなし
+      if (idx > 0) {
+        await sleep(randInt(jitterMin, jitterMax));
+      }
       try {
         return await probeLogin(opts, parentWindow);
       } catch (err) {

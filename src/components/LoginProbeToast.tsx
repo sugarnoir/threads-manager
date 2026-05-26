@@ -110,8 +110,29 @@ export function LoginProbeToast() {
   const items = [...toasts.values()]
   if (items.length === 0) return null
 
+  // Bulk progress summary
+  const total = items.length
+  const doneCount = items.filter(t => t.done).length
+  const successCount = items.filter(t => t.done && t.ok).length
+  const failCount = items.filter(t => t.done && !t.ok).length
+  const showSummary = total > 1
+
   return (
     <div className="fixed bottom-4 right-4 z-40 flex flex-col gap-2 max-w-xs">
+      {showSummary && (
+        <div className={`px-4 py-2 rounded-lg shadow-lg border text-xs font-semibold ${
+          doneCount === total
+            ? failCount === 0
+              ? 'bg-emerald-900/90 border-emerald-700 text-emerald-200'
+              : 'bg-amber-900/90 border-amber-700 text-amber-200'
+            : 'bg-zinc-800/95 border-zinc-700 text-zinc-200'
+        }`}>
+          {doneCount < total
+            ? `ログイン中 (${doneCount}/${total})...`
+            : `${successCount}/${total} 成功${failCount > 0 ? ` ${failCount}件失敗` : ''}`
+          }
+        </div>
+      )}
       {items.map((t) => (
         <div
           key={t.accountId}
