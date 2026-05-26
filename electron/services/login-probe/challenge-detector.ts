@@ -199,10 +199,10 @@ export class ChallengeDetector {
 // ============================================================
 
 export function isTwoFactorUrl(url: string): boolean {
-  return url.includes('/accounts/login/two_factor/') ||
-    url.includes('/accounts/login/two-factor/') ||
-    url.includes('/two_factor/') ||
-    url.includes('/two-step-verification/') ||
+  return url.includes('/accounts/login/two_factor') ||
+    url.includes('/accounts/login/two-factor') ||
+    url.includes('/two_factor') ||
+    url.includes('/two-step-verification') ||
     url.includes('next=%2Faccounts%2Flogin%2Ftwo_factor');
 }
 

@@ -324,8 +324,6 @@ export async function probeLogin(
 
     // Step 5: 2FA 判定
     const urlAfterCreds = view.webContents.getURL();
-    console.log(`[login-probe] URL after credentials: ${urlAfterCreds}`);
-    console.log(`[login-probe] isTwoFactorUrl=${isTwoFactorUrl(urlAfterCreds)} isChallengeUrl=${isChallengeUrl(urlAfterCreds)}`);
     if (isTwoFactorUrl(urlAfterCreds)) {
       setPhase('awaiting_2fa');
 
