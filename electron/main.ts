@@ -1,3 +1,14 @@
+// EPIPE 抑制: dev 環境で stdout/stderr パイプ切断時の crash を防止
+process.on('uncaughtException', (err: Error & { code?: string }) => {
+  if (err?.code === 'EPIPE' || err?.message?.includes('EPIPE')) return;
+  // EPIPE 以外は再スロー相当（デフォルト動作を維持）
+  console.error('[uncaughtException]', err);
+});
+process.on('unhandledRejection', (reason: unknown) => {
+  if (reason instanceof Error && (reason as Error & { code?: string }).code === 'EPIPE') return;
+  console.error('[unhandledRejection]', reason);
+});
+
 import { app, BrowserWindow, session } from 'electron'
 import path from 'path'
 import { closeDb } from './db/index'
