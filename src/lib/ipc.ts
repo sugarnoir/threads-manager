@@ -60,6 +60,9 @@ export interface Account {
   adspower_user_id: string | null
   adspower_status: 'not_created' | 'created' | 'running' | 'error' | 'syncing' | null
   adspower_browser_core: 'sun' | 'flower' | null
+  api_session_json: string | null
+  auth_mode: 'webview' | 'api'
+  device_ids_json: string | null
   created_at: string
   updated_at: string
 }
@@ -494,6 +497,14 @@ declare global {
           imported: number
           skipped:  number
           errors:   Array<{ username: string; message: string }>
+          accounts: Account[]
+        }>
+        importIamApi: (lines: string[], options?: { group_name?: string | null }) => Promise<{
+          imported: number
+          skipped: number
+          alive: number
+          dead: number
+          errors: Array<{ username: string; message: string }>
           accounts: Account[]
         }>
         autoRename: (id: number, customNames?: string[]) => Promise<{

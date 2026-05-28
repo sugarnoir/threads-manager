@@ -62,6 +62,9 @@ export interface Account {
   adspower_user_id: string | null
   adspower_status: string | null
   adspower_browser_core: string | null
+  api_session_json: string | null
+  auth_mode: 'webview' | 'api'
+  device_ids_json: string | null
   created_at: string
   updated_at: string
 }

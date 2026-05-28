@@ -838,6 +838,162 @@ export function registerAccountHandlers(): void {
     }
   )
 
+  // ── IAM-API (dark.shopping) インポート ───────────────────────────
+  ipcMain.handle(
+    'accounts:import-iam-api',
+    async (
+      _event,
+      lines: string[],
+      options?: { group_name?: string | null }
+    ) => {
+      const { parseIamLine, toSessionJson, toDeviceIdsJson } = await import('../ig/iam-parser')
+      const { probeAccountHealth } = await import('../ig/health-probe')
+      const { getDb: getDatabase } = await import('../db/index')
+
+      const results = {
+        imported: 0,
+        skipped: 0,
+        alive: 0,
+        dead: 0,
+        errors: [] as { username: string; message: string }[],
+        accounts: [] as ReturnType<typeof getAccountById>[],
+      }
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim()
+        if (!line) continue
+
+        const parsed = parseIamLine(line)
+        if (!parsed) {
+          results.errors.push({ username: `行${i + 1}`, message: 'パース失敗' })
+          continue
+        }
+
+        // proxy auto-assign
+        let proxyUrl: string | undefined
+        let proxyUser: string | undefined
+        let proxyPass: string | undefined
+        const picked = pickDecodoProxy()
+        if (picked) {
+          proxyUrl = picked.proxy_url
+          proxyUser = picked.proxy_username
+          proxyPass = picked.proxy_password
+          console.log(`[iam-import] row[${i}] ${parsed.username} proxy=${proxyUrl}`)
+        }
+
+        const sessionDir = path.join(
+          app.getPath('userData'),
+          'sessions',
+          `account-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        )
+
+        try {
+          const account = createAccount({
+            username: parsed.username,
+            session_dir: sessionDir,
+            proxy_url: proxyUrl,
+            proxy_username: proxyUser,
+            proxy_password: proxyPass,
+            user_agent: pickRandomIphoneUA(),
+            ig_password: parsed.password,
+          })
+
+          stampUA(account.id)
+          stampDeviceIds(account.id, parsed.username)
+          createAndSaveFingerprint(account.id)
+          if (options?.group_name) updateAccountGroup(account.id, options.group_name)
+
+          // IAM 固有データ保存
+          const sessionJson = toSessionJson(parsed)
+          const deviceIdsJson = toDeviceIdsJson(parsed)
+          const db = getDatabase()
+          db.prepare(
+            "UPDATE accounts SET api_session_json = ?, auth_mode = 'api', device_ids_json = ? WHERE id = ?"
+          ).run(sessionJson, deviceIdsJson, account.id)
+
+          // mobile session 保存
+          updateAccountMobileSession(account.id, {
+            authorization: parsed.authorization || null,
+            www_claim: null,
+            mid: parsed.mid || null,
+            ds_user_id: parsed.dsUserId || null,
+            rur: null,
+          })
+
+          // Cookie注入 + 生存チェック
+          const permSess = session.fromPartition(`persist:account-${account.id}`)
+          const cookies = [
+            { name: 'sessionid', value: parsed.sessionid, domain: '.instagram.com', path: '/', secure: true, httpOnly: true },
+            { name: 'ds_user_id', value: parsed.dsUserId, domain: '.instagram.com', path: '/', secure: true, httpOnly: false },
+            { name: 'mid', value: parsed.mid, domain: '.instagram.com', path: '/', secure: true, httpOnly: false },
+          ].filter(c => c.value)
+
+          for (const c of cookies) {
+            await permSess.cookies.set({
+              url: 'https://www.instagram.com',
+              name: c.name,
+              value: c.value,
+              domain: c.domain,
+              path: c.path,
+              secure: c.secure,
+              httpOnly: c.httpOnly,
+              expirationDate: Math.floor(Date.now() / 1000) + 365 * 86400,
+            })
+          }
+
+          // 生存チェック
+          try {
+            const probe = await probeAccountHealth({
+              cookies: cookies.map(c => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain,
+                path: c.path,
+                secure: c.secure,
+                httpOnly: c.httpOnly,
+              })),
+              proxyUrl,
+              proxyUsername: proxyUser,
+              proxyPassword: proxyPass,
+            })
+
+            if (probe.status === 'alive') {
+              updateAccountStatus(account.id, 'active')
+              results.alive++
+              console.log(`[iam-import] ${parsed.username}: 🟢 alive`)
+            } else {
+              updateAccountStatus(account.id, 'needs_login')
+              results.dead++
+              console.log(`[iam-import] ${parsed.username}: 🔴 ${probe.status}`)
+            }
+          } catch (probeErr) {
+            // probe失敗でもアカウントは作成済み
+            updateAccountStatus(account.id, 'unverified')
+            console.log(`[iam-import] ${parsed.username}: probe error, set unverified`)
+          }
+
+          results.imported++
+          results.accounts.push(getAccountById(account.id))
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('UNIQUE constraint')) {
+            results.skipped++
+            results.errors.push({ username: parsed.username, message: '既に追加済み' })
+          } else {
+            results.errors.push({ username: parsed.username, message: msg })
+          }
+        }
+
+        // レート制限対策
+        if (i < lines.length - 1) {
+          await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000))
+        }
+      }
+
+      return results
+    }
+  )
+
   ipcMain.handle(
     'accounts:update-proxy',
     async (

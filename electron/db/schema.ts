@@ -427,6 +427,17 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN adspower_browser_core TEXT")
   }
 
+  // IAM-API (dark.shopping) インポート用カラム
+  if (!colNames.includes('api_session_json')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN api_session_json TEXT")
+  }
+  if (!colNames.includes('auth_mode')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN auth_mode TEXT DEFAULT 'webview'")
+  }
+  if (!colNames.includes('device_ids_json')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN device_ids_json TEXT")
+  }
+
   // groups テーブルに stealth_enabled カラム追加
   {
     const groupCols = db.prepare("PRAGMA table_info(groups)").all() as { name: string }[]

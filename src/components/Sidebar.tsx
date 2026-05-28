@@ -237,9 +237,12 @@ export function Sidebar({
   const csvGroupRef = useRef<string>('__all__')
 
   // CSVインポートのモード（ストック or アカウント）
-  const [csvMode, setCsvMode] = useState<'stock' | 'account' | 'cookie' | 'idpass' | 'topic'>('stock')
+  const [csvMode, setCsvMode] = useState<'stock' | 'account' | 'cookie' | 'idpass' | 'iam' | 'topic'>('stock')
   const [idpassText, setIdpassText] = useState('')
   const [idpassImporting, setIdpassImporting] = useState(false)
+  // IAM-API インポート用
+  const [iamText, setIamText] = useState('')
+  const [iamImporting, setIamImporting] = useState(false)
   // アカウント一括インポート用
   const [acctText,              setAcctText]              = useState('')
   const [acctGroupSel,          setAcctGroupSel]          = useState<string>('__none__')
@@ -1551,6 +1554,14 @@ export function Sidebar({
               ID:Pass
             </button>
             <button
+              onClick={() => setCsvMode('iam')}
+              className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
+                csvMode === 'iam' ? 'bg-rose-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              IAM
+            </button>
+            <button
               onClick={() => setCsvMode('topic')}
               className={`flex-1 py-1.5 text-[10px] font-semibold rounded-md transition-colors ${
                 csvMode === 'topic' ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
@@ -2051,6 +2062,68 @@ export function Sidebar({
                   )
                 } catch { return null }
               })()}
+            </>
+          )}
+
+          {csvMode === 'iam' && (
+            <>
+              <p className="text-zinc-500 text-[10px] mb-2 leading-tight">
+                IAM-API 形式 (dark.shopping) の垢データを貼り付け。<br />
+                <code className="text-rose-400">user:pass||device_ids|headers</code>
+              </p>
+
+              <label className="block text-zinc-500 text-[10px] mb-1">グループ</label>
+              <select
+                value={csvGroupSel}
+                onChange={e => setCsvGroupSel(e.target.value)}
+                className="w-full px-2 py-1.5 bg-zinc-800 text-white text-xs rounded-lg border border-zinc-700 focus:outline-none focus:border-blue-500 mb-2"
+              >
+                <option value="__all__">グループなし</option>
+                {groups.map(g => <option key={g.name} value={g.name}>{g.name}</option>)}
+              </select>
+
+              <textarea
+                value={iamText}
+                onChange={e => setIamText(e.target.value)}
+                placeholder={'user:pass||android-xxx;uuid;uuid;uuid|X-MID=xxx;sessionid=xxx;IG-U-DS-USER-ID=xxx;Authorization=Bearer IGT:2:xxx'}
+                rows={6}
+                className="w-full bg-zinc-800 text-white text-[10px] font-mono rounded-lg p-2 border border-zinc-700 focus:outline-none focus:border-rose-500 resize-none mb-2 placeholder-zinc-600"
+              />
+
+              <button
+                onClick={async () => {
+                  if (!iamText.trim()) return
+                  setIamImporting(true)
+                  try {
+                    const lines = iamText.split('\n').filter(l => l.trim())
+                    const targetGroup = csvGroupSel === '__all__' ? null : csvGroupSel
+                    const res = await api.accounts.importIamApi(lines, { group_name: targetGroup })
+                    const parts = [`${res.imported}件追加`]
+                    if (res.alive > 0) parts.push(`🟢${res.alive}`)
+                    if (res.dead > 0) parts.push(`🔴${res.dead}`)
+                    if (res.skipped > 0) parts.push(`スキップ: ${res.skipped}`)
+                    showCsvToast(parts.join(' / '), res.imported > 0)
+                    if (res.imported > 0) {
+                      setIamText('')
+                      window.dispatchEvent(new CustomEvent('accounts-changed'))
+                    }
+                  } catch (err) {
+                    showCsvToast(`エラー: ${err instanceof Error ? err.message : String(err)}`, false)
+                  } finally {
+                    setIamImporting(false)
+                  }
+                }}
+                disabled={iamImporting || !iamText.trim()}
+                className="w-full py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {iamImporting ? 'インポート中...' : 'IAM インポート + 生存チェック'}
+              </button>
+
+              {iamText.trim() && (
+                <p className="text-zinc-500 text-[9px] mt-1">
+                  {iamText.split('\n').filter(l => l.trim()).length}行検出
+                </p>
+              )}
             </>
           )}
 

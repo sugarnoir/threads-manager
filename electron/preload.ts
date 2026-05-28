@@ -73,6 +73,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       group_name?: string | null
     }>, options?: { proxyMode?: 'auto' | 'manual' | 'none' }) =>
       ipcRenderer.invoke('accounts:bulk-import', rows, options),
+    importIamApi: (lines: string[], options?: { group_name?: string | null }) =>
+      ipcRenderer.invoke('accounts:import-iam-api', lines, options),
     autoRename: (id: number, customNames?: string[]) => ipcRenderer.invoke('accounts:auto-rename', id, customNames),
     quickAdd: (data: {
       username: string; password: string; totp_secret?: string; group_name?: string
