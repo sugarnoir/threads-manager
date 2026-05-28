@@ -850,9 +850,15 @@ export function registerAccountHandlers(): void {
       const { getDb: getDatabase } = await import('../db/index')
       const { execFile } = await import('child_process')
       const { promisify } = await import('util')
+      const { existsSync } = await import('fs')
       const execFileAsync = promisify(execFile)
 
       const scriptPath = path.join(__dirname, '..', 'scripts', 'iam_alive_check.py')
+
+      // Electron 子プロセスはシェル PATH を継承しないため絶対パスで検出
+      const python3 = ['/usr/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3']
+        .find(p => existsSync(p)) ?? 'python3'
+      console.log(`[iam-import] python3=${python3} script=${scriptPath}`)
 
       const results = {
         imported: 0,
@@ -929,10 +935,12 @@ export function registerAccountHandlers(): void {
               ? `http://${encodeURIComponent(proxyUser)}:${encodeURIComponent(proxyPass ?? '')}@${proxyUrl.replace(/^https?:\/\//, '')}`
               : proxyUrl ?? ''
 
-            const { stdout } = await execFileAsync('python3', [scriptPath, sessionJson, proxyForPython], {
+            const { stdout, stderr } = await execFileAsync(python3, [scriptPath, sessionJson, proxyForPython], {
               timeout: 30000,
               maxBuffer: 1024 * 1024,
+              env: { ...process.env, PATH: '/usr/bin:/usr/local/bin:/opt/homebrew/bin' },
             })
+            if (stderr) console.log(`[iam-import] ${parsed.username} stderr: ${stderr.slice(0, 300)}`)
 
             const probeResult = JSON.parse(stdout.trim())
             if (probeResult.alive) {
@@ -944,9 +952,11 @@ export function registerAccountHandlers(): void {
               results.dead++
               console.log(`[iam-import] ${parsed.username}: 🔴 ${probeResult.reason ?? probeResult.error}`)
             }
-          } catch (probeErr) {
+          } catch (probeErr: any) {
             updateAccountStatus(account.id, 'unverified')
-            console.log(`[iam-import] ${parsed.username}: probe error, set unverified`, probeErr instanceof Error ? probeErr.message : probeErr)
+            const errMsg = probeErr?.message ?? String(probeErr)
+            const errStderr = probeErr?.stderr ?? ''
+            console.error(`[iam-import] ${parsed.username}: probe FAILED → unverified`, errMsg, errStderr)
           }
 
           results.imported++
