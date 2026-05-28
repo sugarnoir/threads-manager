@@ -846,9 +846,13 @@ export function registerAccountHandlers(): void {
       lines: string[],
       options?: { group_name?: string | null }
     ) => {
-      const { parseIamLine, toSessionJson, toDeviceIdsJson } = await import('../ig/iam-parser')
-      const { probeAccountHealth } = await import('../ig/health-probe')
+      const { parseIamLine, toSessionJson, toDeviceIdsJson, IAM_ANDROID_UA } = await import('../ig/iam-parser')
       const { getDb: getDatabase } = await import('../db/index')
+      const { execFile } = await import('child_process')
+      const { promisify } = await import('util')
+      const execFileAsync = promisify(execFile)
+
+      const scriptPath = path.join(__dirname, '..', 'scripts', 'iam_alive_check.py')
 
       const results = {
         imported: 0,
@@ -888,18 +892,17 @@ export function registerAccountHandlers(): void {
         )
 
         try {
+          // IAM垢は Android UA (device_settings と整合)
           const account = createAccount({
             username: parsed.username,
             session_dir: sessionDir,
             proxy_url: proxyUrl,
             proxy_username: proxyUser,
             proxy_password: proxyPass,
-            user_agent: pickRandomIphoneUA(),
+            user_agent: IAM_ANDROID_UA,
             ig_password: parsed.password,
           })
 
-          stampUA(account.id)
-          stampDeviceIds(account.id, parsed.username)
           createAndSaveFingerprint(account.id)
           if (options?.group_name) updateAccountGroup(account.id, options.group_name)
 
@@ -920,56 +923,30 @@ export function registerAccountHandlers(): void {
             rur: null,
           })
 
-          // Cookie注入 + 生存チェック
-          const permSess = session.fromPartition(`persist:account-${account.id}`)
-          const cookies = [
-            { name: 'sessionid', value: parsed.sessionid, domain: '.instagram.com', path: '/', secure: true, httpOnly: true },
-            { name: 'ds_user_id', value: parsed.dsUserId, domain: '.instagram.com', path: '/', secure: true, httpOnly: false },
-            { name: 'mid', value: parsed.mid, domain: '.instagram.com', path: '/', secure: true, httpOnly: false },
-          ].filter(c => c.value)
-
-          for (const c of cookies) {
-            await permSess.cookies.set({
-              url: 'https://www.instagram.com',
-              name: c.name,
-              value: c.value,
-              domain: c.domain,
-              path: c.path,
-              secure: c.secure,
-              httpOnly: c.httpOnly,
-              expirationDate: Math.floor(Date.now() / 1000) + 365 * 86400,
-            })
-          }
-
-          // 生存チェック
+          // instagrapi 経由の生存チェック (ブラウザ不使用)
           try {
-            const probe = await probeAccountHealth({
-              cookies: cookies.map(c => ({
-                name: c.name,
-                value: c.value,
-                domain: c.domain,
-                path: c.path,
-                secure: c.secure,
-                httpOnly: c.httpOnly,
-              })),
-              proxyUrl,
-              proxyUsername: proxyUser,
-              proxyPassword: proxyPass,
+            const proxyForPython = proxyUrl && proxyUser
+              ? `http://${encodeURIComponent(proxyUser)}:${encodeURIComponent(proxyPass ?? '')}@${proxyUrl.replace(/^https?:\/\//, '')}`
+              : proxyUrl ?? ''
+
+            const { stdout } = await execFileAsync('python3', [scriptPath, sessionJson, proxyForPython], {
+              timeout: 30000,
+              maxBuffer: 1024 * 1024,
             })
 
-            if (probe.status === 'alive') {
+            const probeResult = JSON.parse(stdout.trim())
+            if (probeResult.alive) {
               updateAccountStatus(account.id, 'active')
               results.alive++
-              console.log(`[iam-import] ${parsed.username}: 🟢 alive`)
+              console.log(`[iam-import] ${parsed.username}: 🟢 alive (pk=${probeResult.pk})`)
             } else {
               updateAccountStatus(account.id, 'needs_login')
               results.dead++
-              console.log(`[iam-import] ${parsed.username}: 🔴 ${probe.status}`)
+              console.log(`[iam-import] ${parsed.username}: 🔴 ${probeResult.reason ?? probeResult.error}`)
             }
           } catch (probeErr) {
-            // probe失敗でもアカウントは作成済み
             updateAccountStatus(account.id, 'unverified')
-            console.log(`[iam-import] ${parsed.username}: probe error, set unverified`)
+            console.log(`[iam-import] ${parsed.username}: probe error, set unverified`, probeErr instanceof Error ? probeErr.message : probeErr)
           }
 
           results.imported++

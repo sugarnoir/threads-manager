@@ -7,6 +7,9 @@
  * login() は絶対呼ばない。set_settings のみで復元。
  */
 
+/** device_settings と整合する Android UA (pickRandomIphoneUA を使わない) */
+export const IAM_ANDROID_UA = 'Instagram 309.0.0.40.113 Android (33/13; 420dpi; 1080x2400; samsung; SM-A528B; a52sxq; qcom; en_US; 541635890)'
+
 export interface IamParsed {
   username: string
   password: string
