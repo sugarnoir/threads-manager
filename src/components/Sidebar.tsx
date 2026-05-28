@@ -1684,8 +1684,12 @@ export function Sidebar({
                 <code className="block text-[9px] leading-relaxed text-purple-300 font-mono break-all">
                   user|pass|TOTP|key=val;key=val;...
                 </code>
+                <div className="border-t border-zinc-800 my-1" />
+                <code className="block text-[9px] leading-relaxed text-rose-300 font-mono break-all">
+                  user:pass||android-id;uuid;uuid;uuid|headers（IAM-API）
+                </code>
                 <p className="text-zinc-500 text-[9px] leading-tight mt-1">
-                  区切り文字と列構成を自動判定。UA・デバイスID付きも対応。
+                  区切り文字と列構成を自動判定。IAM形式はAndroid UA自動設定。
                 </p>
               </div>
 

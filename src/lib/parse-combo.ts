@@ -222,6 +222,11 @@ function parseMobileSession(line: string): AccountInput | null {
     }
   }
 
+  // IAM-API 形式 (UA空 + androidデバイスID + Authorizationヘッダ): Android UA をデフォルト設定
+  const isIamFormat = !userAgent && deviceId?.startsWith('android-') && mobileHeaders['Authorization']
+  const resolvedUA = userAgent
+    || (isIamFormat ? 'Instagram 309.0.0.40.113 Android (33/13; 420dpi; 1080x2400; samsung; SM-A528B; a52sxq; qcom; en_US; 541635890)' : undefined)
+
   return {
     username,
     password,
@@ -229,7 +234,7 @@ function parseMobileSession(line: string): AccountInput | null {
     cookies: [],
     email: '',
     totpSecret,
-    userAgent: userAgent || undefined,
+    userAgent: resolvedUA,
     deviceId,
     deviceUuid,
     phoneId,
