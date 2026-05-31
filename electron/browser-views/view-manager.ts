@@ -363,10 +363,10 @@ export class ViewManager {
     const containerW = Math.max(cb.width - SIDEBAR_WIDTH, 0)
     const containerH = Math.max(height, 0)
 
-    // yuki_chukimaru のみ: スマホ枠 (390x844) に絞って中央配置
-    if (accountId != null) {
-      const acct = getAccountById(accountId)
-      if (acct?.username === 'yuki_chukimaru') {
+    // モバイル枠表示（無効化済み）
+    if (false) {
+      const acct = getAccountById(accountId!)
+      if (acct) {
         const phoneW = 390
         const phoneH = 844
         const scale = Math.min(containerW / phoneW, containerH / phoneH, 1)
@@ -521,10 +521,9 @@ export class ViewManager {
     //   fire-and-forget にすると loadURL 開始後に proxy が設定され、
     //   Chromium が接続を再確立 → did-finish-load が複数回発火 →
     //   nudgeRepaint の setTimeout が干渉して黒画面になるため。
-    // yuki_chukimaru (id=3) のみモバイルエミュレーション + DevTools 有効化
-    const MOBILE_EMU_ACCOUNT = 'yuki_chukimaru'
+    // モバイルエミュレーション無効化（以前は yuki_chukimaru 専用だったが通常表示に戻した）
     const acctForEmu = getAccountById(accountId)
-    const isMobileEmu = acctForEmu?.username === MOBILE_EMU_ACCOUNT
+    const isMobileEmu = false
 
     // Stealth レベル判定: account override → group stealth_mode → global stealth_mode
     const applyStealth = this._shouldApplyStealth(acctForEmu)
@@ -1973,11 +1972,10 @@ export class ViewManager {
 
     if (!this.views.has(accountId) || entry.view.webContents.isDestroyed()) return
 
-    // ── yuki_chukimaru のみ: モバイル表示 (UA + CSS + touch JS) ─────────────
-    // CDP Emulation.setDeviceMetricsOverride は WebContentsView で SIGSEGV するため使わない
+    // ── モバイル表示 (無効化済み) ─────────────
     try {
-      const acctEmu = getAccountById(accountId)
-      if (acctEmu?.username === 'yuki_chukimaru') {
+      const acctEmu = getAccountById(accountId)!
+      if (false as boolean) {
         console.log(`[mobile-emu] applying CSS/JS mobile emulation for account=${accountId}`)
         const mobileScript = `
           ;(function() {
