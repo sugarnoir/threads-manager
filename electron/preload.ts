@@ -503,6 +503,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     tlsProfiles: () => ipcRenderer.invoke('python:tls-profiles'),
     tlsCheck: (profile?: string) => ipcRenderer.invoke('python:tls-check', profile),
     tlsCompare: () => ipcRenderer.invoke('python:tls-compare'),
+    testPost: (accountId: number) => ipcRenderer.invoke('python:test-post', accountId),
     status: () => ipcRenderer.invoke('python:status') as Promise<{ ready: boolean }>,
   },
 

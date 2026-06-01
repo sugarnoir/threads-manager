@@ -73,6 +73,9 @@ def handle_request(action, request):
     if action == "tls_compare":
         return action_tls_compare(request)
 
+    if action == "post_threads_text":
+        return action_post_threads_text(request)
+
     return {"error": "unknown action: " + action}
 
 
@@ -139,6 +142,131 @@ def action_tls_compare(req):
         "total": len(results),
         "all_unique": unique == len(results),
     }
+
+
+def action_post_threads_text(req):
+    """tls-client 経由で Threads にテキスト投稿"""
+    try:
+        import tls_client
+        import uuid
+        import urllib.parse
+
+        profile = req.get("tls_profile", "safari_ios_16_0")
+        cookies = req.get("cookies", [])
+        csrf_token = req.get("csrf_token", "")
+        user_agent = req.get("user_agent", "")
+        proxy = req.get("proxy")
+        content = req.get("content", "")
+        topic = req.get("topic")
+        app_id = req.get("app_id", "238260118697367")
+
+        if not content:
+            return {"error": "content is empty"}
+        if not csrf_token:
+            return {"error": "csrf_token is required"}
+
+        session = tls_client.Session(
+            client_identifier=profile,
+            random_tls_extension_order=True,
+        )
+
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+
+        # Cookie 注入
+        for c in cookies:
+            session.cookies.set(
+                c["name"],
+                c["value"],
+                domain=c.get("domain", ".threads.com"),
+                path=c.get("path", "/"),
+            )
+
+        # リクエストボディ (TM の restPostTextViaNet と同一構造)
+        self_id = str(uuid.uuid4())
+        upload_id = str(int(time.time() * 1000))
+
+        app_info = json.dumps({
+            "community_flair_id": None,
+            "entry_point": "main_tab_bar",
+            "excluded_inline_media_ids": "[]",
+            "fediverse_composer_enabled": True,
+            "is_reply_approval_enabled": False,
+            "is_spoiler_media": False,
+            "link_attachment_url": None,
+            "reply_control": 0,
+            "reply_id": None,
+            "self_thread_context_id": self_id,
+            "snippet_attachment": None,
+            "special_effects_enabled_str": None,
+            "tag_header": {"display_text": topic} if topic else None,
+            "text_with_entities": {"entities": [], "text": content},
+        })
+
+        body = urllib.parse.urlencode({
+            "audience": "default",
+            "barcelona_source_reply_id": "",
+            "caption": content,
+            "creator_geo_gating_info": json.dumps({"whitelist_country_codes": []}),
+            "cross_share_info": "",
+            "custom_accessibility_caption": "",
+            "gen_ai_detection_method": "",
+            "internal_features": "",
+            "is_meta_only_post": "",
+            "is_paid_partnership": "",
+            "is_upload_type_override_allowed": "1",
+            "music_params": "",
+            "publish_mode": "text_post",
+            "should_include_permalink": "true",
+            "text_post_app_info": app_info,
+            "upload_id": upload_id,
+        })
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "x-csrftoken": csrf_token,
+            "x-ig-app-id": app_id,
+            "x-asbd-id": "129477",
+            "Origin": "https://www.threads.com",
+            "Referer": "https://www.threads.com/",
+            "User-Agent": user_agent,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+        }
+
+        t0 = time.time()
+        resp = session.post(
+            "https://www.threads.com/api/v1/media/configure_text_only_post/",
+            headers=headers,
+            data=body,
+            timeout_seconds=30,
+        )
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        resp_body = resp.text[:1000]
+        result = {
+            "status": resp.status_code,
+            "body": resp_body,
+            "elapsed_ms": elapsed_ms,
+            "profile": profile,
+        }
+
+        # 危険レスポンス警告
+        lower = resp_body.lower()
+        if "checkpoint" in lower or "challenge" in lower:
+            result["warning"] = "checkpoint/challenge detected"
+        if "feedback_required" in lower:
+            result["warning"] = "feedback_required detected"
+
+        try:
+            result["parsed"] = resp.json()
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as e:
+        return {"error": str(e)[:500], "profile": req.get("tls_profile", "?")}
 
 
 def send(obj):
