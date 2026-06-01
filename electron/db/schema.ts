@@ -443,6 +443,48 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN use_threads_mobile_api INTEGER DEFAULT 0")
   }
 
+  // Phase 2: TLS プロファイル + tls-client 投稿フラグ
+  {
+    let tlsProfileAdded = false
+    if (!colNames.includes('tls_profile')) {
+      db.exec("ALTER TABLE accounts ADD COLUMN tls_profile TEXT")
+      tlsProfileAdded = true
+    }
+    if (!colNames.includes('use_tls_client')) {
+      db.exec("ALTER TABLE accounts ADD COLUMN use_tls_client INTEGER DEFAULT 0")
+    }
+    // 自動割当: tls_profile が NULL の垢にプロファイルを割り当て
+    if (tlsProfileAdded) {
+      const unassigned = db.prepare("SELECT id, user_agent FROM accounts WHERE tls_profile IS NULL").all() as { id: number; user_agent: string | null }[]
+      const assignProfile = (id: number, ua: string): string => {
+        const lower = (ua || '').toLowerCase()
+        const mod = id % 100
+        if (lower.includes('iphone') || lower.includes('ios') || lower.includes('barcelona') && lower.includes('ios')) {
+          return mod < 70 ? 'safari_ios_16_0' : 'safari_ios_15_5'
+        }
+        if (lower.includes('android')) {
+          return mod < 60 ? 'chrome_android_13' : 'okhttp4_android_13'
+        }
+        if (lower.includes('macintosh') || lower.includes('mac os')) {
+          if (mod < 50) return 'chrome_120'
+          if (mod < 80) return 'safari_16_0'
+          return 'chrome_117'
+        }
+        if (lower.includes('windows')) {
+          return mod < 70 ? 'chrome_120' : 'chrome_117'
+        }
+        return 'chrome_120'
+      }
+      const stmt = db.prepare("UPDATE accounts SET tls_profile = ? WHERE id = ?")
+      for (const acct of unassigned) {
+        stmt.run(assignProfile(acct.id, acct.user_agent ?? ''), acct.id)
+      }
+      if (unassigned.length > 0) {
+        console.log(`[Migration] Assigned TLS profiles to ${unassigned.length} accounts`)
+      }
+    }
+  }
+
   // groups テーブルに stealth_enabled カラム追加
   {
     const groupCols = db.prepare("PRAGMA table_info(groups)").all() as { name: string }[]

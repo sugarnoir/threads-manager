@@ -66,6 +66,8 @@ export interface Account {
   auth_mode: 'webview' | 'api'
   device_ids_json: string | null
   use_threads_mobile_api: number
+  tls_profile: string | null
+  use_tls_client: number
   created_at: string
   updated_at: string
 }
