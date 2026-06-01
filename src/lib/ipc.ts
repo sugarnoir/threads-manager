@@ -63,6 +63,7 @@ export interface Account {
   api_session_json: string | null
   auth_mode: 'webview' | 'api'
   device_ids_json: string | null
+  use_threads_mobile_api: number
   created_at: string
   updated_at: string
 }

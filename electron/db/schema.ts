@@ -438,6 +438,11 @@ export function initializeSchema(db: Database.Database): void {
     db.exec("ALTER TABLE accounts ADD COLUMN device_ids_json TEXT")
   }
 
+  // Threads Mobile API フラグ (Barcelona App ID + UA で投稿)
+  if (!colNames.includes('use_threads_mobile_api')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN use_threads_mobile_api INTEGER DEFAULT 0")
+  }
+
   // groups テーブルに stealth_enabled カラム追加
   {
     const groupCols = db.prepare("PRAGMA table_info(groups)").all() as { name: string }[]

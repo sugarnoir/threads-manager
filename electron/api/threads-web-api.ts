@@ -15,6 +15,7 @@ import { analyzeAndLog } from '../lib/response-analyzer'
 import { getBloksVersionId }            from '../lib/app-config'
 import { generateBrowserUA, generateMobileUA, getInstagramAppVersion } from '../lib/ua-generator'
 import { getHeadersPatternA, getHeadersPatternB, getUnifiedHeaders } from '../lib/ig-headers'
+import { THREADS_MOBILE_APP_ID, generateBarcelonaUA, generateBarcelonaIOSUA } from '../config/threads-api'
 import { generateAllDeviceIds } from '../lib/device-id-generator'
 import { updateAccountDeviceIds } from '../db/repositories/accounts'
 import { getSetting, setSetting }       from '../db/repositories/settings'
@@ -850,9 +851,29 @@ async function graphqlPost(
 // ── Mobile API helpers (i.instagram.com) ─────────────────────────────────────
 
 const IG_MOBILE_URL    = 'https://i.instagram.com'
-const IG_MOBILE_APP_ID = '238260118697367'  // Threads app ID (text_app)
+const IG_MOBILE_APP_ID = '238260118697367'  // Web 互換 App ID (従来)
 // Threads (Barcelona) iPhone 公式アプリ UA（app_config から動的生成）
 function getIgMobileUA(): string { return generateMobileUA() }
+
+/** use_threads_mobile_api フラグが有効な垢か判定 */
+function useThreadsMobileApi(accountId: number): boolean {
+  const acct = getAccountById(accountId)
+  return !!(acct?.use_threads_mobile_api)
+}
+
+/** 垢のフラグに応じて Mobile App ID を返す */
+function getMobileAppId(accountId: number): string {
+  return useThreadsMobileApi(accountId) ? THREADS_MOBILE_APP_ID : IG_MOBILE_APP_ID
+}
+
+/** 垢のフラグに応じて Mobile UA を返す (Barcelona or 従来) */
+function getMobileUA(accountId: number): string {
+  if (!useThreadsMobileApi(accountId)) return getUA(accountId)
+  // デバイスプロファイル判定: UA に Android が含まれれば Android、それ以外は iOS
+  const acct = getAccountById(accountId)
+  const isAndroid = acct?.user_agent?.includes('Android')
+  return isAndroid ? generateBarcelonaUA() : generateBarcelonaIOSUA()
+}
 
 /** アカウントに割り当てられた iPhone UA を返す。未設定の場合はリストから決定論的に選択 */
 function getAccountIphoneUA(accountId: number): string {
@@ -1149,14 +1170,19 @@ async function mobilePostText(
     upload_id: uploadId,
   }).toString()
 
+  const appId = getMobileAppId(accountId)
+  const ua    = getMobileUA(accountId)
+  const isBarcelona = useThreadsMobileApi(accountId)
+  console.log(`[mobilePostText] account=${accountId} appId=${appId} barcelona=${isBarcelona}`)
+
   const result = await mobileNetRequest(
     'POST',
     `${IG_MOBILE_URL}/api/v1/media/configure_text_only_post/`,
     {
       'Cookie':       cookieHeader,
       'X-CSRFToken':  csrfToken,
-      'X-IG-App-ID':  IG_MOBILE_APP_ID,
-      'User-Agent':   getUA(accountId),
+      'X-IG-App-ID':  appId,
+      'User-Agent':   ua,
       'Content-Type': 'application/x-www-form-urlencoded',
       'Origin':       'https://www.instagram.com',
       'Referer':      'https://www.instagram.com/',
@@ -1186,11 +1212,15 @@ async function mobilePostWithMedia(
   }
   const { cookieHeader, csrfToken: igCsrfToken } = ig
 
+  const appId = getMobileAppId(accountId)
+  const ua    = getMobileUA(accountId)
+  console.log(`[mobilePostWithMedia] account=${accountId} appId=${appId} barcelona=${useThreadsMobileApi(accountId)}`)
+
   const baseHeaders: Record<string, string> = {
     'Cookie':       cookieHeader,
     'X-CSRFToken':  igCsrfToken,
-    'X-IG-App-ID':  IG_MOBILE_APP_ID,
-    'User-Agent':   getUA(accountId),
+    'X-IG-App-ID':  appId,
+    'User-Agent':   ua,
     'Origin':       'https://www.instagram.com',
     'Referer':      'https://www.instagram.com/',
     ...getExtraHeaders(accountId, 'B'),
@@ -1225,10 +1255,10 @@ async function mobilePostWithMedia(
         'offset':                     '0',
         'Content-Type':               'application/octet-stream',
         'x-csrftoken':                threadsCsrf,
-        'x-ig-app-id':                IG_MOBILE_APP_ID,
+        'x-ig-app-id':                appId,
         'Origin':                     THREADS_URL,
         'Referer':                    THREADS_URL + '/',
-        'User-Agent':                 getUA(accountId),
+        'User-Agent':                 ua,
         'Accept-Encoding':            'identity',
       },
       body:      fileData,
@@ -1321,11 +1351,11 @@ async function mobilePostWithMedia(
   const cfgHeaders: Record<string, string> = {
     'Content-Type':    isSidecar ? 'text/plain;charset=UTF-8' : cfgContentType,
     'x-csrftoken':     threadsCsrf,
-    'x-ig-app-id':     IG_MOBILE_APP_ID,
+    'x-ig-app-id':     appId,
     'x-asbd-id':       isSidecar ? '359341' : '129477',
     'Origin':          THREADS_URL,
     'Referer':         THREADS_URL + '/',
-    'User-Agent':      getUA(accountId),
+    'User-Agent':      ua,
     'Accept-Encoding': 'identity',
   }
   if (isSidecar) {
