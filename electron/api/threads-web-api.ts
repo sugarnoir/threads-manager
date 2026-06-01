@@ -16,6 +16,7 @@ import { getBloksVersionId }            from '../lib/app-config'
 import { generateBrowserUA, generateMobileUA, getInstagramAppVersion } from '../lib/ua-generator'
 import { getHeadersPatternA, getHeadersPatternB, getUnifiedHeaders } from '../lib/ig-headers'
 import { THREADS_MOBILE_APP_ID, generateBarcelonaUA, generateBarcelonaIOSUA } from '../config/threads-api'
+import { postTextViaTlsClient } from './tls-client-poster'
 import { generateAllDeviceIds } from '../lib/device-id-generator'
 import { updateAccountDeviceIds } from '../db/repositories/accounts'
 import { getSetting, setSetting }       from '../db/repositories/settings'
@@ -1419,6 +1420,21 @@ export async function apiPostText(
     }
     maybeAlert(mobileResult.error ?? '')
     console.warn(`[WebAPI] mobile post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
+  }
+
+  // ── 経路 TLS: Python tls-client (use_tls_client = 1 の垢のみ) ──────────────
+  {
+    const acctForTls = getAccountById(accountId)
+    if (acctForTls?.use_tls_client && acctForTls.tls_profile) {
+      console.log(`[WebAPI] [TLS Client] account=${accountId} profile=${acctForTls.tls_profile}`)
+      const tlsResult = await postTextViaTlsClient(accountId, text, topic)
+      if (tlsResult.success) {
+        console.log(`[WebAPI] ✓ tls-client post success (mediaId=${tlsResult.mediaId ?? 'n/a'})`)
+        return { success: true }
+      }
+      maybeAlert(tlsResult.body ?? tlsResult.error ?? '')
+      console.warn(`[WebAPI] tls-client failed: ${tlsResult.error} → fallback to Path 1 (view fetch)`)
+    }
   }
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch、最も確実）

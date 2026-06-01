@@ -3,7 +3,7 @@
 ## チェックリスト
 
 - [x] 2A: TLS プロファイル DB 基盤 + 全垢割当
-- [ ] 2B: Path 1 の Python tls-client ルート追加
+- [x] 2B: Path 1 の Python tls-client ルート追加
 - [ ] 2C: Cookie 双方向同期
 - [ ] 2D: 画像投稿対応
 - [ ] 2E: UA/TLS 整合性チェック
