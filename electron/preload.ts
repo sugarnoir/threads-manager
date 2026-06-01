@@ -498,6 +498,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  python: {
+    ping: () => ipcRenderer.invoke('python:ping'),
+    tlsProfiles: () => ipcRenderer.invoke('python:tls-profiles'),
+    status: () => ipcRenderer.invoke('python:status') as Promise<{ ready: boolean }>,
+  },
+
   scheduledImport: {
     start: (args: { rows: unknown[]; intervalMs: number; importOptions: { proxyMode?: string; proxyStartPort?: number } }) =>
       ipcRenderer.invoke('scheduled-import:start', args) as Promise<{ started: boolean; total: number }>,

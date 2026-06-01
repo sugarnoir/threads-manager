@@ -147,6 +147,14 @@ app.whenReady().then(() => {
     startAdsPowerStatusMonitor(mainWindow)
     registerLoginProbeHandlers(mainWindow)
 
+    // Python TLS ワーカー起動 + IPC ハンドラ登録
+    import('./ipc/python-bridge-handlers').then(({ registerPythonBridgeHandlers }) => {
+      registerPythonBridgeHandlers()
+    })
+    import('./lib/python-bridge').then(({ pythonBridge }) => {
+      pythonBridge.start().catch(e => console.error('[PythonBridge] start failed:', e))
+    })
+
     // Auto-start Discord Bot if enabled
     if (getSetting('discord_bot_enabled') === 'true') {
       startBot().then((r) => {
@@ -170,6 +178,12 @@ app.on('before-quit', async () => {
   stopScheduler()
   stopBot()
   stopAdsPowerStatusMonitor()
+
+  // Python ワーカー停止
+  try {
+    const { pythonBridge } = await import('./lib/python-bridge')
+    await pythonBridge.stop()
+  } catch { /* noop */ }
 
   // アプリ終了前にメモリ上のセッションCookieをDBにバックアップする。
   // セッションCookie（有効期限なし）は再起動で消えるため、終了時に保存しておく。
