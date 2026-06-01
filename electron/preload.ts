@@ -501,7 +501,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   python: {
     ping: () => ipcRenderer.invoke('python:ping'),
     tlsProfiles: () => ipcRenderer.invoke('python:tls-profiles'),
+    tlsCheck: (profile?: string) => ipcRenderer.invoke('python:tls-check', profile),
+    tlsCompare: () => ipcRenderer.invoke('python:tls-compare'),
     status: () => ipcRenderer.invoke('python:status') as Promise<{ ready: boolean }>,
+  },
+
+  electronTls: {
+    check: () => ipcRenderer.invoke('tls:electron-check'),
   },
 
   scheduledImport: {
