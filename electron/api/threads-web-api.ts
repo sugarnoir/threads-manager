@@ -1408,14 +1408,18 @@ export async function apiPostText(
   const maybeAlert = (body: string) => { if (!alerted && analyzeAndLog(accountId, body)) alerted = true }
 
   // ── 経路0: Mobile API (i.instagram.com) ─────────────────────────────────────
-  console.log(`[WebAPI] apiPostText account=${accountId} topic=${JSON.stringify(topic)} trying mobile API`)
-  const mobileResult = await mobilePostText(accountId, text, topic)
-  if (mobileResult.success) {
-    console.log(`[WebAPI] ✓ mobile post success`)
-    return { success: true }
+  if (useThreadsMobileApi(accountId)) {
+    console.log(`[WebAPI] [SKIP Path 0] account=${accountId} threadsMobileApi=true → direct to Path 1`)
+  } else {
+    console.log(`[WebAPI] apiPostText account=${accountId} topic=${JSON.stringify(topic)} trying mobile API`)
+    const mobileResult = await mobilePostText(accountId, text, topic)
+    if (mobileResult.success) {
+      console.log(`[WebAPI] ✓ mobile post success`)
+      return { success: true }
+    }
+    maybeAlert(mobileResult.error ?? '')
+    console.warn(`[WebAPI] mobile post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
   }
-  maybeAlert(mobileResult.error ?? '')
-  console.warn(`[WebAPI] mobile post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch、最も確実）
   console.log(`[WebAPI] apiPostText account=${accountId} topic=${JSON.stringify(topic)} trying REST via view`)
@@ -1557,14 +1561,18 @@ export async function apiPostWithMedia(
   const maybeAlert = (body: string) => { if (!alerted && analyzeAndLog(accountId, body)) alerted = true }
 
   // ── 経路0: Mobile API (i.instagram.com) ─────────────────────────────────────
-  console.log(`[WebAPI] apiPostWithMedia account=${accountId} images=${validPaths.length} topic=${JSON.stringify(topic)} trying mobile API`)
-  const mobileResult = await mobilePostWithMedia(accountId, text, validPaths, topic)
-  if (mobileResult.success) {
-    console.log(`[WebAPI] ✓ mobile media post success`)
-    return { success: true }
+  if (useThreadsMobileApi(accountId)) {
+    console.log(`[WebAPI] [SKIP Path 0] account=${accountId} threadsMobileApi=true → direct to Path 1`)
+  } else {
+    console.log(`[WebAPI] apiPostWithMedia account=${accountId} images=${validPaths.length} topic=${JSON.stringify(topic)} trying mobile API`)
+    const mobileResult = await mobilePostWithMedia(accountId, text, validPaths, topic)
+    if (mobileResult.success) {
+      console.log(`[WebAPI] ✓ mobile media post success`)
+      return { success: true }
+    }
+    maybeAlert(mobileResult.error ?? '')
+    console.warn(`[WebAPI] mobile media post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
   }
-  maybeAlert(mobileResult.error ?? '')
-  console.warn(`[WebAPI] mobile media post failed: ${mobileResult.error} (status=${mobileResult.status}) → falling through`)
 
   // ── 経路1: REST API via WebContentsView（同一オリジン fetch）
   console.log(`[WebAPI] apiPostWithMedia account=${accountId} images=${validPaths.length} trying REST via view`)
